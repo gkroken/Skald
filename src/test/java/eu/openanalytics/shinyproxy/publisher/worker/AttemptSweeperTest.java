@@ -308,8 +308,8 @@ public class AttemptSweeperTest {
     @Test
     public void aSweepHelperADeadProcessLeftIsRemovedAndARunningOneIsNot() throws Exception {
         // 2fc53d9 N1: the inventory helper is privileged and fresh-named; a JVM killed while
-        // it ran leaves it. It is labelled, and the next inventory removes a stopped one. A
-        // running one is another instance's sweep in progress.
+        // it ran leaves it. It is labelled, and a later inventory removes a stopped one once
+        // it is stale. A running one is another instance's sweep in progress.
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String stale = "skald-sweep-stale-" + suffix;
         String running = "skald-sweep-running-" + suffix;
@@ -338,6 +338,10 @@ public class AttemptSweeperTest {
             new DockerWorkerLauncher(recording, WorkerProfile.load("runc-rootless"), Images.of(WORKER, GATEWAY))
                     .attemptsPresent();
             assertEquals(List.of(label), helperLabels);
+            // Fresh, the stopped one may be another instance's sweep between its create and
+            // its start (e2d6480 N1): left alone until it is older than any sweep's helper.
+            assertEquals("created", docker.inspectContainer(stale).state().status());
+            launcher.attemptsPresent(Duration.ZERO);
             assertThrows(org.mandas.docker.client.exceptions.ContainerNotFoundException.class,
                     () -> docker.inspectContainer(stale), "the stale helper is gone");
             assertTrue(docker.inspectContainer(running).state().running(), "the running one is left alone");

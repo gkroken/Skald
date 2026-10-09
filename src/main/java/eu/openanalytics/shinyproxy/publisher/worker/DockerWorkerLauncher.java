@@ -92,6 +92,12 @@ public final class DockerWorkerLauncher {
     private static final Pattern ATTEMPT_VOLUME = Pattern.compile("skald-b-([a-z0-9]{8,40})-(ctx|ws|sock|conf)");
     /** Marks the sweep's own inventory helper, so one a dead JVM left can be found. */
     static final String SWEEP_LABEL = "eu.skald.sweep-helper";
+    /**
+     * A stopped sweep helper older than this is a dead process's. The helper lists a
+     * directory and reads the loop devices: seconds, and well under a minute on this host's
+     * slowest measured daemon (a 52.5 s container kill).
+     */
+    static final java.time.Duration STALE_SWEEP_HELPER = java.time.Duration.ofMinutes(10);
     static final long GATEWAY_MEMORY = 256L << 20;
     static final int REMOVAL_ATTEMPTS = 12;
     static final long REMOVAL_PAUSE_MILLIS = 5_000;
@@ -525,10 +531,16 @@ public final class DockerWorkerLauncher {
     /**
      * Every attempt id with something on this host: a container, volume or network carrying
      * the attempt label, a volume the daemon re-created under one of its names for a late
-     * bind, a quota image on {@value #QUOTA_IMAGES_VOLUME}, or a loop device backed by one. The reconciliation sweep's inventory: what it finds here and the
-     * database no longer counts as unfinished, it disposes of.
+     * bind, a quota image on {@value #QUOTA_IMAGES_VOLUME}, or a loop device backed by one.
+     * The reconciliation sweep's inventory: what it finds here and the database no longer
+     * counts as unsettled, it disposes of.
      */
     public java.util.Set<String> attemptsPresent() throws InterruptedException, DockerException {
+        return attemptsPresent(STALE_SWEEP_HELPER);
+    }
+
+    /** As above, taking a stopped sweep helper older than {@code staleAfter} for a dead one. */
+    java.util.Set<String> attemptsPresent(java.time.Duration staleAfter) throws InterruptedException, DockerException {
         java.util.Set<String> ids = new java.util.TreeSet<>();
         docker.listContainers(ListContainersParam.allContainers(), ListContainersParam.withLabel(ATTEMPT_LABEL))
                 .forEach(c -> add(ids, c.labels()));
@@ -550,10 +562,13 @@ public final class DockerWorkerLauncher {
         }
         // A sweep helper whose JVM died while it ran is left stopped, privileged and under a
         // name nothing else knows: removed here, before this sweep makes its own (2fc53d9 N1).
-        // A running one is another instance's sweep in progress and is left alone.
+        // Another instance's sweep in progress has its helper running, or "created" before
+        // its start and "exited" before its logs are read (e2d6480 N1): only a stopped one
+        // older than any sweep could still be using it is taken for a dead one.
+        long staleBefore = java.time.Instant.now().minus(staleAfter).getEpochSecond();
         for (var c : docker.listContainers(ListContainersParam.allContainers(),
                 ListContainersParam.withLabel(SWEEP_LABEL))) {
-            if (!"running".equals(c.state())) {
+            if (!"running".equals(c.state()) && c.created() != null && c.created() <= staleBefore) {
                 // A failure here does not stop this sweep; the next one tries again.
                 quietly(new ArrayList<>(), () -> retrying(() -> docker.removeContainer(c.id(),
                         RemoveContainerParam.forceKill())));
