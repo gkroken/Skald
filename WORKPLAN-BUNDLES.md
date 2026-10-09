@@ -2022,7 +2022,12 @@ below are marked passed by this planning document.
       10 minutes. It takes the host's inventory of attempts FIRST (attempt-labelled containers,
       volumes and networks, quota images, loop devices), then reads the unfinished builds
       (QUEUED, RUNNING, PUBLISHING, whatever the lease says), and disposes of a build-id
-      attempt only if its build is not in that set: never a live one, on any instance. It
+      attempt only if its build is not in that set: never a live one, on any instance. A
+      build that finished within `sweep-grace` (15 min, longer than the settle) is left alone
+      too: its work thread may outlive it in a daemon call, and a late bind of a removed
+      volume makes the daemon re-create it unlabelled. Disposal therefore also removes a
+      volume under the attempt's names that the daemon made for a bind (no labels, local, no
+      options), and the inventory finds one by name after a crash (2fc53d9-F1). It
       finishes the log of a build lost (INTERRUPTED or TIMED_OUT) within the last day that has
       no final.json, with outcome `INTERRUPTED` (0adc78e N2, e4306c6 N1). `registry-api`
       carries the build credential in a Basic header: operators should use https or a

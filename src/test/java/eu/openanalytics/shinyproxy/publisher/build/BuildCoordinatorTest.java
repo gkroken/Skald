@@ -361,7 +361,7 @@ public class BuildCoordinatorTest {
     }
 
     @Test
-    public void theSweepSeesUnfinishedBuildsAsLiveAndRecentlyLostOnesAsLost() {
+    public void theSweepLeavesUnfinishedAndJustFinishedBuildsAloneAndSeesRecentlyLostOnes() {
         BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
         UUID queuedBuild = queued("alice");
         UUID running = queued("bob");
@@ -371,7 +371,10 @@ public class BuildCoordinatorTest {
         jdbc.update("UPDATE skald.build SET state = 'FAILED', finished_at = now() WHERE id = ?", failed);
         // The expired RUNNING lease is still unfinished until the reaper settles it: a worker
         // may still be stopping itself.
-        assertEquals(java.util.Set.of(queuedBuild, running), coordinator.unfinishedBuildIds());
+        assertEquals(java.util.Set.of(queuedBuild, running), coordinator.unsettledBuildIds(Duration.ZERO));
+        // A build that has just finished is left alone for the grace: its work thread may
+        // still be in a daemon call (2fc53d9-F1).
+        assertEquals(java.util.Set.of(queuedBuild, running, failed), coordinator.unsettledBuildIds(Duration.ofMinutes(15)));
 
         assertEquals(1, coordinator.reap(), "the expired lease is settled");
         UUID timedOut = queued("dave");
@@ -387,7 +390,10 @@ public class BuildCoordinatorTest {
         assertEquals(4, r.generation());
         assertEquals(contentOf(running), r.contentId());
         assertEquals(java.util.Set.of(queuedBuild, timedOut, old, failed).stream()
-                .filter(coordinator.unfinishedBuildIds()::contains).toList(), List.of(queuedBuild));
+                .filter(coordinator.unsettledBuildIds(Duration.ZERO)::contains).toList(), List.of(queuedBuild));
+        assertEquals(java.util.Set.of(queuedBuild, timedOut, failed), java.util.Set.of(queuedBuild, timedOut, old, failed)
+                .stream().filter(coordinator.unsettledBuildIds(Duration.ofHours(1))::contains)
+                .collect(java.util.stream.Collectors.toSet()), "finished two days ago is past any grace");
     }
 
     @Test

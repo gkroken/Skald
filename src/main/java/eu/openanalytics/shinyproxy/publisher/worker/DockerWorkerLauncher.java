@@ -88,6 +88,10 @@ public final class DockerWorkerLauncher {
     /** Where quota images live: one shared named volume, one file per attempt. */
     static final String QUOTA_IMAGES_VOLUME = "skald-quota-images";
     private static final Pattern ATTEMPT = Pattern.compile("[a-z0-9]{8,40}");
+    /** One of an attempt's volume names (handle()), with the attempt id as group 1. */
+    private static final Pattern ATTEMPT_VOLUME = Pattern.compile("skald-b-([a-z0-9]{8,40})-(ctx|ws|sock|conf)");
+    /** Marks the sweep's own inventory helper, so one a dead JVM left can be found. */
+    static final String SWEEP_LABEL = "eu.skald.sweep-helper";
     static final long GATEWAY_MEMORY = 256L << 20;
     static final int REMOVAL_ATTEMPTS = 12;
     static final long REMOVAL_PAUSE_MILLIS = 5_000;
@@ -378,11 +382,14 @@ public final class DockerWorkerLauncher {
     public List<String> dispose(Handle h) throws InterruptedException {
         // Only what carries THIS attempt's label is removed: an object that merely has one
         // of its names (a refused launch over a foreign volume, 9a2658d-F1) is not ours.
+        // Also a volume the daemon made under one of the attempt's names for a bind (no labels,
+        // the local driver, no options): a work thread whose call was still in flight when
+        // the volume was removed re-creates it that way, beyond any label (2fc53d9-F1).
         List<String> errors = new ArrayList<>(removeContainers(h));
-        for (String v : List.of(h.contextVolume(), h.workspaceVolume(), h.socketVolume(),
-                h.configVolume())) {
+        for (String v : volumeNames(h)) {
             quietly(errors, () -> {
-                if (ours(docker.inspectVolume(v).labels(), h)) {
+                Volume found = docker.inspectVolume(v);
+                if (ours(found.labels(), h) || madeForABind(found)) {
                     retrying(() -> docker.removeVolume(v));
                 }
             });
@@ -415,8 +422,9 @@ public final class DockerWorkerLauncher {
      * of the attempt, untrusted code included, ends here. Volumes, the network and the loop
      * device are left in place, so a caller that may race the attempt's own work thread can
      * stop all code without removing a volume that thread might still bind (Docker would
-     * re-create a missing named volume for a bind, UNLABELLED, and no disposal would ever
-     * find it: 0c71146-F1). Returns the errors met.
+     * re-create a missing named volume for a bind, UNLABELLED: 0c71146-F1. dispose() now
+     * removes such a volume too, but only a disposal after that thread's last call can be
+     * sure there is none to come, 2fc53d9-F1). Returns the errors met.
      */
     public List<String> removeContainers(Handle h) throws InterruptedException {
         List<String> errors = new ArrayList<>();
@@ -483,10 +491,41 @@ public final class DockerWorkerLauncher {
         return labels != null && h.attemptId().equals(labels.get(ATTEMPT_LABEL));
     }
 
+    private static List<String> volumeNames(Handle h) {
+        return List.of(h.contextVolume(), h.workspaceVolume(), h.socketVolume(), h.configVolume());
+    }
+
+    /**
+     * A volume as the daemon makes one for a bind of a name that does not exist: no labels,
+     * the local driver, no options. Every volume the launcher creates carries the attempt
+     * label, so under one of an attempt's names (a random build id) this is a late bind's
+     * re-creation, not something an operator made (2fc53d9-F1). A volume with options or
+     * labels (a stale or foreign one, 9a2658d-F1) is never taken for one.
+     */
+    private static boolean madeForABind(Volume v) {
+        return (v.labels() == null || v.labels().isEmpty()) && "local".equals(v.driver())
+                && (v.options() == null || v.options().isEmpty());
+    }
+
+    /** The attempt's volumes the daemon re-created for a late bind (see madeForABind). */
+    private List<String> madeForABind(Handle h) throws DockerException, InterruptedException {
+        List<String> found = new ArrayList<>();
+        for (String v : volumeNames(h)) {
+            try {
+                if (madeForABind(docker.inspectVolume(v))) {
+                    found.add(v);
+                }
+            } catch (NotFoundException | VolumeNotFoundException e) {
+                // gone
+            }
+        }
+        return found;
+    }
+
     /**
      * Every attempt id with something on this host: a container, volume or network carrying
-     * the attempt label, a quota image on {@value #QUOTA_IMAGES_VOLUME}, or a loop device
-     * backed by one. The reconciliation sweep's inventory: what it finds here and the
+     * the attempt label, a volume the daemon re-created under one of its names for a late
+     * bind, a quota image on {@value #QUOTA_IMAGES_VOLUME}, or a loop device backed by one. The reconciliation sweep's inventory: what it finds here and the
      * database no longer counts as unfinished, it disposes of.
      */
     public java.util.Set<String> attemptsPresent() throws InterruptedException, DockerException {
@@ -498,11 +537,34 @@ public final class DockerWorkerLauncher {
             volumes.forEach(v -> add(ids, v.labels()));
         }
         docker.listNetworks(ListNetworksParam.withLabel(ATTEMPT_LABEL)).forEach(n -> add(ids, n.labels()));
+        // By NAME too: a volume the daemon re-created for a late bind carries no label
+        // (2fc53d9-F1), and after a crash it may be all that is left of the attempt.
+        List<Volume> all = docker.listVolumes().volumes();
+        if (all != null) {
+            for (Volume v : all) {
+                java.util.regex.Matcher n = ATTEMPT_VOLUME.matcher(v.name());
+                if (n.matches() && madeForABind(handle(n.group(1))).contains(v.name())) {
+                    ids.add(n.group(1));
+                }
+            }
+        }
+        // A sweep helper whose JVM died while it ran is left stopped, privileged and under a
+        // name nothing else knows: removed here, before this sweep makes its own (2fc53d9 N1).
+        // A running one is another instance's sweep in progress and is left alone.
+        for (var c : docker.listContainers(ListContainersParam.allContainers(),
+                ListContainersParam.withLabel(SWEEP_LABEL))) {
+            if (!"running".equals(c.state())) {
+                // A failure here does not stop this sweep; the next one tries again.
+                quietly(new ArrayList<>(), () -> retrying(() -> docker.removeContainer(c.id(),
+                        RemoveContainerParam.forceKill())));
+            }
+        }
         // Quota images and the loop devices backed by them: a launch that died between losetup
         // and its labelled volume leaves only these.
         String sweep = Long.toHexString(System.nanoTime());
         String out = runHelper("sweep-" + sweep, images.setup(), true, List.of(QUOTA_IMAGES_VOLUME + ":/s"), List.of(),
-                List.of("sh", "-c", "ls /s; cat /sys/block/loop*/loop/backing_file 2>/dev/null; true"), Map.of());
+                List.of("sh", "-c", "ls /s; cat /sys/block/loop*/loop/backing_file 2>/dev/null; true"),
+                Map.of(SWEEP_LABEL, "true"));
         java.util.regex.Matcher m = Pattern.compile("skald-quota-([a-z0-9]{8,40})\\.img").matcher(out);
         while (m.find()) {
             ids.add(m.group(1));
@@ -517,7 +579,10 @@ public final class DockerWorkerLauncher {
         }
     }
 
-    /** What still exists for this attempt: containers, volumes, network, attached image. */
+    /**
+     * What still exists for this attempt: containers, volumes (labelled, or re-created by the
+     * daemon for a late bind), network, attached image.
+     */
     public List<String> leftovers(Handle h) throws InterruptedException {
         List<String> left = new ArrayList<>();
         try {
@@ -529,6 +594,7 @@ public final class DockerWorkerLauncher {
             if (volumes != null) {
                 volumes.forEach(v -> left.add("volume " + v.name()));
             }
+            madeForABind(h).forEach(v -> left.add("volume " + v + " (unlabelled, made by the daemon for a bind)"));
             docker.listNetworks(ListNetworksParam.withLabel(ATTEMPT_LABEL, h.attemptId()))
                     .forEach(n -> left.add("network " + n.name()));
             String attached = runHelper("check-" + h.attemptId(), images.setup(), true,

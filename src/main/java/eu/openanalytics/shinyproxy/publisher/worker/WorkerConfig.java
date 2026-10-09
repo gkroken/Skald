@@ -66,8 +66,9 @@ import java.util.Set;
  * shipped catalog, and its registry is the one the gateway allows, {@code <registry>:5000}
  * (1ffdb20 review N1: the gateway's registry port, buildkitd.toml's plain-http entry and the
  * client's credential are all keyed on that); each mirror's host is one the gateway lets the
- * worker reach; the poll is at most renew_every / 2 (BuildDriver's bound); the four images
- * the launcher runs are present.
+ * worker reach; the poll is at most renew_every / 2 (BuildDriver's bound); the sweep's
+ * period is positive and its grace longer than the driver's settle; the four images the
+ * launcher runs are present.
  */
 @Configuration
 @ConditionalOnProperty(name = "skald.builds.worker.enabled", havingValue = "true")
@@ -106,6 +107,11 @@ public class WorkerConfig {
     private Duration idlePause = Duration.ofSeconds(2);
     /** How often the reconciliation sweep runs after its first run at startup. */
     private Duration sweepPeriod = Duration.ofMinutes(10);
+    /**
+     * How long after a build finishes the sweep still leaves its attempt alone: its work
+     * thread may outlive the driver's settle in a daemon call (2fc53d9-F1).
+     */
+    private Duration sweepGrace = Duration.ofMinutes(15);
     private String bundleBucket = "skald-bundles";
     private String logBucket = "skald-logs";
 
@@ -180,7 +186,7 @@ public class WorkerConfig {
                                               ObjectProvider<ObjectStore> store) {
         BuildCoordinator c = coordinator.getObject();
         return new AttemptSweeper(new DockerWorkerLauncher(skaldWorkerDocker, WorkerProfile.load("runc-rootless"),
-                Images.of(workerImage, gatewayImage)), c::unfinishedBuildIds, () -> c.recentlyLost(Duration.ofDays(1)),
+                Images.of(workerImage, gatewayImage)), () -> c.unsettledBuildIds(sweepGrace), () -> c.recentlyLost(Duration.ofDays(1)),
                 new BuildLogWriter(store.getObject(), logBucket), sweepPeriod);
     }
 
@@ -196,6 +202,13 @@ public class WorkerConfig {
             if (named[1] == null || named[1].isBlank()) {
                 problems.add("skald.builds.worker." + named[0] + " is not set");
             }
+        }
+        if (sweepPeriod.isNegative() || sweepPeriod.isZero()) {
+            problems.add("sweep-period " + sweepPeriod + " must be positive");
+        }
+        if (sweepGrace.compareTo(settle) <= 0) {
+            problems.add("sweep-grace " + sweepGrace + " must be longer than settle (" + settle
+                    + "): a stopped attempt's work thread may still be in a daemon call that long");
         }
         if (poll.isNegative() || poll.isZero() || poll.compareTo(settings.renewEvery().dividedBy(2)) > 0) {
             problems.add("poll " + poll + " must be positive and at most renew_every / 2 ("
@@ -331,6 +344,10 @@ public class WorkerConfig {
 
     public void setSweepPeriod(Duration sweepPeriod) {
         this.sweepPeriod = sweepPeriod;
+    }
+
+    public void setSweepGrace(Duration sweepGrace) {
+        this.sweepGrace = sweepGrace;
     }
 
     public void setBundleBucket(String bundleBucket) {

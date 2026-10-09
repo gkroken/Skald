@@ -41,7 +41,11 @@ package eu.openanalytics.shinyproxy.publisher.storage;
  *                     code, e.g. {@code FAILED:BUILD_FAILED}), written by the driver; or
  *                     {@code INTERRUPTED}, written by the reconciliation sweep for an
  *                     attempt the platform lost whose own writer never finished its log
- *                     (the tail it held in memory is gone); see {@link #requireOutcome}
+ *                     (the tail it held in memory is gone). The sweep may write it while
+ *                     that writer still lives (a worker slow to stop): final.json is
+ *                     create-only, so the writer's own finish then loses, and chunks it
+ *                     writes later lie past lastSequence and are not read (2fc53d9 N2);
+ *                     see {@link #requireOutcome}
  * @param complete     whether every chunk the writer produced is present. False means the
  *                     log itself is missing pieces, which is different from a build that
  *                     failed: the build may have been fine and the log lost

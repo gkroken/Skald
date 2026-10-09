@@ -360,14 +360,19 @@ public final class BuildCoordinator {
     }
 
     /**
-     * Every build that is not finished (QUEUED, RUNNING or PUBLISHING), whatever its lease
-     * says. The reconciliation sweep disposes of an attempt's objects only when its build is
-     * NOT in this set: an expired lease the reaper has not settled yet may still belong to a
-     * worker that is stopping itself, here or on another instance.
+     * The builds whose attempts the reconciliation sweep must leave alone: every build that
+     * is not finished (QUEUED, RUNNING or PUBLISHING), whatever its lease says, and every
+     * build that finished within {@code grace}. An expired lease the reaper has not settled
+     * yet may still belong to a worker that is stopping itself, here or on another instance;
+     * and a build that has just finished may still have a work thread in a daemon call (the
+     * driver returns after its settle while that thread disposes later, 2fc53d9-F1). The
+     * grace is not a bound on that thread: the launcher's disposal also removes what a late
+     * call re-creates. It keeps the sweep from racing a work thread as a matter of routine.
      */
-    public java.util.Set<UUID> unfinishedBuildIds() {
+    public java.util.Set<UUID> unsettledBuildIds(java.time.Duration grace) {
         return new java.util.HashSet<>(jdbc.queryForList(
-                "SELECT id FROM skald.build WHERE state IN ('QUEUED', 'RUNNING', 'PUBLISHING')", UUID.class));
+                "SELECT id FROM skald.build WHERE state IN ('QUEUED', 'RUNNING', 'PUBLISHING')"
+                        + " OR finished_at > now() - ?::interval", UUID.class, grace.toSeconds() + " seconds"));
     }
 
     /** A build the platform lost, whose log its own writer may never have finished. */

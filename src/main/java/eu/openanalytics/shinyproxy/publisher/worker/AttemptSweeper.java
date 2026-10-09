@@ -45,15 +45,25 @@ import java.util.regex.Pattern;
  * attempts the platform lost.
  *
  * <p><b>Never a live attempt.</b> The inventory (DockerWorkerLauncher.attemptsPresent:
- * labelled containers, volumes and networks, quota images, loop devices) is taken FIRST,
- * the set of unfinished builds SECOND. An attempt's objects exist only after its claim has
- * committed RUNNING, so anything in the inventory whose build was unfinished then is still
- * in the set read after it, and is left alone. That set counts QUEUED, RUNNING and
+ * labelled containers, volumes and networks, volumes the daemon re-created under an
+ * attempt's names, quota images, loop devices) is taken FIRST, the set of unsettled builds
+ * (BuildCoordinator.unsettledBuildIds) SECOND. An attempt's objects exist only after its
+ * claim has committed RUNNING, so anything in the inventory whose build was unfinished then
+ * is still in the set read after it, and is left alone. That set counts QUEUED, RUNNING and
  * PUBLISHING whatever the lease says: an expired lease the reaper has not settled may
  * belong to a worker still stopping itself, here or on another instance. Only an id that is
  * a build id (32 hex) is ever disposed of; other attempt ids are not this platform's builds.
  * Disposal itself is label-checked (DockerWorkerLauncher.dispose), and a sweep that meets
  * an error tries again next period.
+ *
+ * <p><b>Nor its late calls (2fc53d9-F1).</b> A finished build's work thread can outlive it:
+ * the driver returns after its settle while that thread is still in a daemon call, and a
+ * call that binds a volume the sweep removed makes the daemon re-create it, unlabelled. So
+ * the set also holds every build finished within a grace (longer than the settle), which
+ * keeps the sweep from racing such a thread as a matter of routine. The grace is not a
+ * bound, since a daemon call has none: what makes the end state clean is that disposal
+ * also removes a volume re-created for a bind, and that thread's own disposal is its last
+ * act; if the process dies first, the next sweep finds the volume by its name.
  *
  * <p><b>Lost logs.</b> A build the reaper made INTERRUPTED or TIMED_OUT may never have had
  * its log finished: its writer held the tail in memory and died, or stopped. For each such
@@ -70,24 +80,24 @@ public final class AttemptSweeper {
     public record Report(List<String> disposed, List<String> leftBehind, List<UUID> logsFinished) { }
 
     private final DockerWorkerLauncher launcher;
-    private final Supplier<Set<UUID>> unfinished;
+    private final Supplier<Set<UUID>> unsettled;
     private final Supplier<List<LostAttempt>> lost;
     private final BuildLogWriter logs;
     private final Duration period;
     private final java.util.function.Predicate<String> scope;
     private ScheduledExecutorService timer;
 
-    public AttemptSweeper(DockerWorkerLauncher launcher, Supplier<Set<UUID>> unfinished,
+    public AttemptSweeper(DockerWorkerLauncher launcher, Supplier<Set<UUID>> unsettled,
                           Supplier<List<LostAttempt>> lost, BuildLogWriter logs, Duration period) {
-        this(launcher, unfinished, lost, logs, period, id -> true);
+        this(launcher, unsettled, lost, logs, period, id -> true);
     }
 
     /** As above, sweeping only attempt ids {@code scope} accepts (a test's own, on a shared host). */
-    AttemptSweeper(DockerWorkerLauncher launcher, Supplier<Set<UUID>> unfinished, Supplier<List<LostAttempt>> lost,
+    AttemptSweeper(DockerWorkerLauncher launcher, Supplier<Set<UUID>> unsettled, Supplier<List<LostAttempt>> lost,
                    BuildLogWriter logs, Duration period, java.util.function.Predicate<String> scope) {
         this.scope = scope;
         this.launcher = launcher;
-        this.unfinished = unfinished;
+        this.unsettled = unsettled;
         this.lost = lost;
         this.logs = logs;
         this.period = period;
@@ -95,7 +105,7 @@ public final class AttemptSweeper {
 
     public Report sweep() throws Exception {
         Set<String> present = launcher.attemptsPresent();
-        Set<UUID> live = unfinished.get();
+        Set<UUID> live = unsettled.get();
         List<String> disposed = new ArrayList<>();
         List<String> leftBehind = new ArrayList<>();
         for (String id : present) {

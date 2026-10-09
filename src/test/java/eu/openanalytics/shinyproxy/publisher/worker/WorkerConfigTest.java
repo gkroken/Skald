@@ -88,6 +88,14 @@ public class WorkerConfigTest {
         zeroPoll.setPoll(Duration.ZERO);
         assertTrue(only(zeroPoll).contains("must be positive"), only(zeroPoll));
 
+        // 2fc53d9-F1: a grace no longer than the settle would sweep a stopping attempt routinely.
+        WorkerConfig shortGrace = valid(dir);
+        shortGrace.setSweepGrace(Duration.ofSeconds(30));
+        assertTrue(only(shortGrace).contains("sweep-grace PT30S must be longer than settle"), only(shortGrace));
+        WorkerConfig zeroPeriod = valid(dir);
+        zeroPeriod.setSweepPeriod(Duration.ZERO);
+        assertTrue(only(zeroPeriod).contains("sweep-period PT0S must be positive"), only(zeroPeriod));
+
         WorkerConfig unreachableMirror = valid(dir);
         unreachableMirror.setCranMirror("http://cran.example.org/");
         assertTrue(only(unreachableMirror).contains("not in repos or private-mirrors"), only(unreachableMirror));
