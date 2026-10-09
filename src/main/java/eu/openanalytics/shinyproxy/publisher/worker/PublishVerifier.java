@@ -58,7 +58,7 @@ import java.util.regex.Pattern;
 public final class PublishVerifier implements BuildRunner.Publishing {
 
     private static final Pattern IMAGE = Pattern.compile(
-            "[a-z0-9.-]+:5000/([a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*)"
+            "([a-z0-9.-]+:5000)/([a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*)"
                     + "@(sha256:[0-9a-f]{64})");
     private static final String ACCEPT = String.join(", ",
             "application/vnd.oci.image.index.v1+json", "application/vnd.oci.image.manifest.v1+json",
@@ -66,21 +66,23 @@ public final class PublishVerifier implements BuildRunner.Publishing {
             "application/vnd.docker.distribution.manifest.v2+json");
 
     private final URI registryApi;
+    private final String registry;
     private final Credential credential;
     private final BuildLogWriter logs;
     private final HttpClient http;
 
-    public PublishVerifier(URI registryApi, Credential credential, BuildLogWriter logs) {
-        this(registryApi, credential, logs, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10))
+    public PublishVerifier(URI registryApi, String registry, Credential credential, BuildLogWriter logs) {
+        this(registryApi, registry, credential, logs, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10))
                 .followRedirects(HttpClient.Redirect.NEVER).build());
     }
 
-    PublishVerifier(URI registryApi, Credential credential, BuildLogWriter logs, HttpClient http) {
+    PublishVerifier(URI registryApi, String registry, Credential credential, BuildLogWriter logs, HttpClient http) {
         String api = registryApi.toString();
         if (!(api.startsWith("http://") || api.startsWith("https://")) || api.endsWith("/")) {
             throw new IllegalArgumentException("registry-api is http(s)://host[:port] with no trailing '/': " + api);
         }
         this.registryApi = registryApi;
+        this.registry = registry;
         this.credential = credential;
         this.logs = logs;
         this.http = http;
@@ -92,8 +94,13 @@ public final class PublishVerifier implements BuildRunner.Publishing {
         if (!m.matches()) {
             throw new IllegalStateException("not a pushed image by digest: " + image);
         }
-        String repository = m.group(1);
-        String digest = m.group(2);
+        // The driver builds the reference from the same configuration; checked rather than
+        // trusted (5cd0826 review N1).
+        if (!m.group(1).equals(registry + ":5000")) {
+            throw new IllegalStateException("the image names registry " + m.group(1) + ", not " + registry + ":5000");
+        }
+        String repository = m.group(2);
+        String digest = m.group(3);
         HttpResponse<Void> head = http.send(HttpRequest.newBuilder(
                         URI.create(registryApi + "/v2/" + repository + "/manifests/" + digest))
                 .method("HEAD", HttpRequest.BodyPublishers.noBody())

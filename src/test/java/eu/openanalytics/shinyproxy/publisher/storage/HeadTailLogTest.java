@@ -375,7 +375,7 @@ class HeadTailLogTest {
         UUID c = UUID.randomUUID(), b = UUID.randomUUID();
         BuildLogWriter writer = new BuildLogWriter(store, BUCKET);
         for (String bad : List.of("built", "SUCCEEDED", "FAILED", "FAILED:", "FAILED:build", "FAILED:BUILD FAILED",
-                "FAILED:_X", "BUILT\n", "STOPPED ", "INTERRUPTED", "FAILED:" + "X".repeat(33))) {
+                "FAILED:_X", "BUILT\n", "STOPPED ", "interrupted", "FAILED:" + "X".repeat(33))) {
             assertThrows(IllegalArgumentException.class, () -> writer.finalise(c, b, 1, bad, false), bad);
         }
         assertTrue(writer.readFinal(c, b).isEmpty(), "nothing was written");
@@ -384,7 +384,9 @@ class HeadTailLogTest {
         assertThrows(IllegalArgumentException.class, () -> log.finish("built"));
         assertFalse(log.failed(), "a bad outcome is not a storage failure");
         assertEquals(0, chunks(c, b), "and nothing was flushed for it");
-        for (String good : List.of("BUILT", "STOPPED", "FAILED:BUILD_FAILED", "FAILED:X", "FAILED:" + "X".repeat(32))) {
+        // INTERRUPTED: the reconciliation sweep's, for a lost attempt whose own writer never finished.
+        for (String good : List.of("BUILT", "STOPPED", "INTERRUPTED", "FAILED:BUILD_FAILED", "FAILED:X",
+                "FAILED:" + "X".repeat(32))) {
             assertEquals(good, LogFinal.requireOutcome(good));
         }
         assertEquals("FAILED:LOG_STORAGE", log.finish("FAILED:LOG_STORAGE").orElseThrow().outcome());

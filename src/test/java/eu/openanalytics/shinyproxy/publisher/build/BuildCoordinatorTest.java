@@ -361,6 +361,36 @@ public class BuildCoordinatorTest {
     }
 
     @Test
+    public void theSweepSeesUnfinishedBuildsAsLiveAndRecentlyLostOnesAsLost() {
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        UUID queuedBuild = queued("alice");
+        UUID running = queued("bob");
+        jdbc.update("UPDATE skald.build SET state = 'RUNNING', lease_owner = 'n1', lease_generation = 4,"
+                + " lease_expires_at = now() - interval '1 minute', deadline_at = now() + interval '1 hour' WHERE id = ?", running);
+        UUID failed = queued("carol");
+        jdbc.update("UPDATE skald.build SET state = 'FAILED', finished_at = now() WHERE id = ?", failed);
+        // The expired RUNNING lease is still unfinished until the reaper settles it: a worker
+        // may still be stopping itself.
+        assertEquals(java.util.Set.of(queuedBuild, running), coordinator.unfinishedBuildIds());
+
+        assertEquals(1, coordinator.reap(), "the expired lease is settled");
+        UUID timedOut = queued("dave");
+        jdbc.update("UPDATE skald.build SET state = 'TIMED_OUT', finished_at = now(), lease_generation = 2 WHERE id = ?", timedOut);
+        UUID old = queued("erin");
+        jdbc.update("UPDATE skald.build SET state = 'INTERRUPTED', finished_at = now() - interval '2 days' WHERE id = ?", old);
+
+        var lost = coordinator.recentlyLost(Duration.ofDays(1));
+        assertEquals(java.util.Set.of(running, timedOut),
+                lost.stream().map(BuildCoordinator.LostAttempt::buildId).collect(java.util.stream.Collectors.toSet()),
+                "INTERRUPTED and TIMED_OUT within the window; not FAILED, not older");
+        var r = lost.stream().filter(a -> a.buildId().equals(running)).findFirst().orElseThrow();
+        assertEquals(4, r.generation());
+        assertEquals(contentOf(running), r.contentId());
+        assertEquals(java.util.Set.of(queuedBuild, timedOut, old, failed).stream()
+                .filter(coordinator.unfinishedBuildIds()::contains).toList(), List.of(queuedBuild));
+    }
+
+    @Test
     public void anInterruptedDriverWritesNothingAndTheInterruptStays() {
         // The process is stopping (BuildLoop.stop interrupts the loop's thread). The driver has
         // stopped its worker and rethrown; that is not a failure of the attempt, so nothing is

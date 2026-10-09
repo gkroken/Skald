@@ -38,7 +38,10 @@ package eu.openanalytics.shinyproxy.publisher.storage;
  * @param bytes        total bytes across those chunks
  * @param outcome      the attempt's outcome, one of {@code BUILT}, {@code STOPPED} or
  *                     {@code FAILED:<CODE>} with CODE upper case (the driver's failure
- *                     code, e.g. {@code FAILED:BUILD_FAILED}); see {@link #requireOutcome}
+ *                     code, e.g. {@code FAILED:BUILD_FAILED}), written by the driver; or
+ *                     {@code INTERRUPTED}, written by the reconciliation sweep for an
+ *                     attempt the platform lost whose own writer never finished its log
+ *                     (the tail it held in memory is gone); see {@link #requireOutcome}
  * @param complete     whether every chunk the writer produced is present. False means the
  *                     log itself is missing pieces, which is different from a build that
  *                     failed: the build may have been fine and the log lost
@@ -49,7 +52,7 @@ public record LogFinal(long generation, long lastSequence, long bytes, String ou
                        boolean complete, boolean truncated) {
 
     private static final java.util.regex.Pattern OUTCOME =
-            java.util.regex.Pattern.compile("BUILT|STOPPED|FAILED:[A-Z][A-Z_]{0,31}");
+            java.util.regex.Pattern.compile("BUILT|STOPPED|INTERRUPTED|FAILED:[A-Z][A-Z_]{0,31}");
 
     /**
      * The closed vocabulary of {@code outcome}. A writer is refused anything else, before it
@@ -57,7 +60,8 @@ public record LogFinal(long generation, long lastSequence, long bytes, String ou
      */
     public static String requireOutcome(String outcome) {
         if (outcome == null || !OUTCOME.matcher(outcome).matches()) {
-            throw new IllegalArgumentException("not a log outcome (BUILT, STOPPED or FAILED:<CODE>): " + outcome);
+            throw new IllegalArgumentException("not a log outcome (BUILT, STOPPED, INTERRUPTED or FAILED:<CODE>): "
+                    + outcome);
         }
         return outcome;
     }

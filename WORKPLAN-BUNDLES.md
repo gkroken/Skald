@@ -2018,6 +2018,15 @@ below are marked passed by this planning document.
       and requires final.json complete, BUILT and of this lease generation. Its last sequence
       becomes the committed log cursor (`markLogComplete`). Anything else is PUBLISHING ->
       FAILED `PUBLISH_VERIFY`. The version transaction stays T9's.
+      **Part 4d-2 (reconciliation sweep):** `worker.AttemptSweeper` runs at startup and every
+      10 minutes. It takes the host's inventory of attempts FIRST (attempt-labelled containers,
+      volumes and networks, quota images, loop devices), then reads the unfinished builds
+      (QUEUED, RUNNING, PUBLISHING, whatever the lease says), and disposes of a build-id
+      attempt only if its build is not in that set: never a live one, on any instance. It
+      finishes the log of a build lost (INTERRUPTED or TIMED_OUT) within the last day that has
+      no final.json, with outcome `INTERRUPTED` (0adc78e N2, e4306c6 N1). `registry-api`
+      carries the build credential in a Basic header: operators should use https or a
+      host-local address (5cd0826 N2).
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,

@@ -483,6 +483,40 @@ public final class DockerWorkerLauncher {
         return labels != null && h.attemptId().equals(labels.get(ATTEMPT_LABEL));
     }
 
+    /**
+     * Every attempt id with something on this host: a container, volume or network carrying
+     * the attempt label, a quota image on {@value #QUOTA_IMAGES_VOLUME}, or a loop device
+     * backed by one. The reconciliation sweep's inventory: what it finds here and the
+     * database no longer counts as unfinished, it disposes of.
+     */
+    public java.util.Set<String> attemptsPresent() throws InterruptedException, DockerException {
+        java.util.Set<String> ids = new java.util.TreeSet<>();
+        docker.listContainers(ListContainersParam.allContainers(), ListContainersParam.withLabel(ATTEMPT_LABEL))
+                .forEach(c -> add(ids, c.labels()));
+        List<Volume> volumes = docker.listVolumes(ListVolumesParam.filter("label", ATTEMPT_LABEL)).volumes();
+        if (volumes != null) {
+            volumes.forEach(v -> add(ids, v.labels()));
+        }
+        docker.listNetworks(ListNetworksParam.withLabel(ATTEMPT_LABEL)).forEach(n -> add(ids, n.labels()));
+        // Quota images and the loop devices backed by them: a launch that died between losetup
+        // and its labelled volume leaves only these.
+        String sweep = Long.toHexString(System.nanoTime());
+        String out = runHelper("sweep-" + sweep, images.setup(), true, List.of(QUOTA_IMAGES_VOLUME + ":/s"), List.of(),
+                List.of("sh", "-c", "ls /s; cat /sys/block/loop*/loop/backing_file 2>/dev/null; true"), Map.of());
+        java.util.regex.Matcher m = Pattern.compile("skald-quota-([a-z0-9]{8,40})\\.img").matcher(out);
+        while (m.find()) {
+            ids.add(m.group(1));
+        }
+        return ids;
+    }
+
+    private static void add(java.util.Set<String> ids, Map<String, String> labels) {
+        String id = labels == null ? null : labels.get(ATTEMPT_LABEL);
+        if (id != null && ATTEMPT.matcher(id).matches()) {
+            ids.add(id);
+        }
+    }
+
     /** What still exists for this attempt: containers, volumes, network, attached image. */
     public List<String> leftovers(Handle h) throws InterruptedException {
         List<String> left = new ArrayList<>();

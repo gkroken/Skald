@@ -78,7 +78,11 @@ public class WorkerConfig {
     private String workerImage;
     private String gatewayImage;
     private String registry;
-    /** The registry as ShinyProxy reaches it, http(s)://host[:port], for publication's digest check. */
+    /**
+     * The registry as ShinyProxy reaches it, http(s)://host[:port], for publication's digest
+     * check. The build credential travels in a Basic header: prefer https, or an address
+     * that stays on this host (5cd0826 review N2).
+     */
     private String registryApi;
     private String registryUsername;
     private String registryPassword;
@@ -100,6 +104,8 @@ public class WorkerConfig {
     private Duration poll = Duration.ofSeconds(1);
     private Duration settle = Duration.ofSeconds(30);
     private Duration idlePause = Duration.ofSeconds(2);
+    /** How often the reconciliation sweep runs after its first run at startup. */
+    private Duration sweepPeriod = Duration.ofMinutes(10);
     private String bundleBucket = "skald-bundles";
     private String logBucket = "skald-logs";
 
@@ -156,11 +162,26 @@ public class WorkerConfig {
                 new BuildKitDriver.Config(Settings.defaults(), quotaMegabytes,
                         new Egress(outerNetworks, registry, repos, privateMirrors, List.of(), List.of()),
                         new Credential(registryUsername, registryPassword), poll, settle, HeadTailLog.Limits.defaults()));
-        PublishVerifier verifier = new PublishVerifier(URI.create(registryApi),
+        PublishVerifier verifier = new PublishVerifier(URI.create(registryApi), registry,
                 new Credential(registryUsername, registryPassword), logWriter);
         return new BuildLoop(new BuildRunner(coordinator.getObject(), settings, verifier), driver,
                 owner != null && !owner.isBlank() ? owner : java.net.InetAddress.getLocalHost().getHostName(),
                 idlePause);
+    }
+
+    /**
+     * The reconciliation sweep (AttemptSweeper), created after the loop, so only once every
+     * startup check has passed. It disposes of what finished or vanished attempts left on
+     * this host and finishes the logs of attempts the platform lost.
+     */
+    @Bean(initMethod = "start", destroyMethod = "stop")
+    public AttemptSweeper skaldAttemptSweeper(BuildLoop skaldBuildLoop, DockerClient skaldWorkerDocker,
+                                              ObjectProvider<BuildCoordinator> coordinator,
+                                              ObjectProvider<ObjectStore> store) {
+        BuildCoordinator c = coordinator.getObject();
+        return new AttemptSweeper(new DockerWorkerLauncher(skaldWorkerDocker, WorkerProfile.load("runc-rootless"),
+                Images.of(workerImage, gatewayImage)), c::unfinishedBuildIds, () -> c.recentlyLost(Duration.ofDays(1)),
+                new BuildLogWriter(store.getObject(), logBucket), sweepPeriod);
     }
 
     /** Every refusal that needs no Docker, catalog or bean: the configuration itself. */
@@ -306,6 +327,10 @@ public class WorkerConfig {
 
     public void setIdlePause(Duration idlePause) {
         this.idlePause = idlePause;
+    }
+
+    public void setSweepPeriod(Duration sweepPeriod) {
+        this.sweepPeriod = sweepPeriod;
     }
 
     public void setBundleBucket(String bundleBucket) {

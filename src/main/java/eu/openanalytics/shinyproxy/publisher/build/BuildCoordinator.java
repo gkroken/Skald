@@ -359,6 +359,32 @@ public final class BuildCoordinator {
         return timedOut.size() + interrupted.size();
     }
 
+    /**
+     * Every build that is not finished (QUEUED, RUNNING or PUBLISHING), whatever its lease
+     * says. The reconciliation sweep disposes of an attempt's objects only when its build is
+     * NOT in this set: an expired lease the reaper has not settled yet may still belong to a
+     * worker that is stopping itself, here or on another instance.
+     */
+    public java.util.Set<UUID> unfinishedBuildIds() {
+        return new java.util.HashSet<>(jdbc.queryForList(
+                "SELECT id FROM skald.build WHERE state IN ('QUEUED', 'RUNNING', 'PUBLISHING')", UUID.class));
+    }
+
+    /** A build the platform lost, whose log its own writer may never have finished. */
+    public record LostAttempt(UUID buildId, UUID contentId, long generation) { }
+
+    /**
+     * Builds that ended INTERRUPTED or TIMED_OUT within {@code window}: the platform settled
+     * them, so their own writer may never have finished their log (0adc78e N2, e4306c6 N1).
+     * Bounded by the window, so a sweep does not revisit every lost build forever.
+     */
+    public List<LostAttempt> recentlyLost(java.time.Duration window) {
+        return jdbc.query("SELECT id, content_id, lease_generation FROM skald.build"
+                        + " WHERE state IN ('INTERRUPTED', 'TIMED_OUT') AND finished_at > now() - ?::interval",
+                (rs, i) -> new LostAttempt(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getLong(3)),
+                window.toSeconds() + " seconds");
+    }
+
     /** True if {@code state} is one of the build machine's terminal states. */
     static boolean terminal(String state) {
         return TERMINAL.contains(state);

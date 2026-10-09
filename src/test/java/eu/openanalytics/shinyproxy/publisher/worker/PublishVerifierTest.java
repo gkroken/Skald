@@ -108,7 +108,7 @@ public class PublishVerifierTest {
     }
 
     private static PublishVerifier verifier(Credential cred) {
-        return new PublishVerifier(api, cred, logs);
+        return new PublishVerifier(api, registry.name, cred, logs);
     }
 
     @Test
@@ -129,6 +129,10 @@ public class PublishVerifierTest {
         assertMessage("not a pushed image by digest",
                 () -> verifier(TestRegistry.CRED).publish(ok, registry.name + ":5001/base/busybox@" + digest));
 
+        // 5cd0826 review N1: a reference to another registry is refused, not trusted.
+        assertMessage("names registry elsewhere:5000",
+                () -> verifier(TestRegistry.CRED).publish(ok, "elsewhere:5000/base/busybox@" + digest));
+
         Claimed noLog = claimed(1);
         assertMessage("no final.json", () -> verifier(TestRegistry.CRED).publish(noLog, image(digest)));
 
@@ -147,7 +151,7 @@ public class PublishVerifierTest {
         logs.finalise(gap.contentId(), gap.buildId(), 1, "BUILT", false).orElseThrow();
         assertMessage("not this attempt's complete BUILT log", () -> verifier(TestRegistry.CRED).publish(gap, image(digest)));
 
-        assertThrows(IllegalArgumentException.class, () -> new PublishVerifier(URI.create(api + "/"), TestRegistry.CRED, logs));
+        assertThrows(IllegalArgumentException.class, () -> new PublishVerifier(URI.create(api + "/"), registry.name, TestRegistry.CRED, logs));
     }
 
     @Test
@@ -169,7 +173,7 @@ public class PublishVerifierTest {
         fake.start();
         try {
             PublishVerifier v = new PublishVerifier(URI.create("http://127.0.0.1:" + fake.getAddress().getPort()),
-                    TestRegistry.CRED, logs);
+                    registry.name, TestRegistry.CRED, logs);
             Claimed c = claimed(1);
             log(c, 1, "BUILT");
             assertMessage("serves other as sha256:ffff", () -> v.publish(c, registry.name + ":5000/other@" + digest));
