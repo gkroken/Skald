@@ -2216,6 +2216,57 @@ below are marked passed by this planning document.
       `<cran-mirror>__linux__/<codename>/latest`; the switch is in the cache key only when
       on, so keys made before it are unchanged (pinned by a test), and in provenance. The
       pass probe runs with it on: cold R 295 s, still from source (no binaries yet).
+      **Step 2, the binary builder (design, 2026-10-11):**
+      1. *Whose platform (53b63ec N2).* forge binds each key `<codename>-<arch>/<rminor>`
+         to ONE builder image ID and refuses uploads that report another; the URL names
+         only the distro. So the operator registers Skald's published R base image (its
+         image ID, the config digest) as the platform for that base's key, and gives Skald
+         a write token scoped to `bin/linux/<codename>-<arch>/**` of the binary repository
+         (stored like every secret: encrypted, never logged). At startup Skald reads the
+         registration and turns binaries on only for a base whose image ID it names; any
+         other base, including a second R base of the same minor release, restores from the
+         plain mirror, with the reason logged. Reading a registration needs a forge admin
+         today: code_review/forge-issues/004 asks for a read with ordinary access; step 2
+         depends on it.
+      2. *Which packages.* After an R build succeeds, the packages of its rendered lock
+         (RenvLockPolicy already refuses remote, VCS and local sources) are candidates.
+         One is built only if its source tarball, fetched from the mirror on the trusted
+         side, has the SHA-256 forge serves and matches the MD5sum in the PUBLIC index of
+         forge's CRAN proxy member (not the group, which also holds the operator's hosted
+         packages); else never. A version whose tarball changed since its first fetch is
+         refused and left to source builds. Missing is asked per package: a HEAD on the
+         binary URL with the base's R User-Agent, `X-Forge-Package-Type: binary|source`.
+      3. *The queue.* A table of its own (one row per platform, package and version:
+         state, attempts, lease, source digest, provenance, the reason a row was refused),
+         claimed with the build coordinator's lease pattern, so several Skald instances
+         share it; a row runs only once its dependencies (Depends, Imports, LinkingTo,
+         read from the verified tarball on the trusted side; base packages excluded) have
+         binaries, and missing dependencies are queued first. Concurrency is its own limit
+         (default 1), and admission leaves app builds their slots (c18c5ab N1). A schema
+         change: V4, planned here, reviewed with the code.
+      4. *The sandbox.* One package per worker, the T5 profile, no secrets, egress to the
+         mirror only. Its context holds the verified source tarball (the sandbox never
+         fetches the package itself); its dependencies install from the binary tree
+         (604d63b N2: never from an app's lock); `R CMD INSTALL` builds it into an empty
+         library, which is packed and exported to the trusted side. A dependency still
+         without a binary would compile from public source inside that one sandbox and
+         affect only this package's output.
+      5. *The upload, outside the sandbox.* The trusted side checks the archive (one top
+         directory named for the package; DESCRIPTION Package and Version as queued;
+         Built: the base's R and platform), computes LinkingTo versions from what IT
+         installed, and PUTs it with the base's image ID; 409 (uploaded first by another)
+         is success. Provenance per binary: package, version, source SHA-256 and MD5,
+         builder image, LinkingTo versions, worker profile, attempt.
+      6. *The rows that must go red under their mutants:* a second app with the same
+         packages installs them as binaries (and the time it saves); a remote package with
+         a CRAN name and version is never uploaded and the CRAN binary is unchanged; a
+         changed tarball is refused; no sandbox sees the token (probed from inside one);
+         one package's sandbox cannot touch another's output; a base whose registration
+         names another image falls back to source. The probe runs its own CRAN-like
+         upstream behind forge's proxy, so it can publish test packages as "public".
+      7. Off by default, enabled per deployment only after the security review T7b
+         requires; the review records that integrity then rests on forge and the uploader
+         (renv.lock's hashes cover DESCRIPTION metadata, not binary bytes: 53b63ec N3).
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another
