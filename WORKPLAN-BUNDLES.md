@@ -1936,7 +1936,7 @@ below are marked passed by this planning document.
       image is in the ledger, and a retry that reproduces the digest gets its own pinned
       record (6ae3868-F1).
 
-- [ ] **T7. Trusted bases, recipes, BuildKit driver and cache.** Depends T3/T5/T6.
+- [x] **T7. Trusted bases, recipes, BuildKit driver and cache.** Depends T3/T5/T6.
       Add `images/` catalog and selected language/type bases, fixed non-root launchers,
       dependency restore for both languages, scoped cache import/export and digest publication. Test source-only
       edit gives a dependency cache hit; lockfile/base/architecture/recipe/local-dependency
@@ -2129,6 +2129,27 @@ below are marked passed by this planning document.
       next claim can start while the old worker is still dying. The margin is the
       operator's (lease and renew_every are configurable); T10 measures it on the target
       host.
+      **Done 2026-10-10**, every part per-commit reviewed (4dd3f76 .. this commit). The Pass
+      line, on real builds through the wired worker (T7PassProbeTest + dev/t7-pass-probe.py,
+      nothing mocked): both fixture apps built cold, each image carrying its digest, its
+      provenance record (V3) and BuildKit's SLSA v1 attestation, pulled cold by digest from
+      the probe registry and served as uid 10001 with /app read-only (4e-1); decision 7's
+      cache reused within its key and content item only, a lock, mirror or other-content
+      change missing and another item unable to read or change it (4e-2); a failed restore,
+      an unreachable repository, a push failure, a cancellation, the worker's death and a
+      timeout each ending in its own state with a complete log that names its cause,
+      nothing left on the host, and the worker building again (4e-3); and a process killed
+      mid-build reconciled by the next (4e-4). On the way: the kernel overlayfs snapshotter
+      with no_new_privs below rootlesskit, enforced by the launcher (ADR-0013); squid 7.6 for
+      whole pushes and no FTP; a stopped build's log names why; the sweep leaves a settled
+      build's log to its writer for the grace; the build workspace is locked per process and
+      cleared of what a dead one left. Every defence named in these parts has a mutant that
+      turns its test red, or the commit says why not. Full `make test`: 1282 run, 0
+      failures; one class (MigrationV2Test) errored on a Postgres container that did not
+      start within its timeout on the loaded host, and passed 9/9 rerun alone.
+      **Carried on:** finishing a PUBLISHING attempt after a restart, with `succeed()`, to
+      T9; signed provenance, the SBOM and the deployment notes to T10; build speed (shared
+      Linux R binaries, the fixed launch cost) to T7b.
 
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus
@@ -2208,6 +2229,13 @@ below are marked passed by this planning document.
       measure every phase in the probe and set targets (a source-only republish under 30 s,
       a small first publish under 60 s). Linux binary R packages are forge's to provide
       (code_review/forge-issues/003); without them a cold R restore compiles from source.
+      **Carried from T7 (6890924 review N2, N3), for the deployment docs:** the build
+      workspace must be local disk: WorkspaceLock is an fcntl lock, which NFS without lockd
+      and some FUSE or CIFS mounts do not honour, so a second process would not be refused.
+      And AttemptSweeper.stop() waits up to 70 s for a sweep's helper removal: under
+      Kubernetes' default 30 s terminationGracePeriodSeconds a pod can be killed first (not
+      a leak: the next process removes a stale sweep helper), so the Helm chart sets the
+      grace period above that or says why not.
       **Carried from T7 (c939203 review N1):** every (content, key) pair
       leaves a BuildKit cache ref at `skald/cache/<content UUID>:<key>`; the GC (artifact
       ledger, mark/recheck/delete) owns those refs too and deletes them with the content

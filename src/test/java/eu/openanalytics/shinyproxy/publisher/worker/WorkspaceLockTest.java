@@ -80,6 +80,50 @@ public class WorkspaceLockTest {
         }
     }
 
+    /**
+     * Holds the workspace lock from another process: what a second build worker on the same
+     * workspace looks like. Prints "held" once it has the lock and keeps it until its stdin
+     * closes.
+     */
+    public static final class Holder {
+        public static void main(String[] args) throws Exception {
+            try (var channel = java.nio.channels.FileChannel.open(Path.of(args[0]).resolve(WorkspaceLock.LOCK_NAME),
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.WRITE);
+                 var lock = channel.lock()) {
+                System.out.println("held");
+                System.out.flush();
+                while (System.in.read() >= 0) {
+                    // until the test closes our stdin
+                }
+            }
+        }
+    }
+
+    @Test
+    public void aWorkspaceAnotherProcessHoldsIsRefused(@TempDir Path workspace) throws Exception {
+        // 6890924 N1: the production branch -- another process holds the lock, so tryLock
+        // answers null -- rather than the same-JVM overlap the test above takes.
+        Path live = frozenTree(workspace);
+        Process holder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("java.class.path"), Holder.class.getName(), workspace.toString())
+                .redirectErrorStream(true).start();
+        try {
+            var out = new java.io.BufferedReader(new java.io.InputStreamReader(holder.getInputStream(),
+                    java.nio.charset.StandardCharsets.UTF_8));
+            assertEquals("held", out.readLine(), "the other process holds the lock");
+            IllegalStateException e = assertThrows(IllegalStateException.class, () -> WorkspaceLock.claim(workspace));
+            assertTrue(e.getMessage().contains("in use by another process"), e.getMessage());
+            assertTrue(Files.exists(live), "a refused claim removes nothing: the tree is the holder's");
+        } finally {
+            holder.getOutputStream().close();
+            assertTrue(holder.waitFor(30, java.util.concurrent.TimeUnit.SECONDS), "the holder exited");
+        }
+        // Its death releases the lock, as a crash would.
+        try (WorkspaceLock lock = WorkspaceLock.claim(workspace)) {
+            assertFalse(Files.exists(live));
+        }
+    }
+
     @Test
     public void entriesThatAreNotExtractionTreesAreLeftAlone(@TempDir Path workspace) throws Exception {
         Path upload = Files.createDirectories(workspace.resolve("upload"));
