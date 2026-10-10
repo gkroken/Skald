@@ -2221,11 +2221,15 @@ below are marked passed by this planning document.
          to ONE builder image ID and refuses uploads that report another; the URL names
          only the distro. So the operator registers Skald's published R base image (its
          image ID, the config digest) as the platform for that base's key, and gives Skald
-         a write token scoped to `bin/linux/<codename>-<arch>/**` of the binary repository
-         (stored like every secret: encrypted, never logged). At startup Skald reads the
-         registration and turns binaries on only for a base whose image ID it names; any
-         other base, including a second R base of the same minor release, restores from the
-         plain mirror, with the reason logged. Reading a registration needs a forge admin
+         a write token scoped to exactly that key's tree,
+         `bin/linux/<codename>-<arch>/contrib/<rminor>/**` (c365d95 N3: a codename-wide
+         scope would reach keys registered to other builders), stored like every secret:
+         encrypted, never logged. Skald reads the registration at startup and again
+         before each R build and each upload (a cached read with a short TTL; c365d95 N1:
+         an admin can re-register a key while Skald runs), and turns binaries on only for
+         a base whose image ID it names; any other base, including a second R base of the
+         same minor release, restores from the plain mirror, and an upload is refused,
+         with the reason logged. Reading a registration needs a forge admin
          today: code_review/forge-issues/004 asks for a read with ordinary access; step 2
          depends on it.
       2. *Which packages.* After an R build succeeds, the packages of its rendered lock
@@ -2244,23 +2248,29 @@ below are marked passed by this planning document.
          binaries, and missing dependencies are queued first. Concurrency is its own limit
          (default 1), and admission leaves app builds their slots (c18c5ab N1). A schema
          change: V4, planned here, reviewed with the code.
-      4. *The sandbox.* One package per worker, the T5 profile, no secrets, egress to the
-         mirror only. Its context holds the verified source tarball (the sandbox never
-         fetches the package itself); its dependencies install from the binary tree
-         (604d63b N2: never from an app's lock); `R CMD INSTALL` builds it into an empty
-         library, which is packed and exported to the trusted side. A dependency still
-         without a binary would compile from public source inside that one sandbox and
-         affect only this package's output.
+      4. *The sandbox.* One package per worker, the T5 profile, no secrets, and NO
+         network: everything it installs is handed in by the trusted side (c365d95-F1).
+         Its context holds the verified source tarball and, for each dependency, the
+         binary the trusted side fetched from Skald's own binary tree for this key and
+         checked against that dependency's recorded upload digest; never the group's
+         URL, which also serves the operator's hosted packages and falls back to source,
+         and never an app's lock (604d63b N2). A row whose dependencies do not all have
+         Skald-built binaries waits (point 3 queues them first); nothing compiles a
+         dependency inside another package's sandbox. `R CMD INSTALL` builds the package
+         into an empty library, which is packed and exported to the trusted side.
       5. *The upload, outside the sandbox.* The trusted side checks the archive (one top
          directory named for the package; DESCRIPTION Package and Version as queued;
          Built: the base's R and platform), computes LinkingTo versions from what IT
-         installed, and PUTs it with the base's image ID; 409 (uploaded first by another)
-         is success. Provenance per binary: package, version, source SHA-256 and MD5,
+         handed in, rechecks the registration, and PUTs it with the base's image ID. A 409
+         (uploaded first by another) is not taken as Skald's: the existing binary's digest
+         is fetched and the row records "uploaded by another, digest X", so a binary no
+         Skald attempt produced is visible rather than claimed (c365d95 N2). Provenance per binary: package, version, source SHA-256 and MD5,
          builder image, LinkingTo versions, worker profile, attempt.
       6. *The rows that must go red under their mutants:* a second app with the same
          packages installs them as binaries (and the time it saves); a remote package with
          a CRAN name and version is never uploaded and the CRAN binary is unchanged; a
-         changed tarball is refused; no sandbox sees the token (probed from inside one);
+         hosted package shadowing a public dependency's name never reaches a public
+         package's sandbox; a sandbox has no network; a changed tarball is refused; no sandbox sees the token (probed from inside one);
          one package's sandbox cannot touch another's output; a base whose registration
          names another image falls back to source. The probe runs its own CRAN-like
          upstream behind forge's proxy, so it can publish test packages as "public".
