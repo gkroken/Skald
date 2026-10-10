@@ -2057,6 +2057,20 @@ below are marked passed by this planning document.
       the whole parent per layer and step, and the r-shiny base alone exhausts the 8 GiB
       workspace; kernel overlayfs (no device needed) is the next part, with the isolation
       probes rerun on it.
+      **Part 4e-1c (overlayfs, and the pass):** buildkitd runs the kernel overlayfs snapshotter
+      (ADR-0013, user 2026-10-10). Its RUN root does not inherit the workspace's nosuid, so
+      the worker's entrypoint is `rootlesskit setpriv --nnp buildkitd`: buildkitd and every
+      RUN step run with no_new_privs (RUN steps had none before), proved from a RUN by the
+      bounds probe; the waiver's three replacements are unchanged. The isolation probes'
+      daemon is now tied to the launcher's by a test. The R image's push then failed
+      intermittently: squid 6.x aborted large uploads (a zero-size read taken for the
+      client's EOF; reproduced 4-13 of 24 300 MB uploads lost, 0 direct), so the gateway
+      moves to alpine 3.24's squid 7.6 (24 of 24), and FTP is denied outright
+      (CVE-2026-47729 lives in its listing parser). **The pass probe's build half holds** (the
+      cache rows are part 4e-2, the injected failures 4e-3): both fixture apps
+      built cold through the wired worker (Python ~70-110 s, R ~250-380 s, compiling from
+      source), pulled cold by digest, served, uid 10001, /app read-only, host left clean;
+      the failed builds of parts 4e-1b/c left complete, readable logs that named each defect.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,
@@ -2120,7 +2134,23 @@ below are marked passed by this planning document.
       repository) belongs with the registry choice made here.
 
 - [ ] **T10. Live acceptance, rollback, GC and final independent regression review.**
-      Depends all above. **Carried from T7 (c939203 review N1):** every (content, key) pair
+      Depends all above. **Signed provenance (user, 2026-10-10):** the SLSA attestation T7
+      attaches is unsigned (SLSA Build L1, written inside the worker that runs the bundle's
+      steps; ADR-0012, b45c0a9 N1). Sign it outside the worker -- a platform key or keyless
+      signing -- so `cosign verify-attestation` / slsa-verifier accept it; flag the
+      dependency and its licence first, and test that an index replaced in the registry fails
+      verification. **After T7 (user, 2026-10-10):** an SBOM attestation from BuildKit's
+      scanner (docker/buildkit-syft-scanner, pinned by digest, flagged as a new trusted image
+      in the build path, licence checked), with the provenance record naming it.
+      **Build latency, after T7 (user, 2026-10-10):** the fixed cost of a build is ~45-60 s
+      before any recipe step (six launch containers in sequence, and every attempt pulling
+      and extracting its base into an empty workspace). Pre-extract each published base on
+      the host into a read-only store the worker reads but never writes (platform-owned, so
+      no tenant data is shared), and keep a small pool of pre-launched, never-used workers;
+      measure every phase in the probe and set targets (a source-only republish under 30 s,
+      a small first publish under 60 s). Linux binary R packages are forge's to provide
+      (code_review/forge-issues/003); without them a cold R restore compiles from source.
+      **Carried from T7 (c939203 review N1):** every (content, key) pair
       leaves a BuildKit cache ref at `skald/cache/<content UUID>:<key>`; the GC (artifact
       ledger, mark/recheck/delete) owns those refs too and deletes them with the content
       item. Add re-runnable `dev/bundles-live.sh` using unique IDs/paths and

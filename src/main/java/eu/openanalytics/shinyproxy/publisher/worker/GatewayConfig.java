@@ -125,6 +125,7 @@ public final class GatewayConfig {
         lines.add("acl repo_ports port " + String.join(" ", REPO_PORTS.stream().map(String::valueOf).toList()));
         lines.add("acl SSL_ports port 443");
         lines.add("acl CONNECT method CONNECT");
+        lines.add("acl ftp proto FTP");
         lines.add("acl registry dstdomain -n " + registry);
         // The registry's port is fixed at 5000, as in the measured rule; a deployment whose
         // registry listens elsewhere needs the rule (and its probe) extended first.
@@ -136,6 +137,9 @@ public final class GatewayConfig {
         if (!repos.isEmpty()) {
             lines.add("acl repos dstdomain -n " + String.join(" ", repos));
         }
+        // No FTP at all: squid's FTP gateway parses server listings (CVE-2026-47729), and a
+        // build fetches over http(s) only.
+        lines.add("http_access deny ftp");
         lines.add("http_access deny metadata");
         lines.add("http_access deny to_localhost");
         lines.add("http_access deny CONNECT !SSL_ports");

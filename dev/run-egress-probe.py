@@ -237,8 +237,8 @@ raw() {
   h=${1#http://}; h=${h%%%%/*}
   # stdin held open: busybox nc drops the connection at stdin EOF, before a slower answer
   # arrives (measured: only squid's instant denials came back without this).
-  { printf 'GET %%s HTTP/1.0\r\nHost: %%s\r\n\r\n' "$1" "$h"; sleep 3; } \
-    | timeout 20 nc -w 10 %(gate_ip)s 8888 > /tmp/resp 2>/dev/null
+  { printf 'GET %%s HTTP/1.0\r\nHost: %%s\r\n\r\n' "$1" "$h"; sleep ${Z:-3}; } \
+    | timeout ${T:-20} nc -w ${W:-10} %(gate_ip)s 8888 > /tmp/resp 2>/dev/null
   tr -d '\r' < /tmp/resp > /tmp/resp.n
   status=$(head -1 /tmp/resp.n | awk '{print $2}')
 }
@@ -283,6 +283,11 @@ get ptr_repo "http://%(canary_repo)s/?exfil=build-secret"
 get ptr_registry http://%(canary_registry)s:5000/v2/
 connect ptr_connect %(canary_repo)s 443
 get suffix http://%(suffix)s/
+# FTP to an allowed repository on an allowed port: only the ftp proto rule refuses it, at
+# once. Without the rule squid speaks FTP to an HTTP server, waits 30 s for a greeting that
+# never comes and answers 502 ERR_FTP_FAILURE (measured, squid 7.6): the evidence the hole
+# was used. So this row holds its connection 40 s; only when the rule is missing.
+Z=40 T=60 W=50 get ftp ftp://%(allowed)s:80/
 get redirect_ok http://%(allowed)s/cgi-bin/to-self
 get redirect_unlisted http://%(allowed)s/cgi-bin/to-denied
 get redirect_meta http://%(allowed)s/cgi-bin/to-meta
@@ -391,6 +396,7 @@ def judge(report, ptr_ok=True):
                                                    "not serve the PTR")
     row("suffix of an allowed name refused", policy_denied(r, "suffix", "EVIL-CONTENT"),
         "suffix")
+    row("FTP refused, even to an allowed repository", policy_denied(r, "ftp"), "ftp")
     redirect_ok = (fields(r.get("redirect_ok", "")).get("first") == "302"
                    and fetched(r, "redirect_ok", "ALLOWED-OK"))
     row("a redirect within the allowed host is followed (control)", redirect_ok,
@@ -547,6 +553,11 @@ WEAKENINGS = [
     ("the allowlist unanchored", dict(weaken="unanchored"),
      ["suffix of an allowed name refused"],
      lambda r, ptr: fetched(r, "suffix", "EVIL-CONTENT")),
+    # Without the rule squid speaks FTP to the allowed host's port 80 (an HTTP server) and
+    # fails on its own terms; any squid error but a policy refusal shows it tried.
+    ("FTP allowed", dict(weaken="ftp_allowed"),
+     ["FTP refused, even to an allowed repository"],
+     lambda r, ptr: _squid_tag(r, "ftp") not in (None, "none", "ERR_ACCESS_DENIED")),
     ("CONNECT to any port", dict(weaken="any_connect_port"),
      ["CONNECT to a non-443 port refused"],
      lambda r, ptr: r.get("connect_badport") == "200"),

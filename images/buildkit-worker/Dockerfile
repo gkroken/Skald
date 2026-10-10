@@ -12,3 +12,4 @@ USER root
 RUN addgroup -g 2401 skaldbuild && adduser -D -H -u 2401 -G skaldbuild skaldbuild && echo skaldbuild:3000000:65536 > /etc/subuid && echo skaldbuild:3000000:65536 > /etc/subgid
 RUN chmod u-s,g-s /usr/bin/fusermount3 /usr/sbin/unix_chkpwd
 USER 2401:2401
+ENTRYPOINT ["rootlesskit", "setpriv", "--nnp", "buildkitd"]

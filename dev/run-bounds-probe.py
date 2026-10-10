@@ -78,6 +78,10 @@ MOUNTS = r"""
 # The RUN's own root is a snapshot on the workspace volume; its mount options are the
 # kernel's statement of what applies, read from inside.
 echo "run_root_opts=$(awk '$5=="/"{print $6}' /proc/self/mountinfo | head -1)"
+# The kernel's no_new_privs for this step: with it set, exec ignores setuid/setgid bits and
+# file capabilities on every mount. The overlayfs snapshotter's root mount does not inherit
+# the workspace's nosuid, so this is what keeps a setuid file from changing a step's identity.
+echo "run_nnp=$(awk '$1=="NoNewPrivs:"{print $2}' /proc/self/status)"
 """
 
 MEMORY = r"""
@@ -176,13 +180,21 @@ def _int(text, default=-1):
 
 
 def judge_mounts(report, workspace_opts):
-    """nosuid,nodev on the worker's /workspace and, inherited, on the RUN's own root."""
-    run_opts = _value(report, "run_root_opts").split(",")
+    """nosuid,nodev on the worker's /workspace. The RUN's own root is reported, not required:
+    on the overlayfs snapshotter it is an overlay mount that does not inherit them (T7 part
+    4e-1c); judge_nnp holds what nosuid held there, for every mount."""
     ws = (workspace_opts or "").split(",")
-    need = ("nosuid", "nodev")
-    ok = all(o in run_opts for o in need) and all(o in ws for o in need)
+    ok = all(o in ws for o in ("nosuid", "nodev"))
     return ok, "worker /workspace: %s; RUN root: %s" % (
         workspace_opts or "not read", _value(report, "run_root_opts") or "not read")
+
+
+def judge_nnp(report):
+    """A RUN step runs with no_new_privs (buildkitd is started under setpriv --nnp, after
+    rootlesskit has written the uid map), so no setuid file or file capability changes its
+    identity."""
+    nnp = _value(report, "run_nnp")
+    return nnp == "1", "NoNewPrivs in a RUN step: %s" % (nnp or "not read")
 
 
 def adopt_launched_limits():
@@ -331,6 +343,7 @@ def run_all(tmp, label=""):
     report, blob = step(tmp, "mounts" + label, MOUNTS)
     check("mounts", judge_mounts(report, workspace_options()) if report
           else (False, "no report: %s" % blob.strip()[-160:]))
+    check("nnp", judge_nnp(report) if report else (False, "no report: %s" % blob.strip()[-160:]))
 
     report, _ = step(tmp, "memory" + label, MEMORY, target=MEMORY_TARGET_MB)
     check("memory", judge_memory(report))
@@ -381,7 +394,10 @@ def main(argv):
 
         ok, detail = got["mounts"]
         record("the workspace is nosuid,nodev",
-               "the quota volume's options, on the worker and on the RUN's root", detail, ok)
+               "the quota volume's options, on the worker", detail, ok)
+        ok, detail = got["nnp"]
+        record("a RUN step has no_new_privs",
+               "setuid bits and file capabilities change no step's identity", detail, ok)
         ok, detail = got["memory"]
         record("memory is bounded from a RUN",
                "growth past the limit is OOM-killed at or below it", detail, ok)
@@ -482,9 +498,12 @@ def self_test(tmp):
     expect("disk held", judge_disk(["control_bytes=33554432", "attempt_rc=1",
                                     "attempt_bytes=700000000", "attempt_enospc=1"]), True)
     expect("mounts without nosuid",
-           judge_mounts(["run_root_opts=rw,nodev,relatime"], "rw,nodev,relatime"), False)
-    expect("mounts held", judge_mounts(["run_root_opts=rw,nosuid,nodev,relatime"],
+           judge_mounts(["run_root_opts=rw,relatime"], "rw,nodev,relatime"), False)
+    expect("mounts held", judge_mounts(["run_root_opts=rw,relatime"],
                                        "rw,nosuid,nodev,relatime"), True)
+    expect("a step without no_new_privs", judge_nnp(["run_nnp=0"]), False)
+    expect("no_new_privs not read", judge_nnp([]), False)
+    expect("no_new_privs held", judge_nnp(["run_nnp=1"]), True)
     flood = "#8 1.0 SKALD-LOG-START\n" + ("#8 1.0 " + "A" * 63 + "\n") * 100
     expect("a log that never reached the client",
            judge_log_speed("#8 [output clipped, log limit 200KiB/s reached]", True, 0),

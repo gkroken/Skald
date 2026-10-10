@@ -50,7 +50,7 @@ BUILDKIT_IMAGE = "skald-buildkit-worker:probe"
 # beyond the uid-map helpers: usr/bin/fusermount3 setuid ROOT and usr/sbin/unix_chkpwd
 # setgid shadow. Measured 2026-09-26 by the scan in dev/shipping-worker-probe.py. The
 # derived image clears both. FUSE is only for the fuse-overlayfs snapshotter, and this
-# worker runs the native one. newuidmap/newgidmap keep their file capabilities, which is
+# worker runs kernel overlayfs (T7 part 4e-1c; native until then), which needs no FUSE. newuidmap/newgidmap keep their file capabilities, which is
 # the single privilege the waiver exists for.
 PRIVILEGED_HELPERS = {"usr/bin/newuidmap", "usr/bin/newgidmap"}
 STRIP = ["usr/bin/fusermount3", "usr/sbin/unix_chkpwd"]
@@ -88,6 +88,7 @@ def worker_dockerfile(strip=tuple(STRIP)):
     if strip:
         lines.append("RUN chmod u-s,g-s %s" % " ".join("/" + s for s in strip))
     lines.append("USER %d:%d" % (WORKER_UID, WORKER_UID))
+    lines.append("ENTRYPOINT " + json.dumps(ENTRYPOINT))
     return "\n".join(lines) + "\n"
 
 
@@ -140,7 +141,17 @@ ENVIRONMENT = ["--env=HOME=/tmp/home", "--env=TMPDIR=/tmp",
 # worker's network and reached a TCP port, but never gets this volume, and there is no port.
 SOCKET_MOUNT = "/skald-sock"
 SOCKET_ADDR = "unix://" + SOCKET_MOUNT + "/bk.sock"
-DAEMON_ARGS = ["--oci-worker-snapshotter=native", "--root", "/workspace/buildkit",
+# rootlesskit keeps the file capabilities the no-new-privileges waiver is for (newuidmap), and
+# writes the uid map before its child starts; the child, buildkitd, then runs under
+# no_new_privs (busybox setpriv, already in the upstream image), and so does everything it
+# starts: runc and every RUN step. Setuid bits and file capabilities are then ignored on every
+# mount a step sees. It replaces nosuid on the RUN's root, which the overlayfs snapshotter's
+# root mount does not inherit from the workspace (T7 part 4e-1c), and is stronger: it covers
+# every mount, and RUN steps ran with NoNewPrivs 0 before.
+ENTRYPOINT = ["rootlesskit", "setpriv", "--nnp", "buildkitd"]
+# The launcher's (DockerWorkerLauncher.DAEMON_ARGS, minus its --config); DockerWorkerLauncherTest
+# checks they stay equal, so the probes measure the daemon that ships.
+DAEMON_ARGS = ["--oci-worker-snapshotter=overlayfs", "--root", "/workspace/buildkit",
                "--addr", SOCKET_ADDR]
 
 

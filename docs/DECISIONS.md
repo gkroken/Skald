@@ -434,7 +434,7 @@ record held only the digest.
    record (1) is the trustworthy one; the attestation is portable, not proof (b45c0a9 N1).
    `mode=max` records the
    Dockerfile and build-argument values; Skald passes no build argument but BuildKit's
-   predefined proxy ones (the attempt's gateway, an internal name), the Dockerfile is
+   predefined proxy ones (the attempt's gateway, an internal IPv4 address), the Dockerfile is
    the server's recipe, and the registry credential is the client's docker config, not a
    build input. A test reads the pushed attestation back and checks the credential is not
    in it. It does carry internal names: the registry host:port (in the base reference and
@@ -448,6 +448,44 @@ alone (not portable, nothing travels with the image); `mode=min` (drops the Dock
 which is what makes the statement reproducible); reusing the `recipe` column (it holds the
 admission inputs, which are part of the idempotency fingerprint).
 
-**Deferred, needs sign-off:** signing the attestation (a key, or keyless signing, held
-outside the worker: new trust material and likely a new dependency). An SBOM attestation. BuildKit generates it with a scanner
-image (docker/buildkit-syft-scanner), which would be a new trusted image in the build path.
+**Approved and scheduled (user, 2026-10-10):** signing the attestation outside the worker
+(a platform key or keyless signing; new trust material and likely a new dependency, flagged
+when chosen) in T10; and, after T7, an SBOM attestation from BuildKit's scanner image
+(docker/buildkit-syft-scanner, pinned by digest: a new trusted image in the build path).
+
+---
+
+## ADR-0013 -- Build worker storage: kernel overlayfs, and no_new_privs below rootlesskit
+
+**Date:** 2026-10-10 | **Status:** accepted (user, 2026-10-10)
+
+T5 started the rootless BuildKit worker on the `native` snapshotter, to avoid
+fuse-overlayfs's host device grant (`/dev/fuse`). The T7 pass probe showed what native costs:
+every layer and every build step is stored as a FULL copy of its parent, so disk use grows
+with layers times the size of the filesystem. The r-shiny base's layers alone exhausted the
+8 GiB workspace before the recipe's first `RUN`.
+
+**Decision.** buildkitd runs `--oci-worker-snapshotter=overlayfs`: kernel overlayfs, mounted by
+buildkitd inside its rootless user namespace, storing differences only. It needs no device,
+no capability and no seccomp change; the shipping, bounds, egress and attack probes were
+rerun on it.
+
+One defence did not carry over. The workspace is mounted `nosuid,nodev`, and on native a
+`RUN`'s root was a bind from it and inherited both; an overlay root mount does not. So the
+worker image's entrypoint is `rootlesskit setpriv --nnp buildkitd` (busybox `setpriv`,
+already in the upstream image). rootlesskit alone runs without `no_new_privs`, because
+writing the uid map needs newuidmap's file capability (the 2026-09-26 waiver). buildkitd,
+and everything it starts, every `RUN` step included, runs with NoNewPrivs 1: exec ignores
+setuid/setgid bits and file capabilities on every mount a step sees. That is stronger than
+what it replaces, since `RUN` steps previously ran with NoNewPrivs 0. It is proved from inside
+a `RUN` by `dev/run-bounds-probe.py` ("a RUN step has no_new_privs"), and for the daemon by
+`DockerWorkerLauncherTest`. The three replacement checks of the waiver are unchanged.
+
+**Rejected:** a larger quota on native (it only moves the wall, since every step copies the
+whole root filesystem again, and it is slow); fuse-overlayfs (a host device grant, and the
+setuid `fusermount3` the worker image strips); flattening the bases to one layer (each step
+still copies everything).
+
+**Also tied:** `dev/shipping_worker.py`'s DAEMON_ARGS, the daemon the isolation probes
+measure, had nothing tying it to the launcher's. `DockerWorkerLauncherTest` now requires
+them equal.

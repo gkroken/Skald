@@ -95,7 +95,9 @@ def teardown():
 
 def htpasswd(password):
     # registry:2 reads bcrypt only; httpd's htpasswd writes it (as dev/run_attack_harness.py).
-    out = docker(["run", "--rm", "httpd:2-alpine", "htpasswd", "-Bbn", USERNAME, password])
+    # The password on stdin (-i), never a command line: b288e03 N2.
+    out = subprocess.run(["docker", "run", "--rm", "-i", "httpd:2-alpine", "htpasswd", "-iBn", USERNAME],
+                         input=password, capture_output=True, text=True, timeout=120)
     if out.returncode != 0:
         raise SystemExit("htpasswd: " + out.stderr.strip()[-300:])
     return out.stdout.strip() + "\n"

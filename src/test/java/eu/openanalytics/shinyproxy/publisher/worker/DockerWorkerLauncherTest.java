@@ -40,6 +40,7 @@ import org.mandas.docker.client.messages.HostConfig;
 import org.mandas.docker.client.messages.Volume;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -134,6 +135,14 @@ public class DockerWorkerLauncherTest {
             List<String> options = List.of(mount.split(" ")[3].split(","));
             assertTrue(mount.startsWith(ws.options().get("device") + " /workspace ext4 "), mount);
             assertTrue(options.containsAll(List.of("nosuid", "nodev", "nobarrier")), mount);
+            // buildkitd, and so everything it starts (runc, every RUN step), runs under
+            // no_new_privs; rootlesskit, which needs newuidmap's file capability, does not
+            // (the image's ENTRYPOINT: rootlesskit setpriv --nnp buildkitd; T7 part 4e-1c).
+            String nnp = exec(h.worker(), "sh", "-c", "for p in $(pidof buildkitd) $(pidof rootlesskit); do"
+                    + " echo \"$(cat /proc/$p/comm) $(awk '$1==\"NoNewPrivs:\"{print $2}' /proc/$p/status)\"; done");
+            assertTrue(nnp.lines().anyMatch(l -> l.equals("buildkitd 1")), nnp);
+            assertTrue(nnp.lines().filter(l -> l.startsWith("buildkitd ")).allMatch(l -> l.equals("buildkitd 1")), nnp);
+            assertTrue(nnp.lines().anyMatch(l -> l.equals("rootlesskit 0")), nnp);
             // jbd2 lists every journal on the kernel as <device>-8, the worker's /proc included.
             String journals = exec(h.worker(), "ls", "/proc/fs/jbd2");
             assertFalse(List.of(journals.split("\\s+")).contains(ws.options().get("device").substring(5) + "-8"),
@@ -240,6 +249,34 @@ public class DockerWorkerLauncherTest {
         } finally {
             assertEquals(List.of(), onFlaky.dispose(h));
         }
+    }
+
+    @Test
+    public void theIsolationProbesRunTheDaemonThatShips() throws Exception {
+        // The T5 isolation evidence is measured on dev/shipping_worker.py's daemon; nothing tied
+        // it to the launcher's until the snapshotter changed (T7 part 4e-1c). Equal, but for the
+        // launcher's --config (the probes pass their own).
+        String py = Files.readString(Path.of("dev/shipping_worker.py"));
+        java.util.regex.Matcher mount = java.util.regex.Pattern.compile("(?m)^SOCKET_MOUNT = \"([^\"]+)\"$").matcher(py);
+        assertTrue(mount.find(), "SOCKET_MOUNT");
+        assertTrue(py.contains("\nSOCKET_ADDR = \"unix://\" + SOCKET_MOUNT + \"/bk.sock\"\n"), "SOCKET_ADDR");
+        java.util.regex.Matcher args = java.util.regex.Pattern.compile("(?ms)^DAEMON_ARGS = \\[(.*?)\\]$").matcher(py);
+        assertTrue(args.find(), "DAEMON_ARGS");
+        List<String> probe = new java.util.ArrayList<>();
+        for (String item : args.group(1).split(",")) {
+            String t = item.strip();
+            if (t.equals("SOCKET_ADDR")) {
+                probe.add("unix://" + mount.group(1) + "/bk.sock");
+            } else {
+                assertTrue(t.matches("\"[^\"]*\""), t);
+                probe.add(t.substring(1, t.length() - 1));
+            }
+        }
+        List<String> shipped = DockerWorkerLauncher.DAEMON_ARGS;
+        int n = shipped.size();
+        assertEquals(List.of("--config", DockerWorkerLauncher.CONFIG_MOUNT + "/buildkitd.toml"), shipped.subList(n - 2, n));
+        assertEquals(shipped.subList(0, n - 2), probe);
+        assertTrue(probe.contains("--oci-worker-snapshotter=overlayfs"), probe.toString());
     }
 
     @Test

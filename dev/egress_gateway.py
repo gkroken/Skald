@@ -87,7 +87,8 @@ PRIVATE_DESTINATIONS = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # RFC
                         "224.0.0.0/4", "240.0.0.0/4",                        # multicast, reserved
                         "fc00::/7", "fec0::/10", "::1/128")                  # ULA, site-local, lo
 WEAKENINGS = ("allow_all", "no_metadata_deny", "unanchored", "any_connect_port",
-              "any_repo_port", "reverse_lookup", "no_private_deny", "no_embedded_ipv4_deny")
+              "any_repo_port", "reverse_lookup", "no_private_deny", "no_embedded_ipv4_deny",
+              "ftp_allowed")
 
 
 def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS, private_mirrors=(),
@@ -107,6 +108,7 @@ def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS, private_mirr
              "acl repo_ports port %s" % " ".join(str(p) for p in repo_ports),
              "acl SSL_ports port 443",
              "acl CONNECT method CONNECT",
+             "acl ftp proto FTP",
              # -n: match the URL's host as written, never its reverse DNS (gate finding
              # t5-f4f5f32-F1). Without it squid resolves the PTR of an IP-literal URL and
              # admits the address if the PTR names an allowlisted host -- and whoever owns
@@ -128,6 +130,10 @@ def squid_conf(registry, repos, weaken=None, repo_ports=REPO_PORTS, private_mirr
         else:
             lines.append("acl repos dstdomain %s%s" % (
                 "" if weaken == "reverse_lookup" else "-n ", " ".join(repos)))
+    # No FTP at all: squid's FTP gateway parses server listings (CVE-2026-47729), and a build
+    # fetches over http(s) only.
+    if weaken != "ftp_allowed":
+        lines.append("http_access deny ftp")
     if weaken != "no_metadata_deny":
         lines.append("http_access deny metadata")
     lines.append("http_access deny to_localhost")
@@ -162,10 +168,15 @@ def write_conf(directory, registry, repos, weaken=None, private_mirrors=()):
 
 # The image: alpine's squid, the configuration mounted at run time so a self-test can
 # restart the gateway weakened without rebuilding.
-# alpine:3.20, pinned to the index digest the probes have been building from (T7 ships this
-# Dockerfile as images/egress-gateway/Dockerfile). squid's own package is not pinned: Alpine
-# drops superseded package versions, so a pin would only make the image unbuildable later,
-# the same reasoning as the R base's system packages.
-GATEWAY_BASE = "alpine@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+# alpine:3.24, pinned by index digest (T7 ships this Dockerfile as
+# images/egress-gateway/Dockerfile). squid's own package is not pinned: Alpine drops
+# superseded package versions, so a pin would only make the image unbuildable later, the
+# same reasoning as the R base's system packages. 3.24 for squid 7.6 (T7 part 4e-1c): squid
+# 6.9 (alpine 3.20) and 6.12 aborted large uploads -- with the request buffer full it read
+# 0 bytes, took that as the client's EOF and aborted both sides (TCP_MISS_ABORTED; the
+# registry logged "client disconnected during blob PUT"), so an R image's push failed. 4 to
+# 13 of 24 300 MB uploads through 6.x, 24 of 24 through 7.6 and direct. 7.6 also carries the
+# fix for CVE-2026-47729 (FTP listing heap over-read; not reachable here, and FTP is denied).
+GATEWAY_BASE = "alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"
 DOCKERFILE = ("FROM " + GATEWAY_BASE + "\nRUN apk add --no-cache squid\nUSER squid\n"
               'CMD ["squid", "-N", "-f", "/etc/squid/squid.conf"]\n')
