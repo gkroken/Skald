@@ -186,7 +186,7 @@ public class WorkerConfig {
                                               ObjectProvider<ObjectStore> store) {
         BuildCoordinator c = coordinator.getObject();
         return new AttemptSweeper(new DockerWorkerLauncher(skaldWorkerDocker, WorkerProfile.load("runc-rootless"),
-                Images.of(workerImage, gatewayImage)), () -> c.unsettledBuildIds(sweepGrace), () -> c.recentlyLost(Duration.ofDays(1)),
+                Images.of(workerImage, gatewayImage)), () -> c.unsettledBuildIds(sweepGrace), () -> c.recentlyLost(Duration.ofDays(1), sweepGrace),
                 new BuildLogWriter(store.getObject(), logBucket), sweepPeriod);
     }
 

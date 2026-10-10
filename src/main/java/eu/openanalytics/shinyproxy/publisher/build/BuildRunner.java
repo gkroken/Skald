@@ -23,7 +23,6 @@
 package eu.openanalytics.shinyproxy.publisher.build;
 
 import java.util.Optional;
-import java.util.function.BooleanSupplier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -142,15 +141,27 @@ public final class BuildRunner {
         long tolerate = settings.lease().minus(settings.renewEvery().dividedBy(2)).toNanos();
         AtomicLong lastRenewed = new AtomicLong(claimStarted);
         AtomicBoolean cancelled = new AtomicBoolean(false);
+        // Set before `lost` turns true, by the thread that learned it, so the driver reads it
+        // from memory when it writes its stop line.
+        java.util.concurrent.atomic.AtomicReference<String> lostBecause = new java.util.concurrent.atomic.AtomicReference<>();
         // The worker's one question, answered from memory only: lost, cancelled, or too long
         // since the last renewal the database confirmed. A function of TIME, so it turns true
         // on schedule however long a renewal is stuck -- a renewal that hangs (an unreachable
         // host, a half-open connection, a pool wait) never returns to say so (071ef50-F1).
-        BooleanSupplier stop = () -> {
-            if (!lost.get() && System.nanoTime() - lastRenewed.get() >= tolerate) {
-                lost.set(true);
+        BuildDriver.StopSignal stop = new BuildDriver.StopSignal() {
+            @Override
+            public boolean getAsBoolean() {
+                if (!lost.get() && System.nanoTime() - lastRenewed.get() >= tolerate) {
+                    lostBecause.compareAndSet(null, "the platform could not renew the attempt's lease in time");
+                    lost.set(true);
+                }
+                return lost.get() || cancelled.get();
             }
-            return lost.get() || cancelled.get();
+
+            @Override
+            public String reason() {
+                return lost.get() ? lostBecause.get() : cancelled.get() ? "a cancellation was requested" : null;
+            }
         };
         heartbeat.scheduleAtFixedRate(() -> {
             // Never throws: a scheduled task that throws is never run again. A renewal the
@@ -163,6 +174,13 @@ public final class BuildRunner {
             try {
                 Optional<Boolean> renewed = coordinator.renewAndReadCancel(lease);
                 if (renewed.isEmpty()) {
+                    String why;
+                    try {
+                        why = coordinator.whyRefused(lease);
+                    } catch (RuntimeException unreadable) {
+                        why = "the platform refused to renew the attempt's lease";
+                    }
+                    lostBecause.compareAndSet(null, why);
                     lost.set(true);
                 } else {
                     lastRenewed.set(started);

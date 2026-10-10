@@ -590,8 +590,14 @@ public class T7PassProbeTest {
         return row;
     }
 
-    /** Seconds until nothing labelled with the attempt is left on the host, or -1 past {@code bound}. */
+    /**
+     * Seconds until nothing of the attempt is left on the host, or -1 past {@code bound}:
+     * nothing labelled with it, and nothing the launcher's own per-attempt check finds (the
+     * unlabelled volumes a late bind re-creates, the loop device, the quota image; 01683f9 N1).
+     */
     private static double teardownSeconds(DockerClient docker, String attempt, Duration bound) throws Exception {
+        DockerWorkerLauncher launcher = new DockerWorkerLauncher(docker, WorkerProfile.load("runc-rootless"),
+                DockerWorkerLauncher.Images.of("skald-buildkit-worker:test", "skald-egress-gateway:test"));
         long started = System.nanoTime();
         String label = DockerWorkerLauncher.ATTEMPT_LABEL + "=" + attempt;
         while (System.nanoTime() - started < bound.toNanos()) {
@@ -601,7 +607,7 @@ public class T7PassProbeTest {
                     && !docker.listVolumes(DockerClient.ListVolumesParam.filter("label", label)).volumes().isEmpty()
                     || !docker.listNetworks(DockerClient.ListNetworksParam.withLabel(DockerWorkerLauncher.ATTEMPT_LABEL,
                     attempt)).isEmpty();
-            if (!left) {
+            if (!left && launcher.leftovers(DockerWorkerLauncher.handle(attempt)).isEmpty()) {
                 return (System.nanoTime() - started) / 1e9;
             }
             Thread.sleep(500);
@@ -621,16 +627,29 @@ public class T7PassProbeTest {
      * bound (the disposal is the code's; how long the daemon takes is the host's, so the
      * measured time is recorded and the bound is generous).
      */
+    /** Every cause pattern a row used, so a successful build's log can be checked against all of them. */
+    private static final List<String> CAUSES = new ArrayList<>();
+
+    /** A saved log as its owner reads it: each line's text, one per line. */
+    private static String decoded(Path log) throws Exception {
+        StringBuilder text = new StringBuilder();
+        for (String l : Files.readAllLines(log)) {
+            text.append(JSON.readTree(l).path("t").asText()).append('\n');
+        }
+        return text.toString();
+    }
+
     private static ObjectNode injected(ApplicationContext ctx, DockerClient docker, String name, App app,
                                        Map<String, Object> row, String state, String code, String cause)
             throws Exception {
+        CAUSES.add(cause);
         ObjectNode r = result(ctx, name, app, row);
         assertEquals(state, row.get("state"), r.toString());
         if (code != null) {
             assertEquals(code, row.get("error_code"), r.toString());
         }
         assertTrue(r.path("log_final").path("complete").asBoolean(), "the log is complete: " + r);
-        String log = Files.readString(OUT.resolve(r.path("log_file").asText()));
+        String log = decoded(OUT.resolve(r.path("log_file").asText()));
         assertTrue(java.util.regex.Pattern.compile(cause).matcher(log).find(),
                 "the log names the cause /" + cause + "/: " + r.path("log_file").asText());
         double seconds = teardownSeconds(docker, attemptOf(liveLog(ctx, (UUID) row.get("content_id"),
@@ -648,6 +667,7 @@ public class T7PassProbeTest {
      */
     @Test
     public void injectedFailuresEndCleanlyWithALogThatNamesTheCause() throws Exception {
+        String[] success = new String[1];
         try (DockerClient docker = new JerseyDockerClientBuilder().fromEnv().build()) {
             application("skald.builds.worker.sweep-period=30s").run(ctx -> {
                 assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
@@ -684,20 +704,24 @@ public class T7PassProbeTest {
                 assertEquals(BuildCoordinator.CancelOutcome.REQUESTED,
                         ctx.getBean(BuildCoordinator.class).cancel(ids[0], build, "probe"));
                 row = settleWithLog(ctx, build, Duration.ofMinutes(5));
-                injected(ctx, docker, "inject-cancel", PY, row, "CANCELLED", null, "(?i)stop|cancel");
+                ObjectNode cancelled = injected(ctx, docker, "inject-cancel", PY, row, "CANCELLED", null,
+                        "(?m)^\\[skald\\] stopped: a cancellation was requested$");
+                assertEquals("STOPPED", cancelled.path("log_final").path("outcome").asText());
 
                 // The worker dies while the restore runs.
                 ids = store(ctx, PY, py);
                 build = startAndReachRestore(ctx, PY, ids[0], ids[1], "worker-death");
                 docker.killContainer(DockerWorkerLauncher.handle(attemptOf(liveLog(ctx, ids[0], build))).worker());
                 row = settleWithLog(ctx, build, Duration.ofMinutes(5));
-                injected(ctx, docker, "inject-worker-death", PY, row, "FAILED", "WORKER_DIED", "(?i)worker");
+                injected(ctx, docker, "inject-worker-death", PY, row, "FAILED", "WORKER_DIED",
+                        "(?m)^\\[skald\\] failed: WORKER_DIED ");
 
                 // And the worker builds again after all of that.
                 ids = store(ctx, PY, py);
                 row = build(ctx, "after-injections-" + PY.fixture(), ids[0], ids[1], Duration.ofMinutes(20));
                 ObjectNode after = result(ctx, "after-injections", PY, row);
                 assertEquals("PUBLISHING", row.get("state"), after.toString());
+                success[0] = decoded(OUT.resolve(after.path("log_file").asText()));
             });
 
             // An unreachable repository: the mirror's host is allowed, but nothing answers.
@@ -707,19 +731,34 @@ public class T7PassProbeTest {
                 UUID[] ids = store(ctx, PY, payload(PY));
                 Map<String, Object> row = settleWithLog(ctx, ctx.getBean(BuildAdmission.class).request(ids[0], "probe",
                         "unreachable", new BuildAdmission.Inputs(ids[1], Map.of())).buildId(), Duration.ofMinutes(15));
-                injected(ctx, docker, "inject-unreachable-repository", PY, row, "FAILED", "BUILD_FAILED", "forge-down");
+                injected(ctx, docker, "inject-unreachable-repository", PY, row, "FAILED", "BUILD_FAILED",
+                        // What pip prints: the mirror it tried, then no versions at all (the
+                        // gateway's error page reads as an empty index; measured).
+                        "(?s)Looking in indexes: http://forge-down/.*Could not find a version that satisfies"
+                        + " the requirement \\S+ \\(from versions: none\\)");
             });
 
             // A timeout: a one-minute wall deadline on a from-source R build, which needs
-            // several. The reaper settles it TIMED_OUT; the log is finished by the worker's
-            // stop or by the sweep.
+            // several. The reaper settles it TIMED_OUT; the worker's own stop finishes the log,
+            // STOPPED with the reason, and the sweep (every 30 s here, so it lands in that gap
+            // if it can) leaves it to the writer (01683f9-F1).
             application("skald.builds.coordinator.deadline-minutes=1", "skald.builds.worker.sweep-period=30s").run(ctx -> {
                 assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
                 UUID[] ids = store(ctx, R, payload(R));
                 Map<String, Object> row = settleWithLog(ctx, ctx.getBean(BuildAdmission.class).request(ids[0], "probe",
                         "timeout", new BuildAdmission.Inputs(ids[1], Map.of())).buildId(), Duration.ofMinutes(10));
-                injected(ctx, docker, "inject-timeout", R, row, "TIMED_OUT", null, "(?i)stop|interrupt|deadline|time");
+                ObjectNode timedOut = injected(ctx, docker, "inject-timeout", R, row, "TIMED_OUT", "DEADLINE_EXCEEDED",
+                        "(?m)^\\[skald\\] stopped: the build passed its deadline of 1 minute\\(s\\)$");
+                assertEquals("STOPPED", timedOut.path("log_final").path("outcome").asText(),
+                        "the worker's own finish, not the sweep's INTERRUPTED: " + timedOut);
             });
+        }
+        // The control for every cause pattern (01683f9-F2): none matches a successful build's
+        // log, so "the log names the cause" can fail.
+        assertEquals(6, CAUSES.size());
+        for (String cause : CAUSES) {
+            assertTrue(!java.util.regex.Pattern.compile(cause).matcher(success[0]).find(),
+                    "/" + cause + "/ also matches a successful build's log");
         }
     }
 }

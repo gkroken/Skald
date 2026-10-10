@@ -69,7 +69,9 @@ import java.util.regex.Pattern;
  * its log finished: its writer held the tail in memory and died, or stopped. For each such
  * build within {@code window} that has no final.json, the sweep writes one (create-only) with outcome
  * INTERRUPTED, fenced by the build's lease generation (0adc78e N2, e4306c6 N1), so a reader
- * is never left on a head that will never grow.
+ * is never left on a head that will never grow. Only once the build settled longer ago than
+ * the sweep grace (01683f9-F1): until then its own writer may still be finishing it (on a
+ * deadline it always is), and its finish names the reason and keeps the tail.
  */
 public final class AttemptSweeper {
 

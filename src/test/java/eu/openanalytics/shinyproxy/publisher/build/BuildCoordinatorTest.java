@@ -445,7 +445,18 @@ public class BuildCoordinatorTest {
         UUID old = queued("erin");
         jdbc.update("UPDATE skald.build SET state = 'INTERRUPTED', finished_at = now() - interval '2 days' WHERE id = ?", old);
 
-        var lost = coordinator.recentlyLost(Duration.ofDays(1));
+        // Not before the grace (01683f9-F1): a just-settled build's own writer may still be
+        // finishing its log -- on a deadline it always is.
+        assertEquals(List.of(), coordinator.recentlyLost(Duration.ofDays(1), Duration.ofMinutes(15)),
+                "settled moments ago: within the grace, left to its writer");
+        UUID settledEarlier = queued("frank");
+        jdbc.update("UPDATE skald.build SET state = 'TIMED_OUT', finished_at = now() - interval '20 minutes'"
+                + " WHERE id = ?", settledEarlier);
+        assertEquals(List.of(settledEarlier), coordinator.recentlyLost(Duration.ofDays(1), Duration.ofMinutes(15))
+                .stream().map(BuildCoordinator.LostAttempt::buildId).toList(), "past the grace: the sweep's");
+        // Out of the window again, so the assertions below see only their own builds.
+        jdbc.update("UPDATE skald.build SET finished_at = now() - interval '2 days' WHERE id = ?", settledEarlier);
+        var lost = coordinator.recentlyLost(Duration.ofDays(1), Duration.ZERO);
         assertEquals(java.util.Set.of(running, timedOut),
                 lost.stream().map(BuildCoordinator.LostAttempt::buildId).collect(java.util.stream.Collectors.toSet()),
                 "INTERRUPTED and TIMED_OUT within the window; not FAILED, not older");
@@ -490,18 +501,21 @@ public class BuildCoordinatorTest {
         BuildRunner runner = new BuildRunner(coordinator, fast);
         UUID build = queued("alice");
         CountDownLatch running = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> why = new java.util.concurrent.atomic.AtomicReference<>();
         ExecutorService pool = Executors.newSingleThreadExecutor();
         Future<BuildRunner.Result> result = pool.submit(() -> runner.runOnce("n1", (b, stop) -> {
             running.countDown();
             for (int i = 0; i < 300 && !stop.getAsBoolean(); i++) {
                 Thread.sleep(100);
             }
+            why.set(((BuildDriver.StopSignal) stop).reason());
             return stop.getAsBoolean() ? new BuildDriver.Stopped() : new BuildDriver.Built(DIGEST, PROVENANCE);
         }));
         assertTrue(running.await(30, TimeUnit.SECONDS));
         assertEquals(BuildCoordinator.CancelOutcome.REQUESTED, coordinator.cancel(contentOf(build), build, "alice"));
         assertEquals(BuildRunner.Result.CANCELLED, result.get(60, TimeUnit.SECONDS));
         assertEquals("CANCELLED", state(build));
+        assertEquals("a cancellation was requested", why.get(), "the stop says why, for the log (01683f9-F1)");
         pool.shutdown();
     }
 
@@ -516,12 +530,14 @@ public class BuildCoordinatorTest {
         BuildRunner runner = new BuildRunner(coordinator, fast);
         UUID build = queued("alice");
         CountDownLatch running = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> why = new java.util.concurrent.atomic.AtomicReference<>();
         ExecutorService pool = Executors.newSingleThreadExecutor();
         Future<BuildRunner.Result> result = pool.submit(() -> runner.runOnce("n1", (b, stop) -> {
             running.countDown();
             for (int i = 0; i < 300 && !stop.getAsBoolean(); i++) {
                 Thread.sleep(100);
             }
+            why.set(((BuildDriver.StopSignal) stop).reason());
             return new BuildDriver.Built(DIGEST, PROVENANCE);
         }));
         assertTrue(running.await(30, TimeUnit.SECONDS));
@@ -529,6 +545,7 @@ public class BuildCoordinatorTest {
         new BuildCoordinator(jdbc, fast).reap();
         assertEquals(BuildRunner.Result.FENCED, result.get(60, TimeUnit.SECONDS));
         assertEquals("INTERRUPTED", state(build));
+        assertEquals("the attempt's lease expired before it was renewed, and the platform reclaims it", why.get());
         assertEquals(null, jdbc.queryForObject("SELECT output_image FROM skald.build WHERE id = ?", String.class, build));
         pool.shutdown();
     }
@@ -712,6 +729,35 @@ public class BuildCoordinatorTest {
     }
 
     @Test
+    public void aLeaseThatExpiredBeforeAnyReaperRanIsNamedAsSuch() throws Exception {
+        // The refusal reaches the heartbeat while the attempt is still RUNNING, its lease
+        // past expiry and no reaper yet: the reason is the expiry, not the state (W2).
+        CoordinatorSettings fast = new CoordinatorSettings(Duration.ofSeconds(2), Duration.ofSeconds(1),
+            Duration.ofMinutes(20), 1);
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, fast);
+        UUID build = queued("alice");
+        CountDownLatch running = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> why = new java.util.concurrent.atomic.AtomicReference<>();
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        Future<BuildRunner.Result> result = pool.submit(() -> new BuildRunner(coordinator, fast).runOnce("n1",
+            (b, stop) -> {
+                running.countDown();
+                for (int i = 0; i < 300 && !stop.getAsBoolean(); i++) {
+                    Thread.sleep(100);
+                }
+                why.set(((BuildDriver.StopSignal) stop).reason());
+                return new BuildDriver.Built(DIGEST, PROVENANCE);
+            }));
+        assertTrue(running.await(30, TimeUnit.SECONDS));
+        expireLease(build);
+        assertEquals(BuildRunner.Result.FENCED, result.get(10, TimeUnit.SECONDS));
+        assertEquals("RUNNING", state(build), "no reaper has run");
+        assertEquals("the attempt's lease expired before it was renewed, and the platform reclaims it", why.get());
+        coordinator.reap();
+        pool.shutdown();
+    }
+
+    @Test
     public void aPassedDeadlineStopsTheWorkerThroughItsOwnHeartbeat() throws Exception {
         // 071ef50 review N2: past deadline_at the lease is not renewed, so the worker stops
         // without any reaper running.
@@ -720,6 +766,7 @@ public class BuildCoordinatorTest {
         BuildCoordinator coordinator = new BuildCoordinator(jdbc, fast);
         UUID build = queued("alice");
         CountDownLatch running = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> why = new java.util.concurrent.atomic.AtomicReference<>();
         ExecutorService pool = Executors.newSingleThreadExecutor();
         Future<BuildRunner.Result> result = pool.submit(() -> new BuildRunner(coordinator, fast).runOnce("n1",
             (b, stop) -> {
@@ -727,12 +774,15 @@ public class BuildCoordinatorTest {
                 for (int i = 0; i < 300 && !stop.getAsBoolean(); i++) {
                     Thread.sleep(100);
                 }
+                why.set(((BuildDriver.StopSignal) stop).reason());
                 return new BuildDriver.Built(DIGEST, PROVENANCE);
             }));
         assertTrue(running.await(30, TimeUnit.SECONDS));
         jdbc.update("UPDATE skald.build SET deadline_at = now() - interval '1 second' WHERE id = ?", build);
         assertEquals(BuildRunner.Result.FENCED, result.get(10, TimeUnit.SECONDS));
         assertEquals("RUNNING", state(build), "nothing but the reaper may end it");
+        assertTrue(String.valueOf(why.get()).matches("the build passed its deadline of [0-9]+ minute\\(s\\)"),
+                "the stop names the deadline, for the log (01683f9-F1): " + why.get());
         coordinator.reap();
         assertEquals("TIMED_OUT", state(build));
         pool.shutdown();

@@ -2089,11 +2089,22 @@ below are marked passed by this planning document.
       (an allowed mirror host with nothing behind it: FAILED BUILD_FAILED, the log names it),
       a push failure (the registry stopped once the restore runs: FAILED BUILD_FAILED, the
       log ends "failed to push <registry>/content/...: 503"), a cancellation during the
-      restore (CANCELLED, log STOPPED), the worker killed during the restore (FAILED
-      WORKER_DIED) and a one-minute deadline on a from-source R build (TIMED_OUT
-      DEADLINE_EXCEEDED, log STOPPED). Each log is complete and names its cause; everything
-      the attempt owned was already gone when its build settled; and the worker builds and
-      publishes again afterwards.
+      restore (CANCELLED, log STOPPED, "[skald] stopped: a cancellation was requested"), the
+      worker killed during the restore (FAILED WORKER_DIED) and a one-minute deadline on a
+      from-source R build (TIMED_OUT DEADLINE_EXCEEDED, log STOPPED, "[skald] stopped: the
+      build passed its deadline of 1 minute(s)"). Each log is complete and names its cause
+      (each pattern checked against a successful build's log as a control); nothing the
+      attempt owned is left within seconds of the build settling (the launcher's own
+      per-attempt check included); and the worker builds and publishes again afterwards.
+      The review of this part found a product race (01683f9-F1): the sweep finished a
+      just-settled build's log INTERRUPTED before its stopping worker could, so a timed-out
+      build's log lost its tail and said nothing of the deadline. The sweep now leaves a
+      lost build's log to its writer for the sweep grace, and the runner tells the driver
+      why it stops (deadline, cancellation, expired lease, another worker), which the log
+      states. **For T8/T10:** an unreachable mirror reads to the owner as pip's "from
+      versions: none" after "Looking in indexes: <mirror>": the gateway's error page looks
+      like an empty index. A line from the platform naming the gateway's verdict would
+      make it unmistakable.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,

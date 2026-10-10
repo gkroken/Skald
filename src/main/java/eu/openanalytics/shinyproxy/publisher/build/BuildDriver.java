@@ -96,4 +96,13 @@ public interface BuildDriver {
      * driver blocked in a long call.
      */
     Outcome run(Claimed build, java.util.function.BooleanSupplier cancelRequested) throws Exception;
+
+    /**
+     * The runner's stop signal, which can also say why it is true, for the build's log
+     * (01683f9-F1: a timed-out build's log said nothing of its deadline). Answered from
+     * memory, like the signal itself; null when no reason is known.
+     */
+    interface StopSignal extends java.util.function.BooleanSupplier {
+        String reason();
+    }
 }

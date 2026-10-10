@@ -413,15 +413,46 @@ public final class BuildCoordinator {
     public record LostAttempt(UUID buildId, UUID contentId, long generation) { }
 
     /**
-     * Builds that ended INTERRUPTED or TIMED_OUT within {@code window}: the platform settled
-     * them, so their own writer may never have finished their log (0adc78e N2, e4306c6 N1).
-     * Bounded by the window, so a sweep does not revisit every lost build forever.
+     * Builds that ended INTERRUPTED or TIMED_OUT within {@code window} but longer ago than
+     * {@code grace}: the platform settled them, so their own writer may never have finished
+     * their log (0adc78e N2, e4306c6 N1). Bounded by the window, so a sweep does not revisit
+     * every lost build forever. Not before the grace (01683f9-F1): a settled build's writer
+     * is often still alive -- on a deadline always, since the reaper settles TIMED_OUT while
+     * the worker is still being stopped -- and a create-only INTERRUPTED written first would
+     * win over the writer's own finish and hide the log's tail and its reason.
      */
-    public List<LostAttempt> recentlyLost(java.time.Duration window) {
+    public List<LostAttempt> recentlyLost(java.time.Duration window, java.time.Duration grace) {
         return jdbc.query("SELECT id, content_id, lease_generation FROM skald.build"
-                        + " WHERE state IN ('INTERRUPTED', 'TIMED_OUT') AND finished_at > now() - ?::interval",
+                        + " WHERE state IN ('INTERRUPTED', 'TIMED_OUT') AND finished_at > now() - ?::interval"
+                        + " AND finished_at <= now() - ?::interval",
                 (rs, i) -> new LostAttempt(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getLong(3)),
-                window.toSeconds() + " seconds");
+                window.toSeconds() + " seconds", grace.toSeconds() + " seconds");
+    }
+
+    /**
+     * Why this lease's renewal was refused, in words for the build's log: the wall deadline
+     * passed (whether or not the reaper has yet settled it TIMED_OUT), or the platform no
+     * longer holds the attempt for this worker. Fixed text and numbers only: printable ASCII.
+     */
+    public String whyRefused(Lease lease) {
+        List<Map<String, Object>> rows = jdbc.queryForList("SELECT state, deadline_at <= now() AS past,"
+                + " ceil(extract(epoch FROM (deadline_at - started_at)) / 60)::bigint AS minutes,"
+                + " lease_generation = ? AS ours, lease_expires_at <= now() AS expired"
+                + " FROM skald.build WHERE id = ?", lease.generation(), lease.buildId());
+        if (rows.isEmpty()) {
+            return "the platform no longer has this build";
+        }
+        Map<String, Object> r = rows.get(0);
+        if ("TIMED_OUT".equals(r.get("state")) || Boolean.TRUE.equals(r.get("past"))) {
+            return "the build passed its deadline of " + r.get("minutes") + " minute(s)";
+        }
+        if (!Boolean.TRUE.equals(r.get("ours"))) {
+            return "the attempt was handed to another worker";
+        }
+        if (Boolean.TRUE.equals(r.get("expired")) || "INTERRUPTED".equals(r.get("state"))) {
+            return "the attempt's lease expired before it was renewed, and the platform reclaims it";
+        }
+        return "the platform no longer holds this attempt (state " + r.get("state") + ")";
     }
 
     /** True if {@code state} is one of the build machine's terminal states. */

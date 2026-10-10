@@ -185,7 +185,8 @@ public final class BuildKitDriver implements BuildDriver {
                 if (cancelRequested.getAsBoolean()) {
                     aborted.set(true);
                     stopEverything(h, work);
-                    buildLog.line("[skald] stopped", false);
+                    String why = cancelRequested instanceof StopSignal s ? s.reason() : null;
+                    buildLog.line("[skald] stopped" + (why == null ? "" : ": " + why), false);
                     buildLog.finish("STOPPED");
                     return new Stopped();
                 }
