@@ -242,7 +242,8 @@ rebuild and nothing reaches the build, the image or the logs.
       network, aliased to the endpoint's real host name, relaying to that host:port only;
       the app dials the real name and TLS verification still sees it. HTTP(S) APIs go
       through squid with a per-app allow-list. A probe proves an attached endpoint is
-      reachable and anything unattached is not.
+      reachable and anything unattached is not, including a DNS-exfiltration canary (a
+      lookup of an outside name must not leave the host; 2194e5b review N3).
 - [ ] **Delivery: secrets as files.** A single-use, short-lived token is the container's
       only secret-related variable; an init Skald adds to every image redeems it before the
       app starts and writes `$SERVICE_BINDING_ROOT/<name>/` (Service Binding layout) onto a
@@ -253,6 +254,14 @@ rebuild and nothing reaches the build, the image or the logs.
       generated `tnsnames.ora` with only the granted aliases, a wallet and `sqlnet.ora`
       (`TNS_ADMIN`). ContainerProxy 1.2.4's spec has no tmpfs field: a backend seam,
       recorded in UPSTREAM_CHANGES.md.
+- [ ] **Delivery, implementation rules** (2194e5b review N1, N2, N4). The redeem call has a
+      listener of its own, serving nothing else, reached through its own forwarder; default-
+      deny does not reopen ShinyProxy's UI/API port to content. A token is checked against a
+      server-side record (proxy id, expiry, spent), never against the caller's address, which
+      is the forwarder's; single use is the protection, and tests prove a replayed and an
+      expired token both fail. Content built before #4b has no init: its switches stay
+      disabled with "republish to enable" (provenance records the init), never an attach
+      that silently delivers nothing.
 - [ ] **Oracle.** The admin points Skald at the server's `tnsnames.ora`; Skald lists its
       aliases and the admin registers the ones to offer. The host's file is never mounted.
       Every descriptor address gets a forwarder. A RAC SCAN alias is flagged: it works only
