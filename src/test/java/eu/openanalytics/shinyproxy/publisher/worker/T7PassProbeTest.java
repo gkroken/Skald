@@ -171,6 +171,9 @@ public class T7PassProbeTest {
                 "skald.builds.worker.outer-networks=" + System.getProperty("skald.t7probe.outer"),
                 "skald.builds.worker.private-mirrors=forge",
                 "skald.builds.worker.cran-mirror=http://forge/repository/cran-public/",
+                // forge serves Linux binaries where it has them (T7b); with none uploaded, the
+                // source, so a cold R build still compiles everything.
+                "skald.builds.worker.cran-linux-binaries=true",
                 "skald.builds.worker.pypi-mirror=http://forge/repository/pypi-public/simple/",
                 "skald.builds.worker.published-bases=" + System.getProperty("skald.t7probe.published-bases"),
                 "skald.builds.worker.workspace=" + workspace.toAbsolutePath()));
@@ -457,6 +460,13 @@ public class T7PassProbeTest {
                 assertTrue(prov.path("worker").path("images").path("worker").path("id").asText().startsWith("sha256:"));
                 assertEquals("BUILT", r.path("log_final").path("outcome").asText(), r.toString());
                 assertTrue(r.path("log_final").path("complete").asBoolean(), r.toString());
+                if (app == R) {
+                    // The restore asked forge's binary tree for the base's own release (T7b).
+                    assertTrue(decoded(OUT.resolve(r.path("log_file").asText()))
+                            .contains("repos = c(CRAN = \"http://forge/repository/cran-public/__linux__/noble/latest\")"),
+                            "the R restore used forge's Linux binary tree");
+                    assertEquals(true, prov.path("dependencies").path("mirrors").path("cran_linux_binaries").asBoolean());
+                }
             }
         });
     }

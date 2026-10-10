@@ -93,6 +93,12 @@ public class WorkerConfig {
     private List<String> privateMirrors = new ArrayList<>();
     private String cranMirror;
     private String pypiMirror;
+    /**
+     * The CRAN mirror has forge's Linux binary layout (T7b): R restores from
+     * {@code <cran-mirror>__linux__/<codename>/latest}. Off by default: a mirror without that
+     * layout answers 404, and renv does not fall back to source.
+     */
+    private boolean cranLinuxBinaries = false;
     private String publishedBases;
     private String workspace;
     private String architecture = "amd64";
@@ -178,7 +184,7 @@ public class WorkerConfig {
                 images);
         BuildKitClient client = new BuildKitClient(skaldWorkerDocker, launcher, images);
         ObjectStore objects = store.getObject();
-        Mirrors mirrors = new Mirrors(URI.create(cranMirror), URI.create(pypiMirror));
+        Mirrors mirrors = new Mirrors(URI.create(cranMirror), URI.create(pypiMirror), cranLinuxBinaries);
         BundleContextSource source = new BundleContextSource(new BundleWriter(objects, bundleBucket), objects,
                 bundleBucket, limits, Path.of(workspace), catalog, mirrors, architecture);
         BuildLogWriter logWriter = new BuildLogWriter(objects, logBucket);
@@ -323,6 +329,10 @@ public class WorkerConfig {
 
     public void setPrivateMirrors(List<String> privateMirrors) {
         this.privateMirrors = privateMirrors == null ? new ArrayList<>() : privateMirrors;
+    }
+
+    public void setCranLinuxBinaries(boolean cranLinuxBinaries) {
+        this.cranLinuxBinaries = cranLinuxBinaries;
     }
 
     public void setCranMirror(String cranMirror) {

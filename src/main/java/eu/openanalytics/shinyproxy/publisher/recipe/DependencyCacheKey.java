@@ -79,7 +79,10 @@ public final class DependencyCacheKey {
         StringBuilder pm = new StringBuilder();
         new TreeMap<>(entry.packageManager()).forEach((k, v) -> pm.append(k).append('=').append(v).append('\n'));
         fields.put("package_manager", pm.toString());
-        fields.put("mirrors", "cran=" + mirrors.cran() + "\npypi=" + mirrors.pypiIndex() + "\n");
+        // The Linux-binary switch changes what R installs from the same mirror, so it is in
+        // the policy; written only when on, so every key made before it existed is unchanged.
+        fields.put("mirrors", "cran=" + mirrors.cran() + "\npypi=" + mirrors.pypiIndex() + "\n"
+                + (mirrors.cranLinuxBinaries() ? "cran_linux_binaries=true\n" : ""));
         StringBuilder lock = new StringBuilder();
         new TreeMap<>(recipe.files()).forEach((name, bytes) -> lock.append(name).append('=').append(sha256Hex(bytes))
                 .append('\n'));

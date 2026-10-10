@@ -76,6 +76,8 @@ public class DependencyCacheKeyTest {
                 MIRRORS.pypiIndex()), RECIPE));
         variants.put("pypi mirror", DependencyCacheKey.of(ENTRY, BASE, new Mirrors(MIRRORS.cran(),
                 URI.create("http://other:8080/pypi/simple/")), RECIPE));
+        variants.put("cran linux binaries", DependencyCacheKey.of(ENTRY, BASE, new Mirrors(MIRRORS.cran(),
+                MIRRORS.pypiIndex(), true), RECIPE));
         variants.put("lock bytes", DependencyCacheKey.of(ENTRY, BASE, MIRRORS, new Recipe("FROM x\n",
                 Map.of("skald/requirements.lock", "shiny==1.1 --hash=sha256:00\n".getBytes(StandardCharsets.UTF_8)))));
         variants.put("lock name", DependencyCacheKey.of(ENTRY, BASE, MIRRORS, new Recipe("FROM x\n",
@@ -83,6 +85,16 @@ public class DependencyCacheKeyTest {
         Set<String> seen = new HashSet<>(List.of(key));
         variants.forEach((what, k) -> assertTrue(seen.add(k), what + " did not move the key"));
     }
+
+    @Test
+    public void aMirrorPolicyWithoutLinuxBinariesKeepsTheKeyItHadBeforeTheSwitchExisted() {
+        // T7b: the switch is written into the key only when on, so every cache ref made before
+        // it existed is still found. Pinned: this is the key the same inputs gave at T7's close.
+        assertEquals(PINNED_KEY, DependencyCacheKey.of(ENTRY, BASE, new Mirrors(MIRRORS.cran(), MIRRORS.pypiIndex(),
+                false), RECIPE));
+    }
+
+    static final String PINNED_KEY = "3eb44e09662499fa9f7fd76b1bc94b0072668497241dcbd9df8077a8a91d7ab7";
 
     @Test
     public void theEncodingCannotBeShiftedAcrossFieldBoundaries() {

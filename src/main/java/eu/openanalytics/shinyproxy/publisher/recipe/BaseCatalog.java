@@ -71,10 +71,17 @@ public final class BaseCatalog {
 
     /** One catalog entry, as far as a build needs it. */
     public record Entry(String id, String type, String language, String version, String architecture,
-                        int recipeRevision, String uid, String gid, Map<String, String> packageManager) {
+                        int recipeRevision, String uid, String gid, Map<String, String> packageManager,
+                        String osCodename) {
 
         public Entry {
             packageManager = Map.copyOf(packageManager);
+        }
+
+        /** An entry with no OS codename (a base whose recipe needs none). */
+        public Entry(String id, String type, String language, String version, String architecture,
+                     int recipeRevision, String uid, String gid, Map<String, String> packageManager) {
+            this(id, type, language, version, architecture, recipeRevision, uid, gid, packageManager, null);
         }
     }
 
@@ -91,6 +98,8 @@ public final class BaseCatalog {
      * RecipeGenerator.Base checks the same again, as the last gate before the Dockerfile.
      */
     private static final Pattern USER = Pattern.compile("([1-9][0-9]{0,8}):([1-9][0-9]{0,8})");
+    /** A distribution release's codename, as /etc/os-release spells it (noble, trixie). */
+    private static final Pattern CODENAME = Pattern.compile("[a-z][a-z0-9]{1,31}");
 
     private final List<Entry> entries;
     private final Map<String, String> published;
@@ -138,9 +147,16 @@ public final class BaseCatalog {
                 }
                 packageManager.put(f.getKey(), f.getValue().asText());
             });
+            // Required: it names forge's Linux binary tree for the base (T7b), and a URL is
+            // built from it, so it is checked here, not trusted.
+            String codename = b.path("os_codename").asText("");
+            if (!CODENAME.matcher(codename).matches()) {
+                throw new IllegalArgumentException("catalog: base " + b.path("id").asText()
+                        + " has no valid os_codename: '" + codename + "'");
+            }
             entries.add(new Entry(text(b, "id"), text(b, "type"), text(b, "language"), text(b, "version"),
                     text(b, "architecture"), b.path("recipe_revision").asInt(0), user.group(1), user.group(2),
-                    packageManager));
+                    packageManager, codename));
         }
         Set<String> ids = new java.util.HashSet<>();
         for (Entry e : entries) {
@@ -215,7 +231,8 @@ public final class BaseCatalog {
             throw new IllegalStateException("base " + entry.get().id() + " is in the catalog but was not published");
         }
         Entry e = entry.get();
-        return Optional.of(new Resolved(e, new Base(ref, e.language(), e.version(), e.uid(), e.gid())));
+        return Optional.of(new Resolved(e, new Base(ref, e.language(), e.version(), e.uid(), e.gid(),
+                e.osCodename())));
     }
 
     /** The catalog's entries, in order. */

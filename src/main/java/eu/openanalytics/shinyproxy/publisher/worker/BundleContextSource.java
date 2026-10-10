@@ -181,6 +181,7 @@ public final class BundleContextSource implements ContextSource {
         Map<String, Object> repositories = new LinkedHashMap<>();
         repositories.put("cran", mirrors.cran().toString());
         repositories.put("pypi_index", mirrors.pypiIndex().toString());
+        repositories.put("cran_linux_binaries", mirrors.cranLinuxBinaries());
         dependencies.put("mirrors", repositories);
         Map<String, Object> inputs = new LinkedHashMap<>();
         inputs.put("bundle", bundle);

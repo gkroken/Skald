@@ -79,6 +79,8 @@ public final class RecipeGenerator {
      * root-group-writable paths.
      */
     private static final Pattern ID = Pattern.compile("[1-9][0-9]{0,8}");
+    /** BaseCatalog's codename form; it becomes a URL path segment, so nothing else passes. */
+    private static final Pattern CODENAME = Pattern.compile("[a-z][a-z0-9]{1,31}");
 
     private RecipeGenerator() {
     }
@@ -87,9 +89,18 @@ public final class RecipeGenerator {
      * A trusted base, as resolved from the catalog: its digest reference, language and exact
      * version, and the fixed unprivileged identity.
      */
-    public record Base(String reference, String language, String version, String uid, String gid) {
+    public record Base(String reference, String language, String version, String uid, String gid,
+                       String osCodename) {
+
+        /** A base with no OS codename recorded. */
+        public Base(String reference, String language, String version, String uid, String gid) {
+            this(reference, language, version, uid, gid, null);
+        }
 
         public Base {
+            if (osCodename != null && !CODENAME.matcher(osCodename).matches()) {
+                throw new IllegalArgumentException("a base's OS codename must be a plain word: " + osCodename);
+            }
             if (!DIGEST_REFERENCE.matcher(reference).matches()) {
                 throw new IllegalArgumentException("a base must be referenced by digest: " + reference);
             }
@@ -99,8 +110,18 @@ public final class RecipeGenerator {
         }
     }
 
-    /** The operator's package mirrors: a CRAN-like repository and a PyPI simple index. */
-    public record Mirrors(URI cran, URI pypiIndex) {
+    /**
+     * The operator's package mirrors: a CRAN-like repository and a PyPI simple index. With
+     * {@code cranLinuxBinaries} the CRAN mirror has forge's Linux binary layout (T7b): R
+     * restores from {@code <cran>__linux__/<base codename>/latest}, where the mirror answers
+     * with a binary built for that platform when it has one and the source otherwise.
+     * Opt-in: a mirror without that layout answers 404, and renv does not fall back.
+     */
+    public record Mirrors(URI cran, URI pypiIndex, boolean cranLinuxBinaries) {
+
+        public Mirrors(URI cran, URI pypiIndex) {
+            this(cran, pypiIndex, false);
+        }
 
         public Mirrors {
             for (URI u : List.of(cran, pypiIndex)) {
@@ -109,6 +130,18 @@ public final class RecipeGenerator {
                             + "ending in '/': " + u);
                 }
             }
+        }
+
+        /** The repository R restores from on {@code base}. */
+        public String cranFor(Base base) {
+            if (!cranLinuxBinaries) {
+                return cran.toString();
+            }
+            if (base.osCodename() == null) {
+                throw new IllegalArgumentException("Linux binaries need the base's OS codename;"
+                        + " the catalog records none for " + base.reference());
+            }
+            return cran + "__linux__/" + base.osCodename() + "/latest";
         }
     }
 
@@ -152,7 +185,7 @@ public final class RecipeGenerator {
             throw new IllegalArgumentException("an R Shiny entrypoint must be '.'");
         }
         String restore = "renv::restore(lockfile = \"/opt/skald/renv.lock\", "
-                + "library = \"/opt/skald/library\", repos = c(CRAN = \"" + mirrors.cran()
+                + "library = \"/opt/skald/library\", repos = c(CRAN = \"" + mirrors.cranFor(base)
                 + "\"), prompt = FALSE)";
         String launch = ".libPaths(c(\"/opt/skald/library\", .libPaths())); "
                 + "shiny::runApp(\".\", host = \"0.0.0.0\", port = " + PORT

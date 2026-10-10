@@ -39,8 +39,10 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 CATALOG = REPO / "images/catalog.json"
 # forge, pinned. Its eval mode (no flags) seeds cran-public (hosted + a proxy of CRAN) and
 # pypi-public (hosted + a proxy of PyPI), which is all a base build needs.
+# Built from forge ce4f71a (2026-10-10), which serves Linux binaries for CRAN packages
+# (T7b; code_review/forge-issues/003).
 FORGE_IMAGE = ("ghcr.io/gkroken/forge@sha256:"
-               "fe3a82e5d96084238de8c6871193a1d0af8659eb5f80c22a5f35c223628a3757")
+               "8987d7c21b77d62d2da62220df6503497fb5cee7221ae27c8a4c50220cf4142d")
 FORGE, FORGE_PORT = "skald-bases-forge", 18081
 MIRROR = "http://localhost:%d/repository/cran-public/" % FORGE_PORT
 
@@ -144,6 +146,10 @@ def judge_live(entry, facts, upstream_facts=None):
             problems.append("%s %s, catalog %s" % (tool, facts.get(tool), want))
     if not str(facts.get("os", "")).startswith(entry["os"]):
         problems.append("os %s, catalog %s" % (facts.get("os"), entry["os"]))
+    # The codename names forge's Linux binary tree (__linux__/<codename>/latest; T7b): a wrong
+    # one would serve binaries built for another release.
+    if facts.get("os_codename") != entry["os_codename"]:
+        problems.append("os codename %s, catalog %s" % (facts.get("os_codename"), entry["os_codename"]))
     have = installed_packages(facts)
     for pkg in entry["system_packages"]:
         if pkg not in have:
@@ -193,7 +199,7 @@ FACTS = {
     "python": ("python -c 'import platform; print(\"version=\" + platform.python_version())';"
                " pip --version | awk '{print \"pip=\"$2}';"),
 }
-COMMON = ". /etc/os-release; echo os=$NAME $VERSION_ID; echo uid=$(id -u skald);"
+COMMON = ". /etc/os-release; echo os=$NAME $VERSION_ID; echo os_codename=$VERSION_CODENAME; echo uid=$(id -u skald);"
 # Names of the packages dpkg reports fully installed (not merely known or config-files).
 DPKG = (" echo dpkg=$(dpkg-query -W -f='${db:Status-Status} ${Package}=${Version}\\n'"
         " | awk '$1 == \"installed\" {print $2}' | tr '\\n' ' ')")
@@ -281,7 +287,7 @@ def self_test():
     print("== self-test ==")
     missed = []
     r = next(e for e in catalog()["bases"] if e["language"] == "r")
-    good = {"version": r["version"], "renv": "1.3.0", "os": "Ubuntu 24.04", "uid": "10001",
+    good = {"version": r["version"], "renv": "1.3.0", "os": "Ubuntu 24.04", "os_codename": "noble", "uid": "10001",
             "repos": "@CRAN@", "agent": "R (4.6.1 x86_64-pc-linux-gnu x86_64 linux-gnu)",
             "dpkg": "base-files=13 libuv1-dev=1 pkg-config=1 zlib1g-dev=1 libpkgconf3=1"
                     " libuv1t64=1 pkgconf=1 pkgconf-bin=1"}
@@ -302,6 +308,7 @@ def self_test():
            "https://cloud.r-project.org")), False)
     expect("a wrong renv is caught", judge_live(r, dict(clean, renv="1.2.0")), False)
     expect("a wrong R is caught", judge_live(r, dict(clean, version="4.6.0")), False)
+    expect("a wrong OS codename is caught", judge_live(r, dict(clean, os_codename="jammy")), False)
     expect("a root or missing user is caught", judge_live(r, dict(clean, uid="")), False)
     expect("a missing system package is caught", judge_live(r, dict(clean, dpkg=
            clean["dpkg"].replace(" zlib1g-dev=1", "")), upstream), False)

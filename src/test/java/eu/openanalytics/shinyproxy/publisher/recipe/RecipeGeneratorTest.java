@@ -68,6 +68,37 @@ public class RecipeGeneratorTest {
             URI.create("http://localhost:18081/repository/pypi-public/simple/"));
 
     @Test
+    public void withLinuxBinariesRRestoresFromTheBasesBinaryTreeAndPythonIsUnchanged() throws Exception {
+        // T7b: forge's layout, <cran>__linux__/<codename>/latest, the codename the base's own.
+        Mirrors binaries = new Mirrors(MIRRORS.cran(), MIRRORS.pypiIndex(), true);
+        Base r = new Base(R_BASE.reference(), "r", "4.6.1", "10001", "10001", "noble");
+        byte[] rLock = read(APPS.resolve("r-shiny/renv.lock"));
+        String plain = RecipeGenerator.generate(r, MIRRORS, rManifest("."), rLock).dockerfile();
+        String restore = RecipeGenerator.generate(r, binaries, rManifest("."), rLock).dockerfile();
+        String from = "cran-public/\\\"), prompt";
+        String to = "cran-public/__linux__/noble/latest\\\"), prompt";
+        assertTrue(plain.contains(from), plain);
+        assertEquals(plain.replace(from, to), restore, "only the restore's repository changes");
+        Base py = new Base(PY_BASE.reference(), "python", "3.13.16", "10001", "10001", "trixie");
+        byte[] pyLock = read(APPS.resolve("python-shiny/requirements.lock"));
+        assertEquals(RecipeGenerator.generate(py, MIRRORS, pyManifest("app.py"), pyLock).dockerfile(),
+                RecipeGenerator.generate(py, binaries, pyManifest("app.py"), pyLock).dockerfile());
+    }
+
+    @Test
+    public void linuxBinariesNeedTheBasesCodenameAndOnlyAPlainOne() throws Exception {
+        Mirrors binaries = new Mirrors(MIRRORS.cran(), MIRRORS.pypiIndex(), true);
+        byte[] rLock = read(APPS.resolve("r-shiny/renv.lock"));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> RecipeGenerator.generate(R_BASE, binaries, rManifest("."), rLock));
+        assertTrue(e.getMessage().contains("OS codename"), e.getMessage());
+        for (String bad : List.of("", "Noble", "no ble", "../x", "noble/latest", "n", "noble\"")) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> new Base(R_BASE.reference(), "r", "4.6.1", "10001", "10001", bad), bad);
+        }
+    }
+
+    @Test
     public void theRRecipeIsTheGoldenOne() {
         golden("r-shiny", RecipeGenerator.generate(R_BASE, MIRRORS, rManifest("."),
                 read(APPS.resolve("r-shiny/renv.lock"))));

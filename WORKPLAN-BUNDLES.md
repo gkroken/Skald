@@ -2173,7 +2173,15 @@ below are marked passed by this planning document.
         repository and digest, and the uploader refuses anything else. Sharing binaries of
         a private repository would need a tree per audience: its own decision. A probe
         row: a lockfile naming a remote package with a CRAN package's name and version
-        never produces an upload, and the CRAN package's binary is unchanged.
+        never produces an upload, and the CRAN package's binary is unchanged. Which
+        digest is trusted (604d63b N1): CRAN's index publishes MD5sum only, so the
+        builder trusts forge's SHA-256 of the tarball as first fetched, cross-checked
+        against CRAN's MD5sum; a tarball CRAN republishes under the same version is
+        refused and built from source in the app, never overwriting a shared binary.
+        A package's sandbox installs its dependencies only from the shared public tree,
+        never from the triggering app's lockfile (604d63b N2): otherwise a tenant's
+        remote override of an Imports or LinkingTo dependency would run inside the
+        compile of a shared public binary.
       - Skald compiles each such package version a build needs and forge lacks, ONCE per
         platform, each package in its OWN sandbox (the T5 worker profile, no secrets, the
         package's dependencies installed as binaries), so one package's install scripts
@@ -2201,9 +2209,14 @@ below are marked passed by this planning document.
         logged), the uploader's egress (forge only), and the per-package queue's limits
         (admission, retries, a package that never builds falls back to source with a
         visible reason). Security review before it is enabled.
-      Steps: pin the new forge image (dev/bases-probe.py FORGE_IMAGE); switch the CRAN
-      mirror default to forge's Linux URL (a one-time cache miss: the mirror is in the
-      key); the per-package builder and uploader; the pass probe measures a cold R build
+      Steps: **Step 1, done (this commit's part):** the new forge pinned; each catalog
+      base records its OS codename (checked against /etc/os-release by the bases probe);
+      `skald.builds.worker.cran-linux-binaries` (opt-in: a mirror without forge's layout
+      404s and renv does not fall back) makes R restore from
+      `<cran-mirror>__linux__/<codename>/latest`; the switch is in the cache key only when
+      on, so keys made before it are unchanged (pinned by a test), and in provenance. The
+      pass probe runs with it on: cold R 295 s, still from source (no binaries yet).
+      Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another
       package's binary and that no sandbox sees the token.

@@ -81,6 +81,8 @@ public class BaseCatalogTest {
         assertEquals("4.6.1", r.version());
         assertEquals("10001", r.uid());
         assertEquals("10001", r.gid());
+        assertEquals("noble", r.osCodename(), "forge's binary tree for the base (T7b)");
+        assertEquals("trixie", cat.resolve("shiny", "python", "3.13.16", "amd64").orElseThrow().osCodename());
         assertEquals(ref(PY, 'b'), cat.resolve("shiny", "python", "3.13.16", "amd64").orElseThrow().reference());
         assertEquals(Optional.empty(), cat.resolve("shiny", "r", "4.5.0", "amd64"), "no such base");
         assertEquals(Optional.empty(), cat.resolve("shiny", "r", "4.6.1", "arm64"));
@@ -230,6 +232,15 @@ public class BaseCatalogTest {
             badVersion.accept((ObjectNode) cat.get("bases").get(0).get("package_manager"));
             byte[] c3 = bytes(cat);
             assertThrows(IllegalArgumentException.class, () -> BaseCatalog.load(c3, bytes(published(c3))));
+        }
+        // T7b: the codename becomes a URL path segment, so a missing or odd one is refused.
+        for (var badCodename : List.<java.util.function.Consumer<ObjectNode>>of(
+                b -> b.remove("os_codename"), b -> b.put("os_codename", ""), b -> b.put("os_codename", "../x"),
+                b -> b.put("os_codename", "Noble"), b -> b.put("os_codename", 24))) {
+            ObjectNode cat = (ObjectNode) JSON.readTree(catalog());
+            badCodename.accept((ObjectNode) cat.get("bases").get(0));
+            byte[] c4 = bytes(cat);
+            assertThrows(IllegalArgumentException.class, () -> BaseCatalog.load(c4, bytes(published(c4))));
         }
         ObjectNode dup = (ObjectNode) JSON.readTree(catalog());
         ((ObjectNode) dup.get("bases").get(1)).put("id", R);
