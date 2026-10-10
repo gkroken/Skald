@@ -356,12 +356,14 @@ public final class BuildKitClient {
     /**
      * BuildKit's SLSA provenance attestation, attached to every pushed image: an attestation
      * manifest beside the image in an OCI index, so the pushed digest is the index's and
-     * anyone holding the image can verify what built it (buildx imagetools inspect, cosign,
-     * any SLSA verifier). mode=max records the Dockerfile and every build argument's VALUE;
-     * that is safe here, and must stay safe: the Dockerfile is the server's recipe, no build
-     * argument is ever passed, and the one secret (the registry credential) is the client's
-     * docker config, which is not a build input. version pinned, so an upstream default
-     * change cannot alter the format unnoticed.
+     * anyone holding the image can read what built it (buildx imagetools inspect). Unsigned,
+     * and written inside the worker that runs the bundle's steps: portable, not proof; the
+     * build record is the trustworthy statement (ADR-0012, b45c0a9 N1). mode=max records the
+     * Dockerfile and every build argument's VALUE; that is safe here, and must stay safe: the
+     * Dockerfile is the server's recipe, the only build arguments are the gateway proxy's
+     * ({@link #proxyArgs}: an internal address), and the one secret (the registry
+     * credential) is the client's docker config, which is not a build input. version pinned,
+     * so an upstream default change cannot alter the format unnoticed.
      */
     static final String PROVENANCE_ATTESTATION = "attest:provenance=mode=max,version=v1";
 
@@ -375,11 +377,40 @@ public final class BuildKitClient {
         return a;
     }
 
-    static List<String> buildctl(Push push) {
+    /** The gateway as a proxy URL, http://ipv4:port: nothing else may reach a build-arg. */
+    private static final java.util.regex.Pattern PROXY =
+            java.util.regex.Pattern.compile("http://[0-9]{1,3}(?:\\.[0-9]{1,3}){3}:[0-9]{1,5}");
+
+    /**
+     * The proxy, for RUN steps. The worker's network reaches nothing but the gateway, and
+     * buildkitd's own environment (http_proxy, for pulls) is not a RUN step's: without these
+     * every restore resolved its mirror directly and failed (the T7 pass probe). By address
+     * ({@link DockerWorkerLauncher#gatewayProxy}): a RUN step cannot resolve the gateway's
+     * name. BuildKit's
+     * predefined proxy build arguments, as docker build passes a client's proxy: the Dockerfile
+     * frontend gives them to RUN steps outside the cache key (the gateway's name is per attempt,
+     * so anything else would make every dependency layer a miss) and leaves them out of the
+     * image's config and history. Upper and lower case, as tools read either; https too, for an
+     * https mirror reached by CONNECT. The value is an internal address, not a secret.
+     */
+    static List<String> proxyArgs(String proxy) {
+        if (proxy == null || !PROXY.matcher(proxy).matches()) {
+            throw new IllegalArgumentException("not a gateway proxy URL: " + proxy);
+        }
+        List<String> args = new java.util.ArrayList<>();
+        for (String name : List.of("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")) {
+            args.addAll(List.of("--opt", "build-arg:" + name + "=" + proxy));
+        }
+        return args;
+    }
+
+    static List<String> buildctl(Push push, String proxy) {
         List<String> args = new java.util.ArrayList<>(List.of("buildctl", "--addr", DockerWorkerLauncher.SOCKET_ADDRESS,
                 "build", "--progress", "plain", "--frontend", "dockerfile.v0",
                 "--local", "context=" + CONTEXT_MOUNT + "/ctx", "--local", "dockerfile=" + CONTEXT_MOUNT + "/df",
-                "--opt", PROVENANCE_ATTESTATION,
+                "--opt", PROVENANCE_ATTESTATION));
+        args.addAll(proxyArgs(proxy));
+        args.addAll(List.of(
                 "--output", "type=image,name=" + push.name() + ",push=true",
                 "--metadata-file", METADATA));
         if (push.cache() != null) {
@@ -421,7 +452,7 @@ public final class BuildKitClient {
         docker.createContainer(ContainerConfig.builder().image(images.worker())
                 .user(DockerWorkerLauncher.WORKER_UID + ":" + DockerWorkerLauncher.WORKER_UID)
                 .entrypoint(CLIENT_ENTRYPOINT)
-                .cmd(buildctl(push))
+                .cmd(buildctl(push, launcher.gatewayProxy(h)))
                 .env("SKALD_DOCKER_CONFIG=" + dockerConfig(push))
                 .labels(labels).hostConfig(hc).build(), h.client());
         docker.startContainer(h.client());

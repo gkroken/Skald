@@ -37,6 +37,9 @@ import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
  */
 public final class TestObjectStore implements AutoCloseable {
 
+    public static final String ACCESS_KEY = "skald";
+    public static final String SECRET_KEY = "skaldskald";
+
     public final String bucket;
     public final ObjectStore store;
     private final GenericContainer<?> minio;
@@ -44,17 +47,27 @@ public final class TestObjectStore implements AutoCloseable {
 
     public TestObjectStore(String bucket) {
         this.bucket = bucket;
-        minio = MinioTestContainer.create("skald", "skaldskald");
+        minio = MinioTestContainer.create(ACCESS_KEY, SECRET_KEY);
         minio.start();
         client = S3Client.builder()
-                .endpointOverride(java.net.URI.create("http://" + minio.getHost() + ":" + minio.getMappedPort(9000)))
+                .endpointOverride(java.net.URI.create(endpoint()))
                 .region(Region.of("us-east-1"))
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("skald", "skaldskald")))
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(ACCESS_KEY, SECRET_KEY)))
                 .httpClient(UrlConnectionHttpClient.create())
                 .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
                 .build();
         client.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
         store = new S3ObjectStore(client);
+    }
+
+    /** The store's S3 endpoint, for a test that configures the application against it. */
+    public String endpoint() {
+        return "http://" + minio.getHost() + ":" + minio.getMappedPort(9000);
+    }
+
+    /** Another bucket in the same store (the application keeps bundles and logs apart). */
+    public void createBucket(String name) {
+        client.createBucket(CreateBucketRequest.builder().bucket(name).build());
     }
 
     @Override

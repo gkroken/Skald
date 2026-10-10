@@ -426,11 +426,21 @@ record held only the digest.
    got as far as: which base and lock it ran against is what its owner needs.
 2. **BuildKit's SLSA v1 provenance attestation** on the image itself (`mode=max`). The
    standard, portable statement of what built the image, carried with it into any registry
-   and verifiable by standard tooling without access to Skald. `mode=max` records the
-   Dockerfile and build-argument values; Skald passes no build argument, the Dockerfile is
+   and readable by standard tooling (`docker buildx imagetools inspect`) without access to
+   Skald. It is **unsigned** (SLSA Build L1): buildkitd writes it inside the worker that also
+   runs the bundle's RUN steps, and anyone who can push to the repository can replace the
+   index with another statement, so `cosign verify-attestation` and slsa-verifier, which
+   need a signature, cannot verify it. Until it is signed outside the worker, the platform's
+   record (1) is the trustworthy one; the attestation is portable, not proof (b45c0a9 N1).
+   `mode=max` records the
+   Dockerfile and build-argument values; Skald passes no build argument but BuildKit's
+   predefined proxy ones (the attempt's gateway, an internal name), the Dockerfile is
    the server's recipe, and the registry credential is the client's docker config, not a
    build input. A test reads the pushed attestation back and checks the credential is not
-   in it.
+   in it. It does carry internal names: the registry host:port (in the base reference and
+   the Dockerfile) and the mirror URLs. That is fine while images stay in the platform's
+   registry; an operator who pushes or exports them elsewhere publishes those names with
+   them, as the build record already holds them (b45c0a9 N2).
 
 **Rejected:** the image attestation alone (it cannot state the bundle receipt, the
 isolation profile or the worker that ran it, and is not queryable); the database record
@@ -438,5 +448,6 @@ alone (not portable, nothing travels with the image); `mode=min` (drops the Dock
 which is what makes the statement reproducible); reusing the `recipe` column (it holds the
 admission inputs, which are part of the idempotency fingerprint).
 
-**Deferred, needs sign-off:** an SBOM attestation. BuildKit generates it with a scanner
+**Deferred, needs sign-off:** signing the attestation (a key, or keyless signing, held
+outside the worker: new trust material and likely a new dependency). An SBOM attestation. BuildKit generates it with a scanner
 image (docker/buildkit-syft-scanner), which would be a new trusted image in the build path.

@@ -53,18 +53,38 @@ public class BuildKitClientTest {
     private static final Credential CRED = new Credential("skald", "s3cret");
     private static final UUID BUILD = UUID.fromString("00000000-0000-0000-0000-000000000007");
 
+    private static final String PROXY = "http://172.18.0.2:8888";
+
     @Test
     public void thePushNameIsTheLedgeredTagAndCannotCarryAnOutputOption() {
         Push push = new Push("registry", "content/abc", BUILD, CRED);
         assertEquals("registry:5000/content/abc:build-" + BUILD, push.name());
         assertEquals("registry:5000/content/abc@sha256:" + "0".repeat(64),
                 push.byDigest("sha256:" + "0".repeat(64)));
-        assertTrue(BuildKitClient.buildctl(push).contains(
+        assertTrue(BuildKitClient.buildctl(push, PROXY).contains(
                 "type=image,name=registry:5000/content/abc:build-" + BUILD + ",push=true"));
         // Every pushed image carries BuildKit's SLSA v1 provenance, at full detail.
-        List<String> args = BuildKitClient.buildctl(push);
+        List<String> args = BuildKitClient.buildctl(push, PROXY);
         assertEquals("attest:provenance=mode=max,version=v1", args.get(args.indexOf("--opt") + 1));
-        assertEquals(1, args.stream().filter("--opt"::equals).count(), "no other frontend option: no build argument");
+        // And no other frontend option: the only build arguments are BuildKit's predefined
+        // proxy ones, the attempt's gateway by address (the T7 pass probe: RUN steps do not inherit
+        // buildkitd's environment, so without them no restore reached its mirror).
+        List<String> opts = new java.util.ArrayList<>();
+        for (int i = 0; i < args.size(); i++) {
+            if ("--opt".equals(args.get(i))) {
+                opts.add(args.get(i + 1));
+            }
+        }
+        assertEquals(List.of("attest:provenance=mode=max,version=v1", "build-arg:HTTP_PROXY=" + PROXY,
+                "build-arg:http_proxy=" + PROXY, "build-arg:HTTPS_PROXY=" + PROXY, "build-arg:https_proxy=" + PROXY),
+                opts);
+        for (String bad : List.of("http://172.18.0.2:8888,x", "http://172.18.0.2", "https://172.18.0.2:8888",
+                "http://skald-b-x-gw:8888", "http://172.18.0.2:8888/", "http://u@172.18.0.2:8888", "http://[::1]:8888",
+                "http://172.18.0:8888", "")) {
+            assertThrows(IllegalArgumentException.class, () -> BuildKitClient.buildctl(push, bad), bad);
+        }
+        assertThrows(IllegalArgumentException.class, () -> BuildKitClient.buildctl(push, null));
+
         // --output is one comma-separated option string: a ',' in either name would add an
         // option (another registry, registry.insecure, push=false).
         for (String repo : List.of("abc,push=false", "abc,registry.insecure=true", "ABC", "a b", "a//b",
@@ -82,12 +102,12 @@ public class BuildKitClientTest {
         String key = "ab".repeat(32);
         Push push = new Push("registry", "content/abc", BUILD, CRED, new BuildKitClient.Cache(content, key));
         String ref = "registry:5000/skald/cache/" + content + ":" + key;
-        List<String> args = BuildKitClient.buildctl(push);
+        List<String> args = BuildKitClient.buildctl(push, PROXY);
         int i = args.indexOf("--import-cache");
         assertEquals("type=registry,ref=" + ref, args.get(i + 1));
         int e = args.indexOf("--export-cache");
         assertEquals("type=registry,ref=" + ref + ",mode=min,ignore-error=true", args.get(e + 1));
-        assertFalse(BuildKitClient.buildctl(new Push("registry", "content/abc", BUILD, CRED)).contains("--import-cache"),
+        assertFalse(BuildKitClient.buildctl(new Push("registry", "content/abc", BUILD, CRED), PROXY).contains("--import-cache"),
                 "no cache, no cache arguments");
         for (String bad : List.of("AB".repeat(32), "ab".repeat(31), "ab".repeat(32) + "a", "ab".repeat(31) + ",x",
                 "")) {
@@ -101,7 +121,7 @@ public class BuildKitClientTest {
         Push push = new Push("registry", "abc", BUILD, CRED);
         assertFalse(CRED.toString().contains("s3cret"));
         assertFalse(push.toString().contains("s3cret"));
-        assertTrue(BuildKitClient.buildctl(push).stream().noneMatch(a -> a.contains("s3cret")
+        assertTrue(BuildKitClient.buildctl(push, PROXY).stream().noneMatch(a -> a.contains("s3cret")
                 || a.contains("c2thbGQ6czNjcmV0")), "not in buildctl's argv");
         // {"auths":{"registry:5000":{"auth":base64("skald:s3cret")}}}
         assertEquals("{\"auths\":{\"registry:5000\":{\"auth\":\"c2thbGQ6czNjcmV0\"}}}",

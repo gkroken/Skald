@@ -851,7 +851,15 @@ public class BuildKitDriverTest {
         }
         assertNotNull(step, "the restore step is in the log: " + texts);
         String id = step;
-        return texts.stream().anyMatch(t -> t.equals(id + " CACHED"));
+        // Reused means its command did not run: no "restoring-dependencies" from the step. A hit
+        // in the imported registry cache is not always reported as "#N CACHED": when a later
+        // step needs the snapshot, BuildKit pulls the cached layer and reports "extracting" and
+        // "DONE" instead (seen in the T7 pass probe). The cold build's assertFalse keeps this
+        // honest: there the step's own output must appear.
+        boolean ran = texts.stream().anyMatch(t -> t.matches(java.util.regex.Pattern.quote(id)
+                + " [0-9.]+ restoring-dependencies"));
+        boolean settled = texts.stream().anyMatch(t -> t.equals(id + " CACHED") || t.startsWith(id + " DONE"));
+        return settled && !ran;
     }
 
     private static Claimed claimedFor(UUID content) {
@@ -875,7 +883,7 @@ public class BuildKitDriverTest {
         Claimed sourceEdit = claimedFor(content);
         assertInstanceOf(Built.class, driver(Settings.defaults(), cached(dir, "lock-A\n", "print(2)\n", keyA))
                 .run(sourceEdit, () -> false));
-        assertTrue(restoreWasCached(sourceEdit), "a source-only edit reuses the dependency layer");
+        assertTrue(restoreWasCached(sourceEdit), "a source-only edit reuses the dependency layer: " + texts(sourceEdit));
 
         Claimed lockChange = claimedFor(content);
         assertInstanceOf(Built.class, driver(Settings.defaults(), cached(dir, "lock-B\n", "print(2)\n", keyB))

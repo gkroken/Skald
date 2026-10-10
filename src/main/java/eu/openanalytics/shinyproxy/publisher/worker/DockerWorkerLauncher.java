@@ -324,6 +324,19 @@ public final class DockerWorkerLauncher {
         waitForLog(h.gateway(), "Accepting HTTP", 30);
     }
 
+    /**
+     * The workspace filesystem: ext4 without a journal, mounted without write barriers.
+     * Measured on the T7 pass probe's host, an fsync on the loop device cost about 460 ms (300
+     * fsynced files: 138 s) because every flush reaches the backing file's own disk, and an
+     * image extraction syncs file by file: a cold python base did not finish its second layer
+     * inside the 20-minute deadline. Without the journal and barriers the same 300 files took
+     * 0.24 s. Nothing on it needs to survive a crash: it is one attempt's scratch, an attempt
+     * does not outlive its host, and reconciliation disposes of what a dead one left. The
+     * quota (the filesystem's size), nosuid and nodev are unchanged.
+     */
+    static final String WORKSPACE_MKFS = "mkfs.ext4 -q -F -O ^has_journal";
+    static final String WORKSPACE_MOUNT = "nosuid,nodev,barrier=0";
+
     private void makeWorkspace(Handle h, int megabytes, Map<String, String> labels)
             throws DockerException, InterruptedException {
         try {
@@ -336,7 +349,7 @@ public final class DockerWorkerLauncher {
         String out = runHelper("quota-" + h.attemptId(), images.setup(), true,
                 List.of(QUOTA_IMAGES_VOLUME + ":/s"), List.of(),
                 List.of("sh", "-c", "truncate -s " + megabytes + "M /s/" + h.quotaImage()
-                        + " && mkfs.ext4 -q -F /s/" + h.quotaImage()
+                        + " && " + WORKSPACE_MKFS + " /s/" + h.quotaImage()
                         + " && losetup --find --show /s/" + h.quotaImage()), labels);
         String loop = out.strip().lines().reduce((a, b) -> b).orElse("");
         if (!LOOP.matcher(loop).matches()) {
@@ -345,10 +358,39 @@ public final class DockerWorkerLauncher {
         Map<String, String> volumeLabels = new LinkedHashMap<>(labels);
         volumeLabels.put("eu.skald.loop-device", loop);
         createOwnedVolume(h.workspaceVolume(), volumeLabels,
-                Map.of("type", "ext4", "device", loop, "o", "nosuid,nodev"));
+                Map.of("type", "ext4", "device", loop, "o", WORKSPACE_MOUNT));
         runHelper("chown-" + h.attemptId(), images.helper(), false,
                 List.of(h.workspaceVolume() + ":/w"), List.of(),
                 List.of("chown", WORKER_UID + ":" + WORKER_UID, "/w"), labels);
+    }
+
+    /** The attempt's egress gateway as a forward proxy, by name: the daemon's, for pulls. */
+    static String proxy(Handle h) {
+        return "http://" + h.gateway() + ":" + GatewayConfig.PORT;
+    }
+
+    private static final java.util.regex.Pattern IPV4 =
+            java.util.regex.Pattern.compile("(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}");
+
+    /**
+     * The gateway as a forward proxy for RUN steps: by its address on the attempt's network,
+     * not its name. BuildKit writes a RUN step's resolv.conf without the daemon's localhost
+     * resolver (Docker's embedded DNS), so the name did not resolve in a step (the T7 pass
+     * probe); by address a step needs no DNS at all, and the gateway resolves the mirror. The
+     * container must be the attempt's own (labels), on the attempt's network.
+     */
+    public String gatewayProxy(Handle h) throws DockerException, InterruptedException {
+        ContainerInfo gw = docker.inspectContainer(h.gateway());
+        if (!ours(gw.config().labels(), h)) {
+            throw new IllegalStateException("container " + h.gateway() + " is not this attempt's");
+        }
+        var networks = gw.networkSettings() == null ? null : gw.networkSettings().networks();
+        var attached = networks == null ? null : networks.get(h.network());
+        String ip = attached == null ? null : attached.ipAddress();
+        if (ip == null || !IPV4.matcher(ip).matches()) {
+            throw new IllegalStateException("the gateway has no IPv4 address on " + h.network() + ": " + ip);
+        }
+        return "http://" + ip + ":" + GatewayConfig.PORT;
     }
 
     private void startWorker(Handle h, Launch launch, Map<String, String> labels)
@@ -358,7 +400,7 @@ public final class DockerWorkerLauncher {
         binds.add(h.configVolume() + ":" + CONFIG_MOUNT + ":ro");
         List<String> env = new ArrayList<>(launch.env());
         env.addAll(ENVIRONMENT);
-        String proxy = "http://" + h.gateway() + ":" + GatewayConfig.PORT;
+        String proxy = proxy(h);
         env.add("http_proxy=" + proxy);
         env.add("HTTP_PROXY=" + proxy);
         HostConfig hc = HostConfig.builder()

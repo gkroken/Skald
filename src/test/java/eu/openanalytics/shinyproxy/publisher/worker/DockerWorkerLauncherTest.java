@@ -125,8 +125,19 @@ public class DockerWorkerLauncherTest {
 
             Volume ws = docker.inspectVolume(h.workspaceVolume());
             assertEquals("ext4", ws.options().get("type"));
-            assertEquals("nosuid,nodev", ws.options().get("o"));
+            assertEquals("nosuid,nodev,barrier=0", ws.options().get("o"));
             assertTrue(ws.options().get("device").startsWith("/dev/loop"));
+            // What the worker has mounted, not only what the volume asks for: no barriers and no
+            // journal, or every fsync of an extraction reaches the backing file's disk (the T7
+            // pass probe: about 460 ms each, and a cold base did not extract within the deadline).
+            String mount = exec(h.worker(), "sh", "-c", "grep ' /workspace ' /proc/mounts").strip();
+            List<String> options = List.of(mount.split(" ")[3].split(","));
+            assertTrue(mount.startsWith(ws.options().get("device") + " /workspace ext4 "), mount);
+            assertTrue(options.containsAll(List.of("nosuid", "nodev", "nobarrier")), mount);
+            // jbd2 lists every journal on the kernel as <device>-8, the worker's /proc included.
+            String journals = exec(h.worker(), "ls", "/proc/fs/jbd2");
+            assertFalse(List.of(journals.split("\\s+")).contains(ws.options().get("device").substring(5) + "-8"),
+                    "the workspace has no journal: " + journals);
 
             // The rule the gateway runs is the one GatewayConfig writes (543ed35 N2's other
             // half: the conf the driver actually mounts).
@@ -144,6 +155,11 @@ public class DockerWorkerLauncherTest {
             assertEquals(GatewayConfig.squidConf("registry", List.of("pypi.org"), List.of("forge")), mounted);
 
             // The provenance states what ran: each image by the id its container runs.
+            // RUN steps reach the gateway by its address on the attempt's network (a step cannot
+            // resolve its name: the T7 pass probe).
+            String ip = docker.inspectContainer(h.gateway()).networkSettings().networks().get(h.network()).ipAddress();
+            assertTrue(ip.matches("[0-9]+(\\.[0-9]+){3}"), ip);
+            assertEquals("http://" + ip + ":" + GatewayConfig.PORT, launcher.gatewayProxy(h));
             Map<String, Object> ran = launcher.provenance(h);
             Map<?, ?> images = (Map<?, ?>) ran.get("images");
             assertEquals(worker.image(), ((Map<?, ?>) images.get("worker")).get("id"));
@@ -240,6 +256,9 @@ public class DockerWorkerLauncherTest {
             }
             IllegalStateException e = assertThrows(IllegalStateException.class, () -> launcher.provenance(h));
             assertTrue(e.getMessage().contains(h.worker()), e.getMessage());
+            // Nor is it the proxy a RUN step is sent through.
+            IllegalStateException p = assertThrows(IllegalStateException.class, () -> launcher.gatewayProxy(h));
+            assertTrue(p.getMessage().contains(h.gateway()), p.getMessage());
         } finally {
             for (String c : made) {
                 docker.removeContainer(c);
@@ -323,7 +342,7 @@ public class DockerWorkerLauncherTest {
         String image = h.quotaImage();
         String setup = docker.createContainer(org.mandas.docker.client.messages.ContainerConfig.builder()
                 .image(Images.SETUP).labels(Map.of(DockerWorkerLauncher.ATTEMPT_LABEL, id))
-                .cmd("sh", "-c", "truncate -s 64M /s/" + image + " && mkfs.ext4 -q -F /s/" + image
+                .cmd("sh", "-c", "truncate -s 64M /s/" + image + " && " + DockerWorkerLauncher.WORKSPACE_MKFS + " /s/" + image
                         + " && losetup --find --show /s/" + image)
                 .hostConfig(HostConfig.builder().privileged(true).networkMode("none")
                         .binds(DockerWorkerLauncher.QUOTA_IMAGES_VOLUME + ":/s").build()).build()).id();

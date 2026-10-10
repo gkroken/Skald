@@ -4,7 +4,7 @@ RUN ["python","-m","venv","/opt/skald/venv"]
 RUN ["chown","-R","10001:10001","/opt/skald/venv"]
 COPY skald/requirements.lock /opt/skald/requirements.lock
 USER 10001:10001
-RUN ["/opt/skald/venv/bin/python","-m","pip","install","--no-input","--index-url","http://localhost:18081/repository/pypi-public/simple/","--require-hashes","--only-binary=:all:","--no-deps","-r","/opt/skald/requirements.lock"]
+RUN ["/opt/skald/venv/bin/python","-m","pip","install","--no-input","--index-url","http://localhost:18081/repository/pypi-public/simple/","--trusted-host","localhost:18081","--require-hashes","--only-binary=:all:","--no-deps","-r","/opt/skald/requirements.lock"]
 RUN ["/opt/skald/venv/bin/python","-m","pip","check"]
 COPY app/ /app/
 WORKDIR /app

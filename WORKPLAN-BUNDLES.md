@@ -2040,9 +2040,23 @@ below are marked passed by this planning document.
       digest, every bound, the waived ones) and the worker and gateway images by the id their
       containers ran. A build with an image has provenance (a CHECK); a failure records what it
       got as far as. Every pushed image also carries BuildKit's SLSA v1 provenance
-      attestation (`mode=max`; no build argument or secret exists to leak), so the pushed
+      attestation (`mode=max`; no secret is a build input, and the only build arguments are
+      the gateway proxy's, an internal address), so the pushed
       digest is an OCI index. An SBOM attestation is not part of T7: it needs BuildKit's
       scanner image as a new trusted image (user sign-off).
+      **Part 4e-1b (the pass probe):** `dev/t7-pass-probe.py` runs the fixture apps through
+      the WIRED worker (the application's own configuration classes, against forge on :80
+      and an authenticated registry with the published bases), then pulls each image cold by
+      digest and runs it hardened. It found four defects, fixed: the workspace's fsyncs cost
+      ~460 ms each on a loop device (a cold base did not extract within the deadline; now
+      ext4 without a journal, mounted barrier=0); pip ignores a plain-http index unless it
+      is named trusted (now `--trusted-host` for http only, hashes required); RUN steps had
+      no proxy (now BuildKit's predefined proxy build arguments, outside the cache key); and
+      could not resolve the gateway's name (now its address). Python passes: built, pulled
+      cold, served, uid 10001, /app read-only. R does not yet: the native snapshotter copies
+      the whole parent per layer and step, and the r-shiny base alone exhausts the 8 GiB
+      workspace; kernel overlayfs (no device needed) is the next part, with the isolation
+      probes rerun on it.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,

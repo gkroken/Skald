@@ -98,7 +98,7 @@ public class RecipeGeneratorTest {
         assertEquals(List.of("skald/requirements.lock"), List.copyOf(py.files().keySet()));
         assertArrayEquals(PipLockPolicy.check(pyUpload).render(), py.files().get("skald/requirements.lock"));
         assertTrue(py.dockerfile().contains("\"--index-url\",\"" + MIRRORS.pypiIndex()
-                + "\",\"--require-hashes\",\"--only-binary=:all:\",\"--no-deps\",\"-r\","
+                + "\",\"--trusted-host\",\"localhost:18081\",\"--require-hashes\",\"--only-binary=:all:\",\"--no-deps\",\"-r\","
                 + "\"/opt/skald/requirements.lock\""));
 
         for (Recipe recipe : List.of(r, py)) {
@@ -118,6 +118,22 @@ public class RecipeGeneratorTest {
         assertArrayEquals(py.files().get("skald/requirements.lock"), RecipeGenerator.generate(
                 PY_BASE, MIRRORS, pyManifest("app.py"), noisy.getBytes(StandardCharsets.US_ASCII))
                 .files().get("skald/requirements.lock"));
+    }
+
+    @Test
+    public void anHttpIndexIsNamedTrustedAndAnHttpsIndexKeepsItsCertificateCheck() throws Exception {
+        // The T7 pass probe: pip ignores a plain-http index on any host but localhost unless it
+        // is named trusted, so restores from http://forge/ found no versions. Only http is
+        // named (there is no certificate to skip); an https index never is.
+        byte[] lock = read(APPS.resolve("python-shiny/requirements.lock"));
+        String http = RecipeGenerator.generate(PY_BASE, new Mirrors(MIRRORS.cran(),
+                URI.create("http://forge/repository/pypi-public/simple/")), pyManifest("app.py"), lock).dockerfile();
+        assertTrue(http.contains("\"--index-url\",\"http://forge/repository/pypi-public/simple/\","
+                + "\"--trusted-host\",\"forge\",\"--require-hashes\""), http);
+        String https = RecipeGenerator.generate(PY_BASE, new Mirrors(MIRRORS.cran(),
+                URI.create("https://pypi.example:8443/simple/")), pyManifest("app.py"), lock).dockerfile();
+        assertTrue(https.contains("\"--index-url\",\"https://pypi.example:8443/simple/\",\"--require-hashes\""), https);
+        assertFalse(https.contains("trusted-host"), https);
     }
 
     @Test

@@ -19,6 +19,11 @@ setuid file in a snapshot is otherwise one more thing the worker could execute w
 changed identity. Measured 2026-09-26: the options reach the RUN's own root mount (a bind
 from the volume inherits them), and a RUN still builds.
 
+No journal, and mounted barrier=0, as DockerWorkerLauncher makes it (T7 part 4e-1b): every
+fsync otherwise reaches the backing file's disk, measured at about 460 ms each, and an image
+extraction syncs file by file. The workspace is one attempt's scratch; nothing on it has to
+survive a crash.
+
 Usage from a probe: create(...) -> the loop device; destroy(name, loop) in a finally.
 """
 
@@ -28,7 +33,8 @@ import shutil
 import subprocess
 
 SETUP_IMAGE = "debian:12-slim"
-OPTIONS = "nosuid,nodev"
+OPTIONS = "nosuid,nodev,barrier=0"
+MKFS = "mkfs.ext4 -q -F -O ^has_journal"
 
 
 def docker(args, **kw):
@@ -47,7 +53,7 @@ def create(name, directory, size_mb, owner=None, options=OPTIONS):
         fh.truncate(size_mb * 1024 * 1024)
     made = docker(["run", "--rm", "--privileged", "--network", "none", "-v", "%s:/s" % d,
                    SETUP_IMAGE, "sh", "-c",
-                   "mkfs.ext4 -q -F /s/%s && losetup --find --show /s/%s" % (image, image)],
+                   "%s /s/%s && losetup --find --show /s/%s" % (MKFS, image, image)],
                   timeout=300)
     loop = (made.stdout.strip().splitlines() or [""])[-1]
     if made.returncode != 0 or not loop.startswith("/dev/loop"):

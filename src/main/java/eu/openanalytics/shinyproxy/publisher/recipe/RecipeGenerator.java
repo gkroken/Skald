@@ -188,6 +188,19 @@ public final class RecipeGenerator {
         }
         String user = base.uid() + ":" + base.gid();
         String pip = "/opt/skald/venv/bin/python";
+        List<String> install = new java.util.ArrayList<>(List.of(pip, "-m", "pip", "install", "--no-input",
+                "--index-url", mirrors.pypiIndex().toString()));
+        // pip ignores a plain-http index on any host but localhost unless it is named trusted
+        // ("not a trusted or secure host and is being ignored"), so every restore from an http
+        // mirror found no versions at all (the T7 pass probe). Naming it gives up nothing: on
+        // http there is no certificate to verify, and integrity is --require-hashes, every
+        // file against the lock. An https mirror is never named, so its certificate is checked.
+        // The authority is the mirror's own (host[:port]; MIRROR admits no userinfo).
+        if ("http".equals(mirrors.pypiIndex().getScheme())) {
+            install.addAll(List.of("--trusted-host", mirrors.pypiIndex().getRawAuthority()));
+        }
+        install.addAll(List.of("--require-hashes", "--only-binary=:all:", "--no-deps", "-r",
+                "/opt/skald/requirements.lock"));
         String dockerfile = header(base)
                 + "RUN " + exec("python", "-m", "venv", "/opt/skald/venv") + "\n"
                 + "RUN " + exec("chown", "-R", user, "/opt/skald/venv") + "\n"
@@ -195,10 +208,7 @@ public final class RecipeGenerator {
                 + "USER " + user + "\n"
                 // Every option is the server's; the file is the policy's rendering. Wheels
                 // only (no sdist build backends), every file hash-checked, nothing resolved.
-                + "RUN " + exec(pip, "-m", "pip", "install", "--no-input",
-                        "--index-url", mirrors.pypiIndex().toString(), "--require-hashes",
-                        "--only-binary=:all:", "--no-deps", "-r", "/opt/skald/requirements.lock")
-                + "\n"
+                + "RUN " + exec(install.toArray(String[]::new)) + "\n"
                 // --no-deps cannot notice a lock that is missing a dependency; pip check can,
                 // so an incomplete lock fails the build instead of the first request.
                 + "RUN " + exec(pip, "-m", "pip", "check") + "\n"
