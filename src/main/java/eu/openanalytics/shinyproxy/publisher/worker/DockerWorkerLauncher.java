@@ -775,6 +775,10 @@ public final class DockerWorkerLauncher {
             // gives up on the first answer leaves the helper -- whose fixed name then refuses
             // the next helper of the same attempt. If the helper itself failed, that failure
             // is what propagates, with a failed removal attached to it (650f18c review N1).
+            // An interrupt (a sweeper stopping, the process shutting down) does not stop the
+            // removal: the helper is privileged and ours, and an interrupted removal left one
+            // behind (the T7 pass probe's restart row). The flag is restored afterwards.
+            boolean interrupted = Thread.interrupted();
             try {
                 retrying(() -> docker.removeContainer(container, RemoveContainerParam.forceKill()));
             } catch (Exception e) {
@@ -788,6 +792,10 @@ public final class DockerWorkerLauncher {
                     throw r;
                 } else {
                     throw new IllegalStateException(e);
+                }
+            } finally {
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
                 }
             }
         }

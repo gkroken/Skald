@@ -45,6 +45,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.file.Files;
@@ -120,7 +121,25 @@ public class WorkerConfig {
         return new JerseyDockerClientBuilder().fromEnv().build();
     }
 
+    /**
+     * The workspace, locked for this process and cleared of what a dead one left
+     * (WorkspaceLock), before the loop can extract into it. Closed after the loop stops. A
+     * workspace that is not a writable directory is reported by the loop's own checks.
+     */
+    @Bean(destroyMethod = "close")
+    public WorkspaceLock skaldWorkspaceLock() throws IOException {
+        if (workspace == null || workspace.isBlank() || !Files.isDirectory(Path.of(workspace))
+                || !Files.isWritable(Path.of(workspace))) {
+            return null;
+        }
+        return WorkspaceLock.claim(Path.of(workspace));
+    }
+
+    // DependsOn: the lock is taken before the loop exists (a workspace another process holds
+    // refuses the start) and released only after the loop has stopped and its last tree is
+    // gone, so no other process can claim the workspace while this one still extracts.
     @Bean(initMethod = "start", destroyMethod = "stop")
+    @org.springframework.context.annotation.DependsOn("skaldWorkspaceLock")
     public BuildLoop skaldBuildLoop(DockerClient skaldWorkerDocker, ObjectProvider<BuildCoordinator> coordinator,
                                     CoordinatorSettings settings, ObjectProvider<ObjectStore> store,
                                     ExtractionLimits limits) throws Exception {

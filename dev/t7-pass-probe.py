@@ -36,6 +36,12 @@ the Java half reports as built, from the registry, cold:
   served/user/    the pulled image, run hardened (dev/recipes-probe.py's checks): GET / is a
   read-only       Shiny page, every process is uid 10001 (PID 1 included), /app is not
                   writable
+  restart         part 4e-4: Postgres and MinIO run here (skald-t7p-pg, skald-t7p-minio) so
+                  they outlive a JVM; phase one (restartPhaseOneRunsUntilTheProcessIsKilled)
+                  starts a build, and once its restore runs the probe `docker kill`s that
+                  Maven container -- no shutdown hook, no disposal, no log finish; phase two,
+                  a new JVM on the same database and store, must settle the attempt
+                  INTERRUPTED, dispose of what it left, finish its log, and build again
   host            after everything, nothing labelled eu.skald.build-attempt or named
                   skald-b-*; no loop device backed by skald-quota-*; skald-quota-images empty
 
@@ -43,9 +49,9 @@ The probe's own containers, network and volumes are named skald-t7p-* and remove
 Docker credentials for the probe registry live in a temporary DOCKER_CONFIG, never in the
 user's.
 
-Usage: python3 dev/t7-pass-probe.py [--keep] [--test METHOD]
+Usage: python3 dev/t7-pass-probe.py [--keep] [--test METHOD | --test restart]
   --keep   leave the infrastructure up afterwards (for debugging; removed by the next run)
-  --test   run one T7PassProbeTest method instead of all
+  --test   run one T7PassProbeTest method instead of all, or only the restart rows
 """
 
 import importlib.util
@@ -65,6 +71,10 @@ OUTER = PREFIX + "-outer"
 FORGE = PREFIX + "-forge"
 REGISTRY = PREFIX + "-registry"
 REGISTRY_PORT = 18092
+PG, PG_PORT = PREFIX + "-pg", 18093
+MINIO, MINIO_PORT = PREFIX + "-minio", 18094
+MAVEN_NAME = PREFIX + "-maven"
+PG_IMAGE = "postgres:16"
 REGISTRY_IMAGE = "registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373"
 USERNAME = "skald-t7p"
 OUT = REPO / "target/t7probe"
@@ -94,8 +104,22 @@ def docker(args, timeout=600, env=None):
                           env=env)
 
 
+def remove_tree(path):
+    """rmtree that also removes a frozen (read-only) extraction tree, which a killed JVM leaves
+    in the workspace: each directory is made writable before its entries go."""
+    if not path.exists():
+        return
+    for root, dirs, _ in os.walk(path):
+        for d in dirs:
+            full = os.path.join(root, d)
+            if not os.path.islink(full):
+                os.chmod(full, 0o700)
+    os.chmod(path, 0o700)
+    shutil.rmtree(path)
+
+
 def teardown():
-    for c in (FORGE, REGISTRY):
+    for c in (FORGE, REGISTRY, PG, MINIO, MAVEN_NAME):
         docker(["rm", "-f", "-v", c])
     docker(["network", "rm", OUTER])
 
@@ -155,7 +179,89 @@ def setup(password, config_dir):
     docker(["start", REGISTRY])
 
 
-def maven(test, password, published):
+def minio_image():
+    """The MinIO the Java tests pin (MinioTestContainer.IMAGE), read from its source so the
+    two cannot drift."""
+    src = (REPO / "src/test/java/eu/openanalytics/shinyproxy/publisher/storage/MinioTestContainer.java").read_text()
+    import re
+    m = re.search(r'IMAGE =\s*"([^"]+)"\s*\+\s*"([^"]+)";', src)
+    if not m:
+        raise SystemExit("could not read MinioTestContainer.IMAGE")
+    return m.group(1) + m.group(2)
+
+
+def restart_stores(db_password):
+    """Postgres and MinIO for the restart rows, published on 127.0.0.1 only."""
+    for c in (PG, MINIO):
+        docker(["rm", "-f", "-v", c])
+    run = docker(["run", "-d", "--name", PG, "-e", "POSTGRES_PASSWORD", "-e", "POSTGRES_DB=skald",
+                  "-p", "127.0.0.1:%d:5432" % PG_PORT, PG_IMAGE],
+                 env=dict(os.environ, POSTGRES_PASSWORD=db_password))
+    if run.returncode != 0:
+        raise SystemExit("postgres: " + run.stderr.strip()[-300:])
+    run = docker(["run", "-d", "--name", MINIO, "-e", "MINIO_ROOT_USER=skald", "-e", "MINIO_ROOT_PASSWORD=skaldskald",
+                  "-p", "127.0.0.1:%d:9000" % MINIO_PORT, minio_image(), "server", "/data"], timeout=1800)
+    if run.returncode != 0:
+        raise SystemExit("minio: " + run.stderr.strip()[-300:])
+    for _ in range(60):
+        if docker(["exec", PG, "pg_isready", "-U", "postgres", "-d", "skald"]).returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        raise SystemExit("postgres did not become ready")
+    for _ in range(60):
+        if docker(["exec", MINIO, "mc", "ready", "local"]).returncode == 0 or \
+                subprocess.run(["curl", "-sf", "http://127.0.0.1:%d/minio/health/ready" % MINIO_PORT]).returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        raise SystemExit("minio did not become ready")
+    return {"skald.t7probe.jdbc-url": "jdbc:postgresql://localhost:%d/skald" % PG_PORT,
+            "skald.t7probe.jdbc-user": "postgres",
+            "skald.t7probe.s3-endpoint": "http://localhost:%d" % MINIO_PORT}
+
+
+def restart(password, published):
+    """Part 4e-4: kill a JVM mid-build, then let a new one reconcile."""
+    db_password = secrets.token_hex(16)
+    props = restart_stores(db_password)
+    marker = OUT / "restart.json"
+    marker.unlink(missing_ok=True)
+    env = {"SKALD_T7PROBE_DB_PASSWORD": db_password}
+    phase1 = maven("restartPhaseOneRunsUntilTheProcessIsKilled", password, published,
+                   dict(props, **{"skald.t7probe.restart-phase": "crash",
+                                  "skald.t7probe.results": "results-restart-crash.json"}),
+                   env, background=True, log_name="maven-restart-crash.log")
+    deadline = time.time() + 1800
+    while not marker.exists() and phase1.poll() is None and time.time() < deadline:
+        time.sleep(2)
+    if not marker.exists():
+        phase1.kill()
+        docker(["rm", "-f", MAVEN_NAME])
+        record("restart: phase one", False, "the build never reached its restore; see maven-restart-crash.log")
+        return
+    killed = docker(["kill", MAVEN_NAME])
+    phase1.wait(timeout=120)
+    attempt = json.loads(marker.read_text())["attempt"]
+    alive = docker(["inspect", "-f", "{{.State.Running}}", "skald-b-%s-worker" % attempt]).stdout.strip()
+    record("restart: killed mid-build", killed.returncode == 0 and alive == "true",
+           "JVM killed during the restore; its worker skald-b-%s-worker still running: %s" % (attempt[:12], alive))
+    code, summary = maven("restartPhaseTwoReconcilesWhatTheDeadProcessLeft", password, published,
+                          dict(props, **{"skald.t7probe.restart-phase": "recover",
+                                         "skald.t7probe.results": "results-restart.json"}),
+                          env, log_name="maven-restart-recover.log")
+    record("restart: java", code == 0, summary)
+    report = OUT / "results-restart.json"
+    for b in json.loads(report.read_text()) if report.exists() else []:
+        if b["case"] == "restart-crashed":
+            record("restart: reconciled", b.get("state") == "INTERRUPTED" and b.get("teardown_seconds", -1) >= 0,
+                   "%s, log %s, settled %.0fs after the new process started, then teardown %.1fs" % (
+                       b.get("state"), (b.get("log_final") or {}).get("outcome"), b.get("settled_seconds", -1),
+                       b.get("teardown_seconds", -1)))
+    return json.loads(report.read_text()) if report.exists() else []
+
+
+def maven(test, password, published, extra_props=None, extra_env=None, background=False, log_name="maven.log"):
     """Runs T7PassProbeTest as `make test` runs Maven: in Docker, host network, the socket."""
     gid = str(os.stat("/var/run/docker.sock").st_gid)
     home = pathlib.Path.home()
@@ -169,19 +275,26 @@ def maven(test, password, published):
         "skald.t7probe.outer": OUTER, "skald.t7probe.published-bases": "/ws/" + str(published.relative_to(REPO)),
         "skald.t7probe.out": "/ws/target/t7probe",
     }
+    props.update(extra_props or {})
     # The password by environment (-e NAME takes the value from docker's own), never on a
     # command line, where every process on the host could read it.
-    cmd = ["docker", "run", "--rm", "--network", "host", "--group-add", gid, "-e", "SKALD_T7PROBE_PASSWORD",
+    secret_env = dict(SKALD_T7PROBE_PASSWORD=password, **(extra_env or {}))
+    cmd = ["docker", "run", "--rm", "--name", MAVEN_NAME, "--network", "host", "--group-add", gid]
+    for name in secret_env:
+        cmd += ["-e", name]
+    cmd += [
            "-v", "/var/run/docker.sock:/var/run/docker.sock",
            "-u", "%d:%d" % (os.getuid(), os.getgid()), "-e", "HOME=/m2home",
            "-v", "%s:/ws" % REPO, "-v", "%s:/m2" % m2, "-v", "%s:/m2home" % m2home,
            "-w", "/ws", MAVEN_IMAGE, "mvn", "-B", "-Dmaven.repo.local=/m2", "-Dlicense.skip=true",
            "test", "-Dtest=" + selector, "-Dsurefire.failIfNoSpecifiedTests=false"]
     cmd += ["-D%s=%s" % kv for kv in props.items()]
-    log = OUT / "maven.log"
+    log = OUT / log_name
+    env = dict(os.environ, **secret_env)
+    if background:
+        return subprocess.Popen(cmd, stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
     with open(log, "w") as f:
-        done = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, timeout=4 * 3600,
-                              env=dict(os.environ, SKALD_T7PROBE_PASSWORD=password))
+        done = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, timeout=4 * 3600, env=env)
     tail = [l for l in log.read_text().splitlines() if "Tests run:" in l or "FAIL" in l]
     return done.returncode, (tail[-1] if tail else "no result; see " + str(log))
 
@@ -238,7 +351,7 @@ def main(argv):
     password = secrets.token_hex(16)
     tmp = tempfile.mkdtemp(prefix="skald-t7p-")
     env = dict(os.environ, DOCKER_CONFIG=os.path.join(tmp, "docker"))
-    shutil.rmtree(OUT, ignore_errors=True)
+    remove_tree(OUT)
     OUT.mkdir(parents=True)
     try:
         print("== infrastructure ==")
@@ -258,11 +371,16 @@ def main(argv):
         if pub.returncode != 0:
             print(pub.stdout[-3000:], pub.stderr[-1000:])
             return 1
-        print("== the wired worker (T7PassProbeTest) ==")
-        code, summary = maven(test, password, published)
-        record("java", code == 0, summary)
-        report = OUT / "results.json"
-        built = json.loads(report.read_text()) if report.exists() else []
+        built = []
+        if test != "restart":
+            print("== the wired worker (T7PassProbeTest) ==")
+            code, summary = maven(test, password, published)
+            record("java", code == 0, summary)
+            report = OUT / "results.json"
+            built = json.loads(report.read_text()) if report.exists() else []
+        if test in (None, "restart"):
+            print("== a crash mid-build, then a restart ==")
+            built += restart(password, published) or []
         print("== the dependency cache (judged by the Java half) ==")
         for b in built:
             if "cache" in b:

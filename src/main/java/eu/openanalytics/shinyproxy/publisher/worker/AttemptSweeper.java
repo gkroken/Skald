@@ -77,6 +77,9 @@ public final class AttemptSweeper {
 
     private static final Logger log = LoggerFactory.getLogger(AttemptSweeper.class);
     private static final Pattern BUILD_ATTEMPT = Pattern.compile("[0-9a-f]{32}");
+    /** How long stop() waits for a sweep: one helper removal's whole retry budget, and some. */
+    static final Duration STOP_WAIT = Duration.ofMillis(
+            DockerWorkerLauncher.REMOVAL_ATTEMPTS * DockerWorkerLauncher.REMOVAL_PAUSE_MILLIS + 10_000);
 
     /** What one sweep did. */
     public record Report(List<String> disposed, List<String> leftBehind, List<UUID> logsFinished) { }
@@ -161,9 +164,17 @@ public final class AttemptSweeper {
         }
     }
 
-    public synchronized void stop() {
+    /**
+     * Stops the timer and waits, bounded, for a sweep in progress to end: interrupted, it
+     * still removes its own helper container (DockerWorkerLauncher.runHelper), and a process
+     * that exited at once would leave that helper behind.
+     */
+    public synchronized void stop() throws InterruptedException {
         if (timer != null) {
             timer.shutdownNow();
+            if (!timer.awaitTermination(STOP_WAIT.toMillis(), TimeUnit.MILLISECONDS)) {
+                log.warn("attempt sweep did not end within {} of the stop", STOP_WAIT);
+            }
             timer = null;
         }
     }

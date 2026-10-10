@@ -2105,6 +2105,21 @@ below are marked passed by this planning document.
       versions: none" after "Looking in indexes: <mirror>": the gateway's error page looks
       like an empty index. A line from the platform naming the gateway's verdict would
       make it unmistakable.
+      **Part 4e-4 (a crash, then a restart):** the probe runs Postgres and MinIO itself so
+      they outlive a JVM, starts a build in one, and `docker kill`s that JVM's container
+      once the restore runs: no shutdown hook, no disposal, no log finish, and its worker is
+      left running. A new process on the same database and store settled the attempt
+      INTERRUPTED (the reaper, after the lease), disposed of everything it owned and
+      finished its log INTERRUPTED (the sweep, after its grace: about 120 s with a 1 min
+      grace and 30 s period), then built and published an app that pulled cold and served.
+      Its first run found two leaks, both fixed here. The killed process's frozen
+      `extract-*` tree stayed in the build workspace forever: the workspace is now locked by
+      one process at a time (`WorkspaceLock`, an OS file lock the kernel releases on any
+      death), a second process on it is refused at startup, and the holder removes the
+      `extract-*` trees a dead one left (never following a link). And the new process,
+      shut down while its sweep ran, left the sweep's helper container: `stop()` now waits
+      (bounded) for the sweep to end, and a helper's removal is finished under an
+      interrupt. Finishing a PUBLISHING attempt after a restart stays with T9's `succeed()`.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,
@@ -2145,6 +2160,10 @@ below are marked passed by this planning document.
       the commit retries and gets the same attempt (idempotency key), the same bundle state
       (PUT replay is 409 with the current state), or the same cancellation outcome
       (8808b29 review N2).
+      **Carried from T7 (fe07c50 review N1), for T8's live logs:** a log whose writer died
+      is finished by the sweep only after the sweep grace, so a reader can sit on a head
+      that will not grow for up to grace + period (25 min at the defaults); the log view
+      should say "finishing" for a settled build with no final record yet.
 
 - [ ] **T9. Managed publication and unchanged runtime semantics.** Depends T7/T8.
       Wire successful builds into the shared version allocator with explicit activation.

@@ -43,12 +43,26 @@ public final class TestObjectStore implements AutoCloseable {
     public final String bucket;
     public final ObjectStore store;
     private final GenericContainer<?> minio;
+    private final String external;
     private final S3Client client;
 
     public TestObjectStore(String bucket) {
+        this(bucket, null);
+    }
+
+    /**
+     * A store at {@code endpoint}, started by someone else with these credentials, or a new
+     * MinIO container when it is null. The T7 pass probe's restart rows need the first: the
+     * store must outlive the JVM that is killed, so the probe runs it, not Testcontainers.
+     * The bucket may already exist (the second JVM finds the first one's).
+     */
+    public TestObjectStore(String bucket, String endpoint) {
         this.bucket = bucket;
-        minio = MinioTestContainer.create(ACCESS_KEY, SECRET_KEY);
-        minio.start();
+        external = endpoint;
+        minio = endpoint == null ? MinioTestContainer.create(ACCESS_KEY, SECRET_KEY) : null;
+        if (minio != null) {
+            minio.start();
+        }
         client = S3Client.builder()
                 .endpointOverride(java.net.URI.create(endpoint()))
                 .region(Region.of("us-east-1"))
@@ -56,23 +70,31 @@ public final class TestObjectStore implements AutoCloseable {
                 .httpClient(UrlConnectionHttpClient.create())
                 .serviceConfiguration(S3Configuration.builder().pathStyleAccessEnabled(true).build())
                 .build();
-        client.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        createBucket(bucket);
         store = new S3ObjectStore(client);
     }
 
     /** The store's S3 endpoint, for a test that configures the application against it. */
     public String endpoint() {
-        return "http://" + minio.getHost() + ":" + minio.getMappedPort(9000);
+        return external != null ? external : "http://" + minio.getHost() + ":" + minio.getMappedPort(9000);
     }
 
     /** Another bucket in the same store (the application keeps bundles and logs apart). */
     public void createBucket(String name) {
-        client.createBucket(CreateBucketRequest.builder().bucket(name).build());
+        try {
+            client.createBucket(CreateBucketRequest.builder().bucket(name).build());
+        } catch (software.amazon.awssdk.services.s3.model.BucketAlreadyOwnedByYouException mine) {
+            if (external == null) {
+                throw mine;
+            }
+        }
     }
 
     @Override
     public void close() {
         client.close();
-        minio.stop();
+        if (minio != null) {
+            minio.stop();
+        }
     }
 }

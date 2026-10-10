@@ -306,6 +306,54 @@ public class AttemptSweeperTest {
     }
 
     @Test
+    public void aSweeperStoppedMidSweepRemovesItsOwnHelperBeforeStopReturns() throws Exception {
+        // The T7 pass probe's restart row: the new process shut down while its sweep's
+        // inventory helper ran, the stop's interrupt reached the helper's removal, and the
+        // helper was left behind. Here the helper's wait is held until interrupted, and its
+        // first removal is answered "still running", as the daemon does at times (e4306c6
+        // N2): the retry's pause must not be cut short by the interrupt.
+        AtomicReference<String> helper = new AtomicReference<>();
+        CountDownLatch waiting = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger refusals = new java.util.concurrent.atomic.AtomicInteger(1);
+        DockerClient holding = (DockerClient) Proxy.newProxyInstance(DockerClient.class.getClassLoader(),
+                new Class<?>[] {DockerClient.class}, (proxy, m, args) -> {
+                    if (m.getName().equals("waitContainer") && args != null
+                            && String.valueOf(args[0]).startsWith("skald-helper-sweep-")) {
+                        helper.set(String.valueOf(args[0]));
+                        waiting.countDown();
+                        try {
+                            Thread.sleep(TimeUnit.MINUTES.toMillis(10));
+                        } catch (InterruptedException e) {
+                            // As a well-behaved client does: the flag stays set for the
+                            // caller, so the removal that follows runs on an interrupted thread.
+                            Thread.currentThread().interrupt();
+                            throw e;
+                        }
+                    }
+                    if (m.getName().equals("removeContainer") && args != null && helper.get() != null
+                            && helper.get().equals(args[0]) && refusals.getAndDecrement() > 0) {
+                        throw new org.mandas.docker.client.exceptions.DockerException(
+                                "simulated: container " + args[0] + " is still running");
+                    }
+                    try {
+                        return m.invoke(docker, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        AttemptSweeper sweeper = new AttemptSweeper(new DockerWorkerLauncher(holding, WorkerProfile.load("runc-rootless"),
+                Images.of(WORKER, GATEWAY)), Set::of, List::of, logs, Duration.ofMinutes(10), id -> false);
+        sweeper.start();
+        try {
+            assertTrue(waiting.await(2, TimeUnit.MINUTES), "the sweep's helper is running");
+        } finally {
+            sweeper.stop();
+        }
+        assertThrows(org.mandas.docker.client.exceptions.ContainerNotFoundException.class,
+                () -> docker.inspectContainer(helper.get()), "the stopped sweep removed its helper");
+    }
+
+    @Test
     public void aSweepHelperADeadProcessLeftIsRemovedAndARunningOneIsNot() throws Exception {
         // 2fc53d9 N1: the inventory helper is privileged and fresh-named; a JVM killed while
         // it ran leaves it. It is labelled, and a later inventory removes a stopped one once

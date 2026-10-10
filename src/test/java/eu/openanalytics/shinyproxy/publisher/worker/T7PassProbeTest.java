@@ -46,6 +46,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.mandas.docker.client.DockerClient;
 import org.mandas.docker.client.builder.jersey.JerseyDockerClientBuilder;
@@ -107,28 +108,53 @@ public class T7PassProbeTest {
     private static Path workspace;
     private static final ArrayNode RESULTS = JSON.createArrayNode();
 
+    /**
+     * The restart rows (part 4e-4) run in two JVMs, the first killed mid-build, so their
+     * database and object store must outlive it: the probe runs both and names them here.
+     * Every other run starts its own with Testcontainers.
+     */
+    private static final String EXTERNAL_JDBC = System.getProperty("skald.t7probe.jdbc-url");
+
+    private static String jdbcUrl() {
+        return EXTERNAL_JDBC != null ? EXTERNAL_JDBC : POSTGRES.getJdbcUrl();
+    }
+
+    private static String jdbcUser() {
+        return EXTERNAL_JDBC != null ? System.getProperty("skald.t7probe.jdbc-user") : POSTGRES.getUsername();
+    }
+
+    private static String jdbcPassword() {
+        // From the environment, like the registry's: never a command line.
+        return EXTERNAL_JDBC != null ? System.getenv("SKALD_T7PROBE_DB_PASSWORD") : POSTGRES.getPassword();
+    }
+
     @BeforeAll
     public static void start() throws Exception {
-        POSTGRES.start();
-        objects = new TestObjectStore("skald-bundles");
+        if (EXTERNAL_JDBC == null) {
+            POSTGRES.start();
+        }
+        objects = new TestObjectStore("skald-bundles", System.getProperty("skald.t7probe.s3-endpoint"));
         objects.createBucket("skald-logs");
         workspace = Files.createDirectories(OUT.resolve("workspace"));
     }
 
     @AfterAll
     public static void stop() throws Exception {
-        Files.writeString(OUT.resolve("results.json"), JSON.writerWithDefaultPrettyPrinter().writeValueAsString(RESULTS));
+        Files.writeString(OUT.resolve(System.getProperty("skald.t7probe.results", "results.json")),
+                JSON.writerWithDefaultPrettyPrinter().writeValueAsString(RESULTS));
         if (objects != null) {
             objects.close();
         }
-        POSTGRES.stop();
+        if (EXTERNAL_JDBC == null) {
+            POSTGRES.stop();
+        }
     }
 
     private static ApplicationContextRunner application(String... overrides) {
         List<String> p = new ArrayList<>(List.of(
-                "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
-                "spring.datasource.username=" + POSTGRES.getUsername(),
-                "spring.datasource.password=" + POSTGRES.getPassword(),
+                "spring.datasource.url=" + jdbcUrl(),
+                "spring.datasource.username=" + jdbcUser(),
+                "spring.datasource.password=" + jdbcPassword(),
                 "spring.flyway.schemas=skald", "spring.flyway.default-schema=skald",
                 "skald.storage.endpoint=" + objects.endpoint(),
                 "skald.storage.access-key=" + TestObjectStore.ACCESS_KEY,
@@ -410,6 +436,7 @@ public class T7PassProbeTest {
     // ------------------------------------------------------------------ part 4e-1: cold builds of both apps
 
     @Test
+    @DisabledIfSystemProperty(named = "skald.t7probe.restart-phase", matches = ".+")
     public void bothFixtureAppsBuildColdThroughTheWiredWorker() {
         application().run(ctx -> {
             assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
@@ -446,6 +473,7 @@ public class T7PassProbeTest {
      * changed key and a different content item each miss.
      */
     @Test
+    @DisabledIfSystemProperty(named = "skald.t7probe.restart-phase", matches = ".+")
     public void theDependencyCacheIsReusedWithinItsKeyAndContentOnly() {
         Map<String, String> keys = new LinkedHashMap<>();
         UUID[] x = new UUID[1];
@@ -666,6 +694,7 @@ public class T7PassProbeTest {
      * worker must build again afterwards.
      */
     @Test
+    @DisabledIfSystemProperty(named = "skald.t7probe.restart-phase", matches = ".+")
     public void injectedFailuresEndCleanlyWithALogThatNamesTheCause() throws Exception {
         String[] success = new String[1];
         try (DockerClient docker = new JerseyDockerClientBuilder().fromEnv().build()) {
@@ -759,6 +788,76 @@ public class T7PassProbeTest {
         for (String cause : CAUSES) {
             assertTrue(!java.util.regex.Pattern.compile(cause).matcher(success[0]).find(),
                     "/" + cause + "/ also matches a successful build's log");
+        }
+    }
+
+    // ------------------------------------------------------------------ part 4e-4: a crash, then a restart
+
+    /**
+     * Phase one of the restart rows: a build runs until the probe kills this JVM (docker kill
+     * of its Maven container, so no shutdown hook, no disposal, no log finish). Once the
+     * restore step runs, it writes restart.json for the probe and phase two, then waits.
+     */
+    @Test
+    @EnabledIfSystemProperty(named = "skald.t7probe.restart-phase", matches = "crash")
+    public void restartPhaseOneRunsUntilTheProcessIsKilled() {
+        application().run(ctx -> {
+            assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+            UUID[] ids = store(ctx, PY, payload(PY));
+            UUID build = startAndReachRestore(ctx, PY, ids[0], ids[1], "restart-crash");
+            ObjectNode marker = JSON.createObjectNode();
+            marker.put("content_id", ids[0].toString()).put("build_id", build.toString())
+                    .put("attempt", attemptOf(liveLog(ctx, ids[0], build)));
+            Files.writeString(OUT.resolve("restart.json"), marker.toString());
+            Thread.sleep(Duration.ofMinutes(30).toMillis());
+            throw new AssertionError("phase one was not killed");
+        });
+    }
+
+    /**
+     * Phase two: a new process on the same database and store. The dead process's attempt
+     * must be settled INTERRUPTED (the reaper, once its lease expires), its worker and
+     * everything else it owned disposed of (the sweep, once the grace has passed), and its
+     * log finished INTERRUPTED (the sweep's backstop for a dead writer) -- and the new
+     * process must build.
+     */
+    @Test
+    @EnabledIfSystemProperty(named = "skald.t7probe.restart-phase", matches = "recover")
+    public void restartPhaseTwoReconcilesWhatTheDeadProcessLeft() throws Exception {
+        JsonNode marker = JSON.readTree(OUT.resolve("restart.json").toFile());
+        UUID content = UUID.fromString(marker.path("content_id").asText());
+        UUID build = UUID.fromString(marker.path("build_id").asText());
+        String attempt = marker.path("attempt").asText();
+        try (DockerClient docker = new JerseyDockerClientBuilder().fromEnv().build()) {
+            assertTrue(docker.inspectContainer(DockerWorkerLauncher.handle(attempt).worker()).state().running(),
+                    "the dead process left its worker running: the crash is real");
+            // And its extraction tree in the workspace, frozen read-only: the new process's
+            // WorkspaceLock removes it at startup (found by this row's first run).
+            List<Path> trees;
+            try (var s = Files.list(workspace)) {
+                trees = s.filter(f -> f.getFileName().toString().startsWith("extract-")).toList();
+            }
+            assertTrue(!trees.isEmpty(), "the dead process left its extraction tree");
+            // sweep-grace one minute (above the 30 s settle), a sweep every 30 s, so the
+            // backstop comes within minutes rather than the defaults' 25.
+            application("skald.builds.worker.sweep-period=30s", "skald.builds.worker.sweep-grace=1m").run(ctx -> {
+                assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+                for (Path tree : trees) {
+                    assertTrue(!Files.exists(tree), "the new process removed the dead one's tree: " + tree);
+                }
+                long started = System.nanoTime();
+                Map<String, Object> row = settleWithLog(ctx, build, Duration.ofMinutes(8));
+                double settled = (System.nanoTime() - started) / 1e9;
+                ObjectNode r = injected(ctx, docker, "restart-crashed", PY, row, "INTERRUPTED", null,
+                        "(?m)^#\\d+ \\[\\d+/\\d+\\] RUN .*\"pip\",\"install\"");
+                r.put("settled_seconds", settled);
+                assertEquals("INTERRUPTED", r.path("log_final").path("outcome").asText(),
+                        "a dead writer's log is finished by the sweep: " + r);
+                UUID[] ids = store(ctx, PY, payload(PY));
+                Map<String, Object> next = build(ctx, "restart-next-" + PY.fixture(), ids[0], ids[1], Duration.ofMinutes(20));
+                ObjectNode n = result(ctx, "restart-next", PY, next);
+                assertEquals("PUBLISHING", next.get("state"), n.toString());
+            });
         }
     }
 }
