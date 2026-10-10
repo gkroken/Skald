@@ -2084,6 +2084,16 @@ below are marked passed by this planning document.
       the key's base, architecture, recipe and package-manager inputs are covered by
       DependencyCacheKeyTest. A warm Python publish is still ~50 s: that is the fixed
       launch overhead the T10 latency work targets.
+      **Part 4e-3 (the injections, through the wired worker):** a failed restore (a wrong
+      hash: FAILED BUILD_FAILED, the log shows pip's hash refusal), an unreachable repository
+      (an allowed mirror host with nothing behind it: FAILED BUILD_FAILED, the log names it),
+      a push failure (the registry stopped once the restore runs: FAILED BUILD_FAILED, the
+      log ends "failed to push <registry>/content/...: 503"), a cancellation during the
+      restore (CANCELLED, log STOPPED), the worker killed during the restore (FAILED
+      WORKER_DIED) and a one-minute deadline on a from-source R build (TIMED_OUT
+      DEADLINE_EXCEEDED, log STOPPED). Each log is complete and names its cause; everything
+      the attempt owned was already gone when its build settled; and the worker builds and
+      publishes again afterwards.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,
@@ -2145,6 +2155,11 @@ below are marked passed by this planning document.
       into the daemon could therefore push under any repository's tag. Deployment by digest
       limits the damage; per-repository push scope (a token scoped to the attempt's
       repository) belongs with the registry choice made here.
+      **Carried from T7 (6886413 review N2):** a RUN step can reach the registry through the
+      gateway (`http_access allow registry registry_port`); what keeps it out of another
+      content item's cache or image is only that RUN steps carry no registry credential.
+      With the per-repository scope above, add an attack row: a RUN fetching
+      `/v2/skald/cache/<other>/manifests/<key>` through the gateway gets 401.
 
 - [ ] **T10. Live acceptance, rollback, GC and final independent regression review.**
       Depends all above. **Signed provenance (user, 2026-10-10):** the SLSA attestation T7

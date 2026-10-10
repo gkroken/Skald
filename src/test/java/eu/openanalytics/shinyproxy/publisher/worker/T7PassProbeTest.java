@@ -27,6 +27,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import eu.openanalytics.shinyproxy.publisher.build.BuildAdmission;
+import eu.openanalytics.shinyproxy.publisher.build.BuildCoordinator;
 import eu.openanalytics.shinyproxy.publisher.build.BuildsConfig;
 import eu.openanalytics.shinyproxy.publisher.bundle.BundleExtractor;
 import eu.openanalytics.shinyproxy.publisher.bundle.BundleLimitsConfig;
@@ -46,6 +47,8 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.mandas.docker.client.DockerClient;
+import org.mandas.docker.client.builder.jersey.JerseyDockerClientBuilder;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;
 import org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration;
@@ -532,5 +535,191 @@ public class T7PassProbeTest {
             assertEquals(cold.path("cache").path("key").asText(), source.path("cache").path("key").asText());
             assertEquals("REUSED", source.path("cache").path("restore").asText(), "a source-only R edit hits");
         });
+    }
+
+    // ------------------------------------------------------------------ part 4e-3: injected failures
+
+    /** The log so far, every chunk written yet, in order; empty before the first. */
+    private static String liveLog(ApplicationContext ctx, UUID content, UUID build) throws Exception {
+        ObjectStore store = ctx.getBean(ObjectStore.class);
+        StringBuilder text = new StringBuilder();
+        for (long seq = 1; ; seq++) {
+            try (var in = store.open("skald-logs", ObjectKeys.logChunk(content, build, seq))) {
+                for (String l : new String(in.readAllBytes(), StandardCharsets.UTF_8).split("\n")) {
+                    if (!l.isBlank()) {
+                        text.append(JSON.readTree(l).path("t").asText()).append('\n');
+                    }
+                }
+            } catch (Exception missing) {
+                return text.toString();
+            }
+        }
+    }
+
+    /** Admits a build and returns its id once its log shows the restore step started. */
+    private static UUID startAndReachRestore(ApplicationContext ctx, App app, UUID content, UUID bundle, String name)
+            throws Exception {
+        UUID build = ctx.getBean(BuildAdmission.class).request(content, "probe", name,
+                new BuildAdmission.Inputs(bundle, Map.of())).buildId();
+        long started = System.nanoTime();
+        while (System.nanoTime() - started < Duration.ofMinutes(15).toNanos()) {
+            String log = liveLog(ctx, content, build);
+            if (log.lines().anyMatch(l -> l.matches("#\\d+ \\[\\d+/\\d+\\] RUN .*") && l.contains(app.restore()))) {
+                return build;
+            }
+            Thread.sleep(500);
+        }
+        throw new AssertionError("the restore step never started: " + liveLog(ctx, content, build));
+    }
+
+    /** Waits for a terminal state and a final log record, within {@code bound}. */
+    private static Map<String, Object> settleWithLog(ApplicationContext ctx, UUID build, Duration bound) throws Exception {
+        JdbcTemplate jdbc = ctx.getBean(JdbcTemplate.class);
+        BuildLogWriter logs = new BuildLogWriter(ctx.getBean(ObjectStore.class), "skald-logs");
+        long started = System.nanoTime();
+        Map<String, Object> row;
+        do {
+            Thread.sleep(2000);
+            row = jdbc.queryForMap("SELECT id, content_id, state, error_code, error_detail, output_image,"
+                    + " provenance::text AS provenance, effective_limits::text AS limits, log_complete,"
+                    + " extract(epoch FROM (coalesce(finished_at, publishing_at, now()) - started_at)) AS seconds"
+                    + " FROM skald.build WHERE id = ?", build);
+        } while (!(List.of("FAILED", "CANCELLED", "TIMED_OUT", "INTERRUPTED").contains((String) row.get("state"))
+                && logs.readFinal((UUID) row.get("content_id"), build).isPresent())
+                && System.nanoTime() - started < bound.toNanos());
+        return row;
+    }
+
+    /** Seconds until nothing labelled with the attempt is left on the host, or -1 past {@code bound}. */
+    private static double teardownSeconds(DockerClient docker, String attempt, Duration bound) throws Exception {
+        long started = System.nanoTime();
+        String label = DockerWorkerLauncher.ATTEMPT_LABEL + "=" + attempt;
+        while (System.nanoTime() - started < bound.toNanos()) {
+            boolean left = !docker.listContainers(DockerClient.ListContainersParam.allContainers(),
+                    DockerClient.ListContainersParam.withLabel(DockerWorkerLauncher.ATTEMPT_LABEL, attempt)).isEmpty()
+                    || docker.listVolumes(DockerClient.ListVolumesParam.filter("label", label)).volumes() != null
+                    && !docker.listVolumes(DockerClient.ListVolumesParam.filter("label", label)).volumes().isEmpty()
+                    || !docker.listNetworks(DockerClient.ListNetworksParam.withLabel(DockerWorkerLauncher.ATTEMPT_LABEL,
+                    attempt)).isEmpty();
+            if (!left) {
+                return (System.nanoTime() - started) / 1e9;
+            }
+            Thread.sleep(500);
+        }
+        return -1;
+    }
+
+    private static String attemptOf(String log) {
+        var m = java.util.regex.Pattern.compile("\\[skald\\] attempt ([0-9a-f]{32})").matcher(log);
+        assertTrue(m.find(), "the log names its attempt: " + log);
+        return m.group(1);
+    }
+
+    /**
+     * One injected failure, judged: the state and code the attempt ends in, a complete log
+     * whose text names the cause, and teardown of everything the attempt owned within the
+     * bound (the disposal is the code's; how long the daemon takes is the host's, so the
+     * measured time is recorded and the bound is generous).
+     */
+    private static ObjectNode injected(ApplicationContext ctx, DockerClient docker, String name, App app,
+                                       Map<String, Object> row, String state, String code, String cause)
+            throws Exception {
+        ObjectNode r = result(ctx, name, app, row);
+        assertEquals(state, row.get("state"), r.toString());
+        if (code != null) {
+            assertEquals(code, row.get("error_code"), r.toString());
+        }
+        assertTrue(r.path("log_final").path("complete").asBoolean(), "the log is complete: " + r);
+        String log = Files.readString(OUT.resolve(r.path("log_file").asText()));
+        assertTrue(java.util.regex.Pattern.compile(cause).matcher(log).find(),
+                "the log names the cause /" + cause + "/: " + r.path("log_file").asText());
+        double seconds = teardownSeconds(docker, attemptOf(liveLog(ctx, (UUID) row.get("content_id"),
+                (UUID) row.get("id"))), Duration.ofMinutes(3));
+        r.put("teardown_seconds", seconds);
+        assertTrue(seconds >= 0, "everything the attempt owned is gone within 3 minutes: " + r);
+        return r;
+    }
+
+    /**
+     * T7's injections, through the wired worker: a failed restore, an unreachable repository,
+     * a push failure, a timeout, a cancellation and the worker's death. Each must end in its
+     * own state with a complete log that names the cause, and leave nothing behind; and the
+     * worker must build again afterwards.
+     */
+    @Test
+    public void injectedFailuresEndCleanlyWithALogThatNamesTheCause() throws Exception {
+        try (DockerClient docker = new JerseyDockerClientBuilder().fromEnv().build()) {
+            application("skald.builds.worker.sweep-period=30s").run(ctx -> {
+                assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+                Map<String, byte[]> py = payload(PY);
+
+                // A failed restore: one package's only hash is wrong, so pip refuses the wheel.
+                String lock = text(py, PY.lock());
+                var first = java.util.regex.Pattern.compile("--hash=sha256:[0-9a-f]{64}").matcher(lock);
+                assertTrue(first.find());
+                String wrong = lock.substring(0, first.start()) + "--hash=sha256:" + "0".repeat(64)
+                        + lock.substring(first.end());
+                UUID[] ids = store(ctx, PY, with(py, PY.lock(), wrong));
+                Map<String, Object> row = settleWithLog(ctx, ctx.getBean(BuildAdmission.class).request(ids[0], "probe",
+                        "failed-restore", new BuildAdmission.Inputs(ids[1], Map.of())).buildId(), Duration.ofMinutes(15));
+                injected(ctx, docker, "inject-failed-restore", PY, row, "FAILED", "BUILD_FAILED",
+                        "DO NOT MATCH THE HASHES");
+
+                // A push failure: the registry goes away once the restore has started (the
+                // base was pulled and the cache imported before it), and comes back after.
+                ids = store(ctx, PY, py);
+                UUID build = startAndReachRestore(ctx, PY, ids[0], ids[1], "push-failure");
+                docker.stopContainer(REGISTRY, 5);
+                try {
+                    row = settleWithLog(ctx, build, Duration.ofMinutes(15));
+                } finally {
+                    docker.startContainer(REGISTRY);
+                }
+                injected(ctx, docker, "inject-push-failure", PY, row, "FAILED", "BUILD_FAILED",
+                        "failed to push " + java.util.regex.Pattern.quote(REGISTRY) + ":5000/content/");
+
+                // A cancellation while the restore runs.
+                ids = store(ctx, PY, py);
+                build = startAndReachRestore(ctx, PY, ids[0], ids[1], "cancel");
+                assertEquals(BuildCoordinator.CancelOutcome.REQUESTED,
+                        ctx.getBean(BuildCoordinator.class).cancel(ids[0], build, "probe"));
+                row = settleWithLog(ctx, build, Duration.ofMinutes(5));
+                injected(ctx, docker, "inject-cancel", PY, row, "CANCELLED", null, "(?i)stop|cancel");
+
+                // The worker dies while the restore runs.
+                ids = store(ctx, PY, py);
+                build = startAndReachRestore(ctx, PY, ids[0], ids[1], "worker-death");
+                docker.killContainer(DockerWorkerLauncher.handle(attemptOf(liveLog(ctx, ids[0], build))).worker());
+                row = settleWithLog(ctx, build, Duration.ofMinutes(5));
+                injected(ctx, docker, "inject-worker-death", PY, row, "FAILED", "WORKER_DIED", "(?i)worker");
+
+                // And the worker builds again after all of that.
+                ids = store(ctx, PY, py);
+                row = build(ctx, "after-injections-" + PY.fixture(), ids[0], ids[1], Duration.ofMinutes(20));
+                ObjectNode after = result(ctx, "after-injections", PY, row);
+                assertEquals("PUBLISHING", row.get("state"), after.toString());
+            });
+
+            // An unreachable repository: the mirror's host is allowed, but nothing answers.
+            application("skald.builds.worker.private-mirrors=forge,forge-down",
+                    "skald.builds.worker.pypi-mirror=http://forge-down/repository/pypi-public/simple/").run(ctx -> {
+                assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+                UUID[] ids = store(ctx, PY, payload(PY));
+                Map<String, Object> row = settleWithLog(ctx, ctx.getBean(BuildAdmission.class).request(ids[0], "probe",
+                        "unreachable", new BuildAdmission.Inputs(ids[1], Map.of())).buildId(), Duration.ofMinutes(15));
+                injected(ctx, docker, "inject-unreachable-repository", PY, row, "FAILED", "BUILD_FAILED", "forge-down");
+            });
+
+            // A timeout: a one-minute wall deadline on a from-source R build, which needs
+            // several. The reaper settles it TIMED_OUT; the log is finished by the worker's
+            // stop or by the sweep.
+            application("skald.builds.coordinator.deadline-minutes=1", "skald.builds.worker.sweep-period=30s").run(ctx -> {
+                assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+                UUID[] ids = store(ctx, R, payload(R));
+                Map<String, Object> row = settleWithLog(ctx, ctx.getBean(BuildAdmission.class).request(ids[0], "probe",
+                        "timeout", new BuildAdmission.Inputs(ids[1], Map.of())).buildId(), Duration.ofMinutes(10));
+                injected(ctx, docker, "inject-timeout", R, row, "TIMED_OUT", null, "(?i)stop|interrupt|deadline|time");
+            });
+        }
     }
 }

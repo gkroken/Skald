@@ -25,6 +25,10 @@ the Java half reports as built, from the registry, cold:
                   properties; bundles stored as T8 will store them; results.json
   cache           part 4e-2's rows, as the Java half judged them from each build's log:
                   whether the dependency restore ran or was reused, and the key
+  injected        part 4e-3's rows (failed restore, unreachable repository, push failure,
+                  timeout, cancellation, worker death), as the Java half judged them: the
+                  state and code, a complete log naming the cause, and the seconds until
+                  nothing the attempt owned was left
   pulled          for each built image: no local copy of the repository exists, then
                   `docker pull localhost:PORT/<repository>@<digest>` succeeds (the daemon
                   allows plain http to localhost only; the digest is the one the worker's
@@ -267,6 +271,13 @@ def main(argv):
                        "restore %s, key %s..., %ss, imported %s" % (
                            c.get("restore"), (c.get("key") or "")[:12], str(b.get("seconds"))[:6],
                            ",".join(r.rsplit("/", 1)[-1][:22] for r in c.get("imported") or []) or "none"))
+        print("== injected failures (judged by the Java half) ==")
+        for b in built:
+            if b["case"].startswith("inject-"):
+                record(b["case"], b.get("teardown_seconds", -1) >= 0,
+                       "%s %s, log %s, teardown %.1fs" % (
+                           b.get("state"), b.get("error_code") or "", (b.get("log_final") or {}).get("outcome"),
+                           b.get("teardown_seconds", -1)))
         print("== cold pull and run ==")
         for b in built:
             if b.get("state") == "PUBLISHING" and b.get("log_complete") and b.get("output_image"):
