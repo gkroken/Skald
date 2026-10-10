@@ -156,10 +156,16 @@ public class T7PassProbeTest {
 
     // ------------------------------------------------------------------ bundles, as T8 stores them
 
-    record App(String fixture, String language, String version, String entrypoint, String format, String lock) { }
+    /**
+     * A fixture app; {@code source} is a file only the app reads, and {@code restore} a
+     * fragment of the dependency-restore RUN step's header, as the build log prints it.
+     */
+    record App(String fixture, String language, String version, String entrypoint, String format, String lock,
+               String source, String restore) { }
 
-    static final App R = new App("r-shiny", "r", "4.6.1", ".", "renv", "renv.lock");
-    static final App PY = new App("python-shiny", "python", "3.13.16", "app.py", "pip-hashed", "requirements.lock");
+    static final App R = new App("r-shiny", "r", "4.6.1", ".", "renv", "renv.lock", "app.R", "renv::restore(");
+    static final App PY = new App("python-shiny", "python", "3.13.16", "app.py", "pip-hashed", "requirements.lock",
+            "app.py", "\"pip\",\"install\"");
 
     private static String sha256(byte[] b) throws Exception {
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(b));
@@ -208,10 +214,18 @@ public class T7PassProbeTest {
 
     /** A content item and a VALIDATED bundle of {@code payload}, stored as T8's upload will store it. */
     private static UUID[] store(ApplicationContext ctx, App app, Map<String, byte[]> payload) throws Exception {
+        UUID content = UUID.randomUUID();
+        ctx.getBean(JdbcTemplate.class).update("INSERT INTO skald.content (id, title, owner, type)"
+                + " VALUES (?, ?, 'probe', 'shiny')", content, "t7 probe " + app.fixture());
+        return new UUID[] {content, storeBundle(ctx, app, content, payload)};
+    }
+
+    /** A further VALIDATED bundle of {@code payload} for an existing content item. */
+    private static UUID storeBundle(ApplicationContext ctx, App app, UUID content, Map<String, byte[]> payload)
+            throws Exception {
         JdbcTemplate jdbc = ctx.getBean(JdbcTemplate.class);
         ObjectStore store = ctx.getBean(ObjectStore.class);
         BundleWriter bundles = new BundleWriter(store, "skald-bundles");
-        UUID content = UUID.randomUUID();
         UUID bundle = UUID.randomUUID();
         byte[] manifest = manifest(app, payload);
         byte[] archive = archive(manifest, payload);
@@ -226,8 +240,6 @@ public class T7PassProbeTest {
                         .put("sha256", sha256(f.getValue()));
             }
             byte[] inv = JSON.writeValueAsBytes(inventory);
-            jdbc.update("INSERT INTO skald.content (id, title, owner, type) VALUES (?, ?, 'probe', 'shiny')",
-                    content, "t7 probe " + app.fixture());
             jdbc.update("INSERT INTO skald.bundle (id, content_id, created_by, state, upload_deadline, finished_at,"
                     + " object_key, object_sha256, object_bytes, manifest_sha256, inventory_files, inventory_bytes)"
                     + " VALUES (?, ?, 'probe', 'VALIDATED', now() + interval '1 hour', now(), ?, ?, ?, ?, ?, ?)",
@@ -241,7 +253,7 @@ public class T7PassProbeTest {
         } finally {
             extracted.root().deleteTree();
         }
-        return new UUID[] {content, bundle};
+        return bundle;
     }
 
     /** Admits a build and waits for it to settle: terminal, or PUBLISHING with its log complete. */
@@ -301,6 +313,97 @@ public class T7PassProbeTest {
         return r;
     }
 
+    // ------------------------------------------------------------------ the dependency cache, read from a log
+
+    enum Restore { RAN, REUSED }
+
+    /**
+     * Whether the dependency restore ran in this build, read from its log as the owner reads
+     * it. REUSED means the step settled (CACHED, or DONE after pulling the cached layer: an
+     * imported registry hit is not always reported as CACHED) and printed nothing of its
+     * own; RAN means it printed output ("#N 1.234 ..."). A log without the step fails.
+     */
+    static Restore restore(App app, Path log) throws Exception {
+        List<String> lines = new ArrayList<>();
+        for (String l : Files.readAllLines(log)) {
+            lines.add(JSON.readTree(l).path("t").asText());
+        }
+        String step = null;
+        for (String l : lines) {
+            var m = java.util.regex.Pattern.compile("^(#\\d+) \\[\\d+/\\d+\\] RUN ").matcher(l);
+            if (m.find() && l.contains(app.restore())) {
+                step = m.group(1);
+            }
+        }
+        assertTrue(step != null, "the restore step is in " + log);
+        String id = step;
+        boolean ran = lines.stream().anyMatch(l -> l.matches(java.util.regex.Pattern.quote(id) + " [0-9.]+ .*"));
+        boolean settled = lines.stream().anyMatch(l -> l.equals(id + " CACHED") || l.startsWith(id + " DONE"));
+        assertTrue(settled, "the restore step settled in " + log);
+        return ran ? Restore.RAN : Restore.REUSED;
+    }
+
+    /** The registry cache refs the build imported, from its log. */
+    static List<String> imported(Path log) throws Exception {
+        List<String> refs = new ArrayList<>();
+        for (String l : Files.readAllLines(log)) {
+            var m = java.util.regex.Pattern.compile("^#\\d+ importing cache manifest from (\\S+)$")
+                    .matcher(JSON.readTree(l).path("t").asText());
+            if (m.find()) {
+                refs.add(m.group(1));
+            }
+        }
+        return refs;
+    }
+
+    /** The digest the registry serves for a content item's cache ref, or null if there is none. */
+    static String cacheDigest(UUID content, String key) throws Exception {
+        String auth = java.util.Base64.getEncoder().encodeToString((System.getProperty("skald.t7probe.username")
+                + ":" + System.getenv("SKALD_T7PROBE_PASSWORD")).getBytes(StandardCharsets.UTF_8));
+        var request = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://localhost:"
+                        + System.getProperty("skald.t7probe.registry-port") + "/v2/skald/cache/" + content
+                        + "/manifests/" + key))
+                .method("HEAD", java.net.http.HttpRequest.BodyPublishers.noBody())
+                .header("Authorization", "Basic " + auth)
+                .header("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json,"
+                        + " application/vnd.docker.distribution.manifest.list.v2+json,"
+                        + " application/vnd.docker.distribution.manifest.v2+json").build();
+        try (var http = java.net.http.HttpClient.newHttpClient()) {
+            var response = http.send(request, java.net.http.HttpResponse.BodyHandlers.discarding());
+            if (response.statusCode() == 404) {
+                return null;
+            }
+            assertEquals(200, response.statusCode(), "HEAD " + request.uri());
+            return response.headers().firstValue("Docker-Content-Digest").orElseThrow();
+        }
+    }
+
+    /** {@code payload} with {@code file} replaced. */
+    private static Map<String, byte[]> with(Map<String, byte[]> payload, String file, String content) {
+        Map<String, byte[]> out = new LinkedHashMap<>(payload);
+        out.put(file, content.getBytes(StandardCharsets.UTF_8));
+        return out;
+    }
+
+    private static String text(Map<String, byte[]> payload, String file) {
+        return new String(payload.get(file), StandardCharsets.UTF_8);
+    }
+
+    /** One cache row: builds, records the result with what the cache did, and returns it. */
+    private static ObjectNode cacheRow(ApplicationContext ctx, String name, App app, UUID content,
+                                       Map<String, byte[]> payload, Duration bound) throws Exception {
+        UUID bundle = storeBundle(ctx, app, content, payload);
+        Map<String, Object> row = build(ctx, name + "-" + app.fixture(), content, bundle, bound);
+        ObjectNode r = result(ctx, name, app, row);
+        assertEquals("PUBLISHING", row.get("state"), r.toString());
+        Path log = OUT.resolve(r.path("log_file").asText());
+        ObjectNode cache = r.putObject("cache");
+        cache.put("restore", restore(app, log).name());
+        cache.put("key", r.path("provenance").path("dependencies").path("cache_key").asText());
+        cache.putPOJO("imported", imported(log));
+        return r;
+    }
+
     // ------------------------------------------------------------------ part 4e-1: cold builds of both apps
 
     @Test
@@ -325,6 +428,109 @@ public class T7PassProbeTest {
                 assertEquals("BUILT", r.path("log_final").path("outcome").asText(), r.toString());
                 assertTrue(r.path("log_final").path("complete").asBoolean(), r.toString());
             }
+        });
+    }
+
+    // ------------------------------------------------------------------ part 4e-2: decision 7's cache, for real
+
+    /**
+     * The dependency cache through the wired worker, judged from the build log as its owner
+     * reads it. Every attempt runs on a fresh worker with an empty workspace, so the only
+     * thing a build can reuse is the registry cache ref the coordinator names,
+     * {@code skald/cache/<content UUID>:<key>}: a hit needs the same content AND the same key.
+     * The key's other inputs (base digest, architecture, recipe revision, package-manager
+     * versions) are proved to change it in DependencyCacheKeyTest; here, on real builds, a
+     * changed key and a different content item each miss.
+     */
+    @Test
+    public void theDependencyCacheIsReusedWithinItsKeyAndContentOnly() {
+        Map<String, String> keys = new LinkedHashMap<>();
+        UUID[] x = new UUID[1];
+        application().run(ctx -> {
+            assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+            Map<String, byte[]> py = payload(PY);
+            x[0] = UUID.randomUUID();
+            ctx.getBean(JdbcTemplate.class).update("INSERT INTO skald.content (id, title, owner, type)"
+                    + " VALUES (?, 't7 probe cache', 'probe', 'shiny')", x[0]);
+            Duration bound = Duration.ofMinutes(20);
+
+            ObjectNode cold = cacheRow(ctx, "cache-cold", PY, x[0], py, bound);
+            String key = cold.path("cache").path("key").asText();
+            assertTrue(key.matches("[0-9a-f]{64}"), cold.toString());
+            assertEquals("RAN", cold.path("cache").path("restore").asText(), "cold: nothing to reuse");
+            assertTrue(cacheDigest(x[0], key) != null, "the cold build exported its cache ref");
+
+            ObjectNode source = cacheRow(ctx, "cache-source-edit", PY, x[0],
+                    with(py, PY.source(), text(py, PY.source()) + "\n# a source-only edit\n"), bound);
+            assertEquals(key, source.path("cache").path("key").asText(), "a source edit keeps the key");
+            assertEquals("REUSED", source.path("cache").path("restore").asText(), "a source-only edit hits");
+            assertEquals(List.of(REGISTRY + ":5000/skald/cache/" + x[0] + ":" + key),
+                    JSON.convertValue(source.path("cache").path("imported"), List.class));
+
+            // The key is over the RENDERED lock, so a comment changes nothing pip would read.
+            ObjectNode comment = cacheRow(ctx, "cache-lock-comment", PY, x[0],
+                    with(py, PY.lock(), "# a comment pip ignores\n" + text(py, PY.lock())), bound);
+            assertEquals(key, comment.path("cache").path("key").asText(), "an equivalent lock keeps the key");
+            assertEquals("REUSED", comment.path("cache").path("restore").asText(), "an equivalent lock hits");
+
+            // A second accepted hash for one package: pip installs the same wheel, but the lock
+            // it reads is different, so the key is.
+            String lock = text(py, PY.lock());
+            var first = java.util.regex.Pattern.compile("--hash=sha256:[0-9a-f]{64}").matcher(lock);
+            assertTrue(first.find());
+            String changed = lock.substring(0, first.end()) + " \\\n    --hash=sha256:" + "0".repeat(64)
+                    + lock.substring(first.end());
+            ObjectNode lockChange = cacheRow(ctx, "cache-lock-change", PY, x[0], with(py, PY.lock(), changed), bound);
+            assertTrue(!key.equals(lockChange.path("cache").path("key").asText()), "a lock change changes the key");
+            assertEquals("RAN", lockChange.path("cache").path("restore").asText(), "a lock change misses");
+
+            // Another content item, the same bundle: the same key, a different scope. It
+            // neither reads this item's cache nor changes it. The digest is taken here: this
+            // item's own builds re-export its ref (mode=min carries the app layer, so each
+            // source edit changes it), and only the other item's build may not.
+            String before = cacheDigest(x[0], key);
+            UUID[] y = store(ctx, PY, py);
+            Map<String, Object> row = build(ctx, "cache-other-content-" + PY.fixture(), y[0], y[1], bound);
+            ObjectNode other = result(ctx, "cache-other-content", PY, row);
+            assertEquals("PUBLISHING", row.get("state"), other.toString());
+            Path log = OUT.resolve(other.path("log_file").asText());
+            ObjectNode c = other.putObject("cache");
+            c.put("restore", restore(PY, log).name());
+            c.put("key", other.path("provenance").path("dependencies").path("cache_key").asText());
+            c.putPOJO("imported", imported(log));
+            assertEquals(key, c.path("key").asText(), "the same bundle has the same key");
+            assertEquals("RAN", c.path("restore").asText(), "another content item never reads this one's cache");
+            assertEquals(List.of(REGISTRY + ":5000/skald/cache/" + y[0] + ":" + key),
+                    JSON.convertValue(c.path("imported"), List.class), "it imports its own scope only");
+            assertEquals(before, cacheDigest(x[0], key), "and this item's cache ref is unchanged by it");
+            keys.put("py", key);
+        });
+
+        // The configured repository set is in the key (decision 7, Q3): the same lock resolved
+        // against another mirror misses. forge2 is the same forge under a second name.
+        application("skald.builds.worker.private-mirrors=forge,forge2",
+                "skald.builds.worker.pypi-mirror=http://forge2/repository/pypi-public/simple/").run(ctx -> {
+            assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+            ObjectNode mirror = cacheRow(ctx, "cache-mirror-change", PY, x[0], payload(PY), Duration.ofMinutes(20));
+            assertTrue(!keys.get("py").equals(mirror.path("cache").path("key").asText()),
+                    "a different mirror changes the key");
+            assertEquals("RAN", mirror.path("cache").path("restore").asText(), "a different mirror misses");
+        });
+
+        // R: the cold build compiles from source (no Linux binaries from forge); a source-only
+        // republish reuses it.
+        application().run(ctx -> {
+            assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+            Map<String, byte[]> r = payload(R);
+            UUID content = UUID.randomUUID();
+            ctx.getBean(JdbcTemplate.class).update("INSERT INTO skald.content (id, title, owner, type)"
+                    + " VALUES (?, 't7 probe cache R', 'probe', 'shiny')", content);
+            ObjectNode cold = cacheRow(ctx, "cache-cold", R, content, r, Duration.ofMinutes(40));
+            assertEquals("RAN", cold.path("cache").path("restore").asText(), "cold: nothing to reuse");
+            ObjectNode source = cacheRow(ctx, "cache-source-edit", R, content,
+                    with(r, R.source(), text(r, R.source()) + "\n# a source-only edit\n"), Duration.ofMinutes(20));
+            assertEquals(cold.path("cache").path("key").asText(), source.path("cache").path("key").asText());
+            assertEquals("REUSED", source.path("cache").path("restore").asText(), "a source-only R edit hits");
         });
     }
 }

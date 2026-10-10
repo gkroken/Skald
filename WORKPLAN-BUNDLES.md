@@ -2072,6 +2072,18 @@ below are marked passed by this planning document.
       built cold through the wired worker (Python ~70-110 s, R ~250-380 s, compiling from
       source), pulled cold by digest, served, uid 10001, /app read-only, host left clean;
       the failed builds of parts 4e-1b/c left complete, readable logs that named each defect.
+      **Part 4e-2 (decision 7's cache, through the wired worker):** judged from each build's
+      log as its owner reads it (the restore step settled with no output of its own =
+      reused). Python: a source-only edit reuses the restore, and so does a comment-only
+      lock edit (the key is over the rendered lock); a second hash on one package, a
+      different content item with the identical bundle (which imports only its own scope
+      and leaves the first item's cache ref byte-identical) and a different configured
+      mirror each rebuild it. R: a source-only edit reuses the from-source restore (145 s
+      against 593 s cold). Every image pulled cold and served as uid 10001. Each attempt
+      starts on an empty workspace, so the keyed ref is the only thing a build can reuse;
+      the key's base, architecture, recipe and package-manager inputs are covered by
+      DependencyCacheKeyTest. A warm Python publish is still ~50 s: that is the fixed
+      launch overhead the T10 latency work targets.
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,

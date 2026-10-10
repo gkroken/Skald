@@ -15,13 +15,16 @@ This script stands up what a deployment provides, runs the Java half
 (T7PassProbeTest, through Maven in Docker as `make test` does), then checks every image
 the Java half reports as built, from the registry, cold:
 
-  infrastructure  an outer network; forge on it as `forge`, listening on :80 (the gateway
+  infrastructure  an outer network; forge on it as `forge` (and `forge2`, the same forge under
+                  a second name, for the cache row that changes the mirror), listening on :80 (the gateway
                   serves repositories on 80 and 443 only, and GatewayConfig's ports are not
                   widened for a probe); an htpasswd registry:2 on it, published on
                   127.0.0.1:REGISTRY_PORT; the trusted bases published to that registry by
                   dev/publish-bases.py, under the name the worker uses (<registry>:5000)
   java            T7PassProbeTest: the application's own configuration with a deployment's
                   properties; bundles stored as T8 will store them; results.json
+  cache           part 4e-2's rows, as the Java half judged them from each build's log:
+                  whether the dependency restore ran or was reused, and the key
   pulled          for each built image: no local copy of the repository exists, then
                   `docker pull localhost:PORT/<repository>@<digest>` succeeds (the daemon
                   allows plain http to localhost only; the digest is the one the worker's
@@ -124,6 +127,7 @@ def setup(password, config_dir):
     if docker(["network", "create", OUTER]).returncode != 0:
         raise SystemExit("could not create " + OUTER)
     run = docker(["run", "-d", "--name", FORGE, "--network", OUTER, "--network-alias", "forge",
+                  "--network-alias", "forge2",
                   "--read-only", "--tmpfs", "/data:uid=65532,gid=65532", bases.FORGE_IMAGE,
                   "-addr", ":80", "-data", "/data"])
     if run.returncode != 0:
@@ -255,6 +259,14 @@ def main(argv):
         record("java", code == 0, summary)
         report = OUT / "results.json"
         built = json.loads(report.read_text()) if report.exists() else []
+        print("== the dependency cache (judged by the Java half) ==")
+        for b in built:
+            if "cache" in b:
+                c = b["cache"]
+                record("%s/%s" % (b["case"], b["app"]), b.get("state") == "PUBLISHING",
+                       "restore %s, key %s..., %ss, imported %s" % (
+                           c.get("restore"), (c.get("key") or "")[:12], str(b.get("seconds"))[:6],
+                           ",".join(r.rsplit("/", 1)[-1][:22] for r in c.get("imported") or []) or "none"))
         print("== cold pull and run ==")
         for b in built:
             if b.get("state") == "PUBLISHING" and b.get("log_complete") and b.get("output_image"):
