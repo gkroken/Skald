@@ -46,6 +46,7 @@ import java.util.function.Consumer;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The launch WorkerProfile computes, against what the docker CLI made of the same profile
@@ -91,6 +92,30 @@ public class WorkerProfileTest {
         // The record is sorted (the CLI's order varies); an environment is a set.
         assertEquals(strings(record().path("env")), l.env().stream().sorted().toList());
         assertFalse(hc.path("Privileged").asBoolean(true));
+    }
+
+    @Test
+    public void theIdentityIsTheProfileThatLaunchesAndRecordsItsWaivers() {
+        WorkerProfile p = WorkerProfile.load("runc-rootless");
+        Map<String, Object> id = p.identity();
+        assertEquals("runc-rootless", id.get("runtime"));
+        assertTrue(String.valueOf(id.get("spec_sha256")).matches("[0-9a-f]{64}"), id.toString());
+        // The seccomp profile the launch passes, by the digest the CLI record keeps.
+        String seccomp = p.launch(Settings.defaults(), "skald-net", "skald-vol").securityOpt().stream()
+                .filter(o -> o.startsWith("seccomp=")).findFirst().orElseThrow().substring(8);
+        assertEquals(sha256(seccomp), id.get("seccomp_sha256"));
+        // Every waiver the spec grants this runtime is on record, and no waived bound is
+        // claimed as launched (decision 2026-09-26: the nnp waiver is recorded with the profile).
+        List<String> waived = new ArrayList<>();
+        WorkerProfile.resource(WorkerProfile.SPEC_RESOURCE).path("seam").path("runtimes").path("runc-rootless")
+                .path("waived").fieldNames().forEachRemaining(waived::add);
+        assertFalse(waived.isEmpty());
+        assertEquals(waived.stream().sorted().toList(), id.get("waived"));
+        Map<?, ?> bounds = (Map<?, ?>) id.get("bounds");
+        assertTrue(bounds.containsKey("seccomp") && bounds.containsKey("network"), bounds.toString());
+        for (String w : waived) {
+            assertFalse(bounds.containsKey(w), w);
+        }
     }
 
     @Test

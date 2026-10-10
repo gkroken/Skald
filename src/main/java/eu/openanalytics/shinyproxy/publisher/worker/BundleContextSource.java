@@ -41,6 +41,7 @@ import eu.openanalytics.shinyproxy.publisher.worker.BuildKitDriver.Prepared;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -48,6 +49,9 @@ import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.TreeMap;
 
 /**
  * A claimed attempt's build context, from the bundle store: the validated payload on disk
@@ -122,13 +126,73 @@ public final class BundleContextSource implements ContextSource {
                 throw new IllegalStateException("the manifest's lock file " + manifest.dependencyPath()
                         + " is not in the payload");
             }
-            Recipe recipe = RecipeGenerator.generate(base, mirrors, manifest, Files.readAllBytes(lock));
+            byte[] uploadedLock = Files.readAllBytes(lock);
+            Recipe recipe = RecipeGenerator.generate(base, mirrors, manifest, uploadedLock);
+            String cacheKey = DependencyCacheKey.of(resolved.entry(), base, mirrors, recipe);
             return new Prepared(extracted.root().path(), recipe, "content/" + build.contentId(),
-                    () -> deleteQuietly(extracted), DependencyCacheKey.of(resolved.entry(), base, mirrors, recipe));
+                    () -> deleteQuietly(extracted), cacheKey,
+                    inputs(receipt, manifest, resolved, recipe, uploadedLock, cacheKey));
         } catch (Exception e) {
             deleteQuietly(extracted);
             throw e;
         }
+    }
+
+    /**
+     * The attempt's inputs for its provenance record: everything here is the server's own
+     * reading (the receipt, the re-validated manifest, the catalog, the generated recipe),
+     * by digest where there is one. The driver adds the worker's side.
+     */
+    Map<String, Object> inputs(BundleReceipt receipt, Manifest manifest, BaseCatalog.Resolved resolved,
+                               Recipe recipe, byte[] uploadedLock, String cacheKey) {
+        Map<String, Object> bundle = new LinkedHashMap<>();
+        bundle.put("archive_sha256", receipt.archiveSha256());
+        bundle.put("archive_bytes", receipt.archiveBytes());
+        bundle.put("manifest_sha256", receipt.manifestSha256());
+        bundle.put("inventory_sha256", receipt.inventorySha256());
+        bundle.put("layout_version", receipt.layoutVersion());
+        bundle.put("schema_version", receipt.schemaVersion());
+        Map<String, Object> declared = new LinkedHashMap<>();
+        declared.put("type", manifest.type());
+        declared.put("language", manifest.language());
+        declared.put("runtime_version", manifest.runtimeVersion());
+        declared.put("entrypoint", manifest.entrypoint());
+        declared.put("dependency_format", manifest.dependencyFormat());
+        declared.put("dependency_path", manifest.dependencyPath());
+        BaseCatalog.Entry entry = resolved.entry();
+        Map<String, Object> base = new LinkedHashMap<>();
+        base.put("catalog_id", entry.id());
+        base.put("reference", resolved.base().reference());
+        base.put("language", entry.language());
+        base.put("version", entry.version());
+        base.put("architecture", entry.architecture());
+        base.put("recipe_revision", entry.recipeRevision());
+        base.put("uid", entry.uid());
+        base.put("gid", entry.gid());
+        base.put("package_manager", new TreeMap<>(entry.packageManager()));
+        Map<String, Object> files = new TreeMap<>();
+        recipe.files().forEach((name, bytes) -> files.put(name, sha256Hex(bytes)));
+        Map<String, Object> generated = new LinkedHashMap<>();
+        generated.put("dockerfile_sha256", sha256Hex(recipe.dockerfile().getBytes(StandardCharsets.UTF_8)));
+        generated.put("files_sha256", files);
+        Map<String, Object> dependencies = new LinkedHashMap<>();
+        dependencies.put("uploaded_lock_sha256", sha256Hex(uploadedLock));
+        dependencies.put("cache_key", cacheKey);
+        Map<String, Object> repositories = new LinkedHashMap<>();
+        repositories.put("cran", mirrors.cran().toString());
+        repositories.put("pypi_index", mirrors.pypiIndex().toString());
+        dependencies.put("mirrors", repositories);
+        Map<String, Object> inputs = new LinkedHashMap<>();
+        inputs.put("bundle", bundle);
+        inputs.put("manifest", declared);
+        inputs.put("base", base);
+        inputs.put("recipe", generated);
+        inputs.put("dependencies", dependencies);
+        return inputs;
+    }
+
+    private static String sha256Hex(byte[] bytes) {
+        return HexFormat.of().formatHex(sha256().digest(bytes));
     }
 
     private static void deleteQuietly(BundleExtractor.Extracted extracted) {

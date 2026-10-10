@@ -61,6 +61,10 @@ public class BuildKitClientTest {
                 push.byDigest("sha256:" + "0".repeat(64)));
         assertTrue(BuildKitClient.buildctl(push).contains(
                 "type=image,name=registry:5000/content/abc:build-" + BUILD + ",push=true"));
+        // Every pushed image carries BuildKit's SLSA v1 provenance, at full detail.
+        List<String> args = BuildKitClient.buildctl(push);
+        assertEquals("attest:provenance=mode=max,version=v1", args.get(args.indexOf("--opt") + 1));
+        assertEquals(1, args.stream().filter("--opt"::equals).count(), "no other frontend option: no build argument");
         // --output is one comma-separated option string: a ',' in either name would add an
         // option (another registry, registry.insecure, push=false).
         for (String repo : List.of("abc,push=false", "abc,registry.insecure=true", "ABC", "a b", "a//b",

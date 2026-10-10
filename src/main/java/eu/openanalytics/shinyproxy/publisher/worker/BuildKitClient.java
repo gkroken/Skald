@@ -353,10 +353,33 @@ public final class BuildKitClient {
                     + " && unset SKALD_DOCKER_CONFIG && DOCKER_CONFIG=/tmp/cfg \"$@\" && cat " + METADATA,
             "sh");
 
+    /**
+     * BuildKit's SLSA provenance attestation, attached to every pushed image: an attestation
+     * manifest beside the image in an OCI index, so the pushed digest is the index's and
+     * anyone holding the image can verify what built it (buildx imagetools inspect, cosign,
+     * any SLSA verifier). mode=max records the Dockerfile and every build argument's VALUE;
+     * that is safe here, and must stay safe: the Dockerfile is the server's recipe, no build
+     * argument is ever passed, and the one secret (the registry credential) is the client's
+     * docker config, which is not a build input. version pinned, so an upstream default
+     * change cannot alter the format unnoticed.
+     */
+    static final String PROVENANCE_ATTESTATION = "attest:provenance=mode=max,version=v1";
+
+    /** The attestation, as the provenance record states it. */
+    static Map<String, Object> attestation() {
+        Map<String, Object> a = new java.util.LinkedHashMap<>();
+        a.put("type", "https://slsa.dev/provenance/v1");
+        a.put("generator", "buildkit");
+        a.put("mode", "max");
+        a.put("stored", "attestation manifest in the pushed image index");
+        return a;
+    }
+
     static List<String> buildctl(Push push) {
         List<String> args = new java.util.ArrayList<>(List.of("buildctl", "--addr", DockerWorkerLauncher.SOCKET_ADDRESS,
                 "build", "--progress", "plain", "--frontend", "dockerfile.v0",
                 "--local", "context=" + CONTEXT_MOUNT + "/ctx", "--local", "dockerfile=" + CONTEXT_MOUNT + "/df",
+                "--opt", PROVENANCE_ATTESTATION,
                 "--output", "type=image,name=" + push.name() + ",push=true",
                 "--metadata-file", METADATA));
         if (push.cache() != null) {

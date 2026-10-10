@@ -44,7 +44,10 @@ import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -83,13 +86,23 @@ public final class BuildKitDriver implements BuildDriver {
     }
 
     /**
-     * A verified payload on disk, its recipe, the repository to push to, its cleanup, and its
-     * dependency cache key (recipe.DependencyCacheKey), or null for no cache.
+     * A verified payload on disk, its recipe, the repository to push to, its cleanup, its
+     * dependency cache key (recipe.DependencyCacheKey) or null for no cache, and its inputs
+     * for the provenance record (BundleContextSource#inputs), never null.
      */
-    public record Prepared(Path payload, Recipe recipe, String repository, Runnable release, String cacheKey) {
+    public record Prepared(Path payload, Recipe recipe, String repository, Runnable release, String cacheKey,
+                           Map<String, Object> inputs) {
+
+        public Prepared {
+            inputs = Collections.unmodifiableMap(new LinkedHashMap<>(inputs));
+        }
 
         public Prepared(Path payload, Recipe recipe, String repository, Runnable release) {
-            this(payload, recipe, repository, release, null);
+            this(payload, recipe, repository, release, null, Map.of());
+        }
+
+        public Prepared(Path payload, Recipe recipe, String repository, Runnable release, String cacheKey) {
+            this(payload, recipe, repository, release, cacheKey, Map.of());
         }
     }
 
@@ -105,6 +118,8 @@ public final class BuildKitDriver implements BuildDriver {
     }
 
     static final int DETAIL_MAX = 200;
+    /** The build record's provenance document (V3). */
+    static final String PROVENANCE_SCHEMA = "skald.build-provenance/v1";
     /** How long the decision waits for the rest of an exited client's output. */
     static final long FOLLOW_SETTLE_MILLIS = 30_000;
     private static final Logger log = LoggerFactory.getLogger(BuildKitDriver.class);
@@ -141,9 +156,10 @@ public final class BuildKitDriver implements BuildDriver {
         AtomicBoolean aborted = new AtomicBoolean();
         AtomicReference<Outcome> result = new AtomicReference<>();
         AtomicReference<Throwable> crashed = new AtomicReference<>();
+        AtomicReference<Map<String, Object>> record = new AtomicReference<>();
         Thread work = new Thread(() -> {
             try {
-                result.set(attempt(build, h, aborted, buildLog));
+                result.set(attempt(build, h, aborted, buildLog, record));
             } catch (Throwable t) {
                 crashed.set(t);
             } finally {
@@ -191,7 +207,59 @@ public final class BuildKitDriver implements BuildDriver {
         Outcome outcome = crashed.get() != null
                 ? new Failed("DRIVER_ERROR", detail(crashed.get().getClass().getSimpleName()))
                 : result.get();
-        return withLog(buildLog, outcome);
+        return withRecord(withLog(buildLog, outcome), record.get());
+    }
+
+    /**
+     * A failure carries the provenance the attempt got as far as, whichever path failed it
+     * (a build step, the log, a crash after the inputs were known): which base and lock a
+     * failed build ran against is what its owner needs to see.
+     */
+    private static Outcome withRecord(Outcome outcome, Map<String, Object> record) {
+        if (record != null && outcome instanceof Failed f && f.provenance() == null) {
+            return new Failed(f.code(), f.detail(), record);
+        }
+        return outcome;
+    }
+
+    /**
+     * The provenance record so far (schema skald.build-provenance/v1): the attempt, the
+     * prepared inputs, the effective limits and the egress policy; the worker's side once it
+     * is launched; the attestation once there is an image.
+     */
+    private Map<String, Object> record(Claimed build, Prepared prepared, Map<String, Object> worker,
+                                       boolean attested) {
+        Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("schema", PROVENANCE_SCHEMA);
+        Map<String, Object> attempt = new LinkedHashMap<>();
+        attempt.put("build_id", build.buildId().toString());
+        attempt.put("content_id", build.contentId().toString());
+        attempt.put("bundle_id", build.bundleId().toString());
+        attempt.put("lease_generation", build.lease().generation());
+        doc.put("attempt", attempt);
+        doc.putAll(prepared.inputs());
+        Settings s = config.settings();
+        Map<String, Object> limits = new LinkedHashMap<>();
+        limits.put("cpus", s.cpuQuota());
+        limits.put("memory", s.memoryLimit());
+        limits.put("pids", s.pidLimit());
+        limits.put("tmpfs", s.tmpfsSize());
+        limits.put("workspace_megabytes", config.quotaMegabytes());
+        limits.put("step_log_max_bytes", s.stepLogMaxBytes());
+        limits.put("step_log_max_bytes_per_second", s.stepLogMaxBytesPerSecond());
+        doc.put("limits", limits);
+        Map<String, Object> egress = new LinkedHashMap<>();
+        egress.put("registry", config.egress().registry());
+        egress.put("repositories", config.egress().repos());
+        egress.put("private_mirrors", config.egress().privateMirrors());
+        doc.put("egress", egress);
+        if (worker != null) {
+            doc.put("worker", worker);
+        }
+        if (attested) {
+            doc.put("attestation", BuildKitClient.attestation());
+        }
+        return doc;
     }
 
     /**
@@ -249,7 +317,8 @@ public final class BuildKitDriver implements BuildDriver {
     }
 
     /** The work thread: every Docker call of the attempt. */
-    private Outcome attempt(Claimed build, Handle h, AtomicBoolean aborted, HeadTailLog buildLog) throws Exception {
+    private Outcome attempt(Claimed build, Handle h, AtomicBoolean aborted, HeadTailLog buildLog,
+                            AtomicReference<Map<String, Object>> record) throws Exception {
         buildLog.line("[skald] attempt " + h.attemptId() + ": preparing the build context", false);
         Prepared prepared;
         try {
@@ -259,6 +328,7 @@ public final class BuildKitDriver implements BuildDriver {
         } catch (Exception e) {
             return new Failed("CONTEXT", detail(e.getMessage()));
         }
+        record.set(record(build, prepared, null, false));
         try {
             if (aborted.get()) {
                 return new Stopped();
@@ -276,6 +346,16 @@ public final class BuildKitDriver implements BuildDriver {
             if (aborted.get()) {
                 return new Stopped();
             }
+            // What ran, by the images its containers run: an attempt whose worker cannot be
+            // put on record builds nothing (V3: an image's inputs are on record, or it is not
+            // the platform's).
+            Map<String, Object> worker;
+            try {
+                worker = launcher.provenance(h);
+            } catch (IllegalStateException | org.mandas.docker.client.exceptions.DockerException e) {
+                return new Failed("PROVENANCE", detail(e.getMessage()));
+            }
+            record.set(record(build, prepared, worker, false));
             try {
                 client.stage(h, prepared.payload(), prepared.recipe());
                 if (aborted.get()) {
@@ -303,7 +383,7 @@ public final class BuildKitDriver implements BuildDriver {
                 // A push that completed is the outcome, whatever happens to the worker after.
                 if (exit.isPresent() && exit.get() == 0) {
                     try {
-                        return new Built(client.pushed(h, push));
+                        return new Built(client.pushed(h, push), record(build, prepared, worker, true));
                     } catch (IllegalStateException e) {
                         return new Failed("BUILD_RESULT", detail(e.getMessage()));
                     }

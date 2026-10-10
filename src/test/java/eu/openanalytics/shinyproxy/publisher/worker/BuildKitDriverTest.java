@@ -666,6 +666,11 @@ public class BuildKitDriverTest {
         assertTrue(failed.detail().length() <= BuildKitDriver.DETAIL_MAX);
         assertTrue(failed.detail().contains("did not complete successfully"),
                 "the detail is buildctl's own last line: " + failed.detail());
+        // A failed build's record says what it ran against; it has no image to attest.
+        assertNotNull(failed.provenance(), "a failed build after launch has its provenance");
+        assertEquals(c.buildId().toString(), ((Map<?, ?>) failed.provenance().get("attempt")).get("build_id"));
+        assertNotNull(failed.provenance().get("worker"));
+        assertFalse(failed.provenance().containsKey("attestation"));
         assertEquals(1, released.get());
         assertNothingLeft(c);
         // The log: finished with the outcome, and it ends with the step's own output and
@@ -677,6 +682,71 @@ public class BuildKitDriverTest {
         assertTrue(texts.stream().anyMatch(l -> l.contains("the step says " + (char) 0xe9 + " goodbye")), texts.toString());
         assertTrue(texts.get(texts.size() - 1).startsWith("[skald] failed: BUILD_FAILED exit 1: "),
                 texts.get(texts.size() - 1));
+    }
+
+    @Test
+    public void aBuiltImageCarriesItsProvenanceRecordAndAnSlsaAttestation(@TempDir Path dir) throws Exception {
+        Claimed c = claimed();
+        Outcome outcome = driver(Settings.defaults(), source(dir, "", new AtomicInteger())).run(c, () -> false);
+        assertInstanceOf(Built.class, outcome, outcome.toString());
+        assertNothingLeft(c);
+        Built built = (Built) outcome;
+        JsonNode doc = new ObjectMapper().valueToTree(built.provenance());
+        assertEquals(BuildKitDriver.PROVENANCE_SCHEMA, doc.path("schema").asText());
+        assertEquals(c.buildId().toString(), doc.path("attempt").path("build_id").asText());
+        assertEquals("4g", doc.path("limits").path("memory").asText());
+        assertEquals(256, doc.path("limits").path("workspace_megabytes").asInt());
+        assertEquals(registry.name, doc.path("egress").path("registry").asText());
+        // What ran, by image id: the images the attempt's containers were created from.
+        assertEquals(docker.inspectImage(WORKER).id(), doc.path("worker").path("images").path("worker").path("id").asText());
+        assertEquals(docker.inspectImage(GATEWAY).id(), doc.path("worker").path("images").path("gateway").path("id").asText());
+        assertEquals("runc-rootless", doc.path("worker").path("profile").path("runtime").asText());
+        assertEquals("https://slsa.dev/provenance/v1", doc.path("attestation").path("type").asText());
+
+        // The pushed digest is an index holding the image and BuildKit's attestation manifest,
+        // whose one layer is the SLSA v1 provenance statement.
+        String digest = built.image().substring(built.image().indexOf('@') + 1);
+        JsonNode index = registryJson("/v2/content/bkd/manifests/" + digest);
+        assertEquals("application/vnd.oci.image.index.v1+json", index.path("mediaType").asText(), index.toString());
+        JsonNode attestation = null;
+        for (JsonNode m : index.path("manifests")) {
+            if ("attestation-manifest".equals(m.path("annotations").path("vnd.docker.reference.type").asText())) {
+                attestation = m;
+            }
+        }
+        assertNotNull(attestation, "no attestation manifest in " + index);
+        JsonNode layers = registryJson("/v2/content/bkd/manifests/" + attestation.path("digest").asText())
+                .path("layers");
+        assertEquals(1, layers.size(), layers.toString());
+        assertEquals("https://slsa.dev/provenance/v1",
+                layers.get(0).path("annotations").path("in-toto.io/predicate-type").asText(), layers.toString());
+        String statement = new String(registryBytes("/v2/content/bkd/blobs/" + layers.get(0).path("digest").asText()),
+                StandardCharsets.UTF_8);
+        assertTrue(statement.contains("https://slsa.dev/provenance/v1"), statement);
+        // mode=max records build arguments' values: the credential is never one.
+        for (String secret : List.of(TestRegistry.SECRET_A, TestRegistry.SECRET_B,
+                java.util.Base64.getEncoder().encodeToString((TestRegistry.CRED.username() + ":"
+                        + TestRegistry.CRED.password()).getBytes(StandardCharsets.UTF_8)))) {
+            assertFalse(statement.contains(secret), "the attestation holds the registry credential");
+            assertFalse(new ObjectMapper().writeValueAsString(built.provenance()).contains(secret),
+                    "the provenance record holds the registry credential");
+        }
+    }
+
+    private static byte[] registryBytes(String path) throws Exception {
+        String basic = java.util.Base64.getEncoder().encodeToString((TestRegistry.CRED.username() + ":"
+                + TestRegistry.CRED.password()).getBytes(StandardCharsets.UTF_8));
+        var response = java.net.http.HttpClient.newHttpClient().send(java.net.http.HttpRequest.newBuilder(
+                        java.net.URI.create("http://localhost:" + registry.port + path))
+                .header("Authorization", "Basic " + basic)
+                .header("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json")
+                .build(), java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+        assertEquals(200, response.statusCode(), path);
+        return response.body();
+    }
+
+    private static JsonNode registryJson(String path) throws Exception {
+        return new ObjectMapper().readTree(registryBytes(path));
     }
 
     /** Every record of the attempt's log, read back from the store, in order. */

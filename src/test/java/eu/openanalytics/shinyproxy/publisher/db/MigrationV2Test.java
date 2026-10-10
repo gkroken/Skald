@@ -118,7 +118,7 @@ public class MigrationV2Test {
         assertEquals(List.of("1", "2"), jdbc.queryForList(
             "SELECT version FROM skald.flyway_schema_history WHERE success AND version IS NOT NULL"
                 + " ORDER BY installed_rank",
-            String.class));
+            String.class).subList(0, 2));
         for (String table : List.of("bundle", "build", "artifact")) {
             assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM information_schema.tables"
                 + " WHERE table_schema = 'skald' AND table_name = ?", Integer.class, table), table);
@@ -201,13 +201,15 @@ public class MigrationV2Test {
         UUID id = UUID.randomUUID();
         jdbc.update("INSERT INTO skald.build (id, content_id, bundle_id, created_by, idempotency_key,"
             + " input_fingerprint, state, finished_at, lease_owner, lease_expires_at, lease_generation,"
-            + " output_image) VALUES (?, ?, ?, 'alice', ?, ?, ?,"
+            + " output_image, provenance) VALUES (?, ?, ?, 'alice', ?, ?, ?,"
             + " CASE WHEN ? IN ('SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','INTERRUPTED') THEN now() END,"
             + " CASE WHEN ? IN ('RUNNING','PUBLISHING') THEN 'node-1' END,"
             + " CASE WHEN ? IN ('RUNNING','PUBLISHING') THEN now() + interval '60 seconds' END,"
             + " CASE WHEN ? IN ('RUNNING','PUBLISHING') THEN 1 ELSE 0 END,"
-            + " CASE WHEN ? = 'SUCCEEDED' THEN 'registry:5000/x@sha256:' || repeat('b', 64) END)",
-            id, content, bundle, key, FINGERPRINT, state, state, state, state, state, state);
+            + " CASE WHEN ? = 'SUCCEEDED' THEN 'registry:5000/x@sha256:' || repeat('b', 64) END,"
+            // V3: a build with an image has provenance.
+            + " CASE WHEN ? = 'SUCCEEDED' THEN '{\"schema\": \"test\"}'::jsonb END)",
+            id, content, bundle, key, FINGERPRINT, state, state, state, state, state, state, state);
         return id;
     }
 

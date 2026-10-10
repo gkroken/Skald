@@ -142,6 +142,13 @@ public class DockerWorkerLauncherTest {
 
             String mounted = exec(h.gateway(), "cat", "/skald-conf/squid.conf");
             assertEquals(GatewayConfig.squidConf("registry", List.of("pypi.org"), List.of("forge")), mounted);
+
+            // The provenance states what ran: each image by the id its container runs.
+            Map<String, Object> ran = launcher.provenance(h);
+            Map<?, ?> images = (Map<?, ?>) ran.get("images");
+            assertEquals(worker.image(), ((Map<?, ?>) images.get("worker")).get("id"));
+            assertEquals(docker.inspectContainer(h.gateway()).image(), ((Map<?, ?>) images.get("gateway")).get("id"));
+            assertEquals(WorkerProfile.load("runc-rootless").identity(), ran.get("profile"));
         } finally {
             assertEquals(List.of(), launcher.dispose(h), "everything the attempt owned is gone");
         }
@@ -216,6 +223,27 @@ public class DockerWorkerLauncherTest {
             assertTrue(docker.inspectContainer(h.worker()).state().running());
         } finally {
             assertEquals(List.of(), onFlaky.dispose(h));
+        }
+    }
+
+    @Test
+    public void theProvenanceRefusesContainersThatAreNotTheAttempts() throws Exception {
+        // A container under the attempt's names that does not carry its label is not what the
+        // attempt ran; its image is never put on record as the attempt's.
+        String id = attempt();
+        Handle h = DockerWorkerLauncher.handle(id);
+        List<String> made = new java.util.ArrayList<>();
+        try {
+            for (String name : List.of(h.worker(), h.gateway())) {
+                made.add(docker.createContainer(org.mandas.docker.client.messages.ContainerConfig.builder()
+                        .image(Images.HELPER).cmd("true").build(), name).id());
+            }
+            IllegalStateException e = assertThrows(IllegalStateException.class, () -> launcher.provenance(h));
+            assertTrue(e.getMessage().contains(h.worker()), e.getMessage());
+        } finally {
+            for (String c : made) {
+                docker.removeContainer(c);
+            }
         }
     }
 

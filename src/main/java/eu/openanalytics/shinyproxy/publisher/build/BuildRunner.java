@@ -187,12 +187,12 @@ public final class BuildRunner {
             }
             if (outcome instanceof BuildDriver.Built built) {
                 try {
-                    coordinator.toPublishing(lease, built.image());
+                    coordinator.toPublishing(lease, built.image(), built.provenance());
                 } catch (IllegalArgumentException notADigest) {
                     // A driver bug (a tag where a digest belongs) is the attempt's failure,
                     // not an exception for the caller: the attempt would otherwise sit RUNNING
                     // until reaped (25d3a98 review N1).
-                    coordinator.fail(lease, "DRIVER_ERROR", notADigest.getMessage());
+                    coordinator.fail(lease, "DRIVER_ERROR", notADigest.getMessage(), built.provenance());
                     return Result.FAILED;
                 }
                 if (publishing == null) {
@@ -216,7 +216,7 @@ public final class BuildRunner {
                 return Result.CANCELLED;
             }
             BuildDriver.Failed failed = (BuildDriver.Failed) outcome;
-            coordinator.fail(lease, failed.code(), failed.detail());
+            coordinator.fail(lease, failed.code(), failed.detail(), failed.provenance());
             return Result.FAILED;
         } catch (Fenced fenced) {
             return Result.FENCED;

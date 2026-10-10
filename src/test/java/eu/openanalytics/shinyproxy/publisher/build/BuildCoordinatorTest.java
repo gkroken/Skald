@@ -45,6 +45,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -65,6 +66,7 @@ public class BuildCoordinatorTest {
 
     private static JdbcTemplate jdbc;
     private static final String DIGEST = "registry:5000/c@sha256:" + "c".repeat(64);
+    private static final Map<String, Object> PROVENANCE = Map.of("schema", "test");
     private static final CoordinatorSettings ONE = CoordinatorSettings.DEFAULTS;
 
     @BeforeAll
@@ -198,7 +200,7 @@ public class BuildCoordinatorTest {
         assertEquals("INTERRUPTED", state(build));
 
         assertFalse(coordinator.renew(lease));
-        assertThrows(Fenced.class, () -> coordinator.toPublishing(lease, DIGEST));
+        assertThrows(Fenced.class, () -> coordinator.toPublishing(lease, DIGEST, PROVENANCE));
         assertThrows(Fenced.class, () -> coordinator.fail(lease, "X", "late"));
         assertEquals("INTERRUPTED", state(build), "a stale worker changed a terminal attempt");
     }
@@ -210,7 +212,7 @@ public class BuildCoordinatorTest {
         Lease lease = coordinator.claim("node-1").orElseThrow().lease();
         expireLease(build);
         assertFalse(coordinator.renew(lease), "an expired lease was renewed back to life");
-        assertThrows(Fenced.class, () -> coordinator.toPublishing(lease, DIGEST));
+        assertThrows(Fenced.class, () -> coordinator.toPublishing(lease, DIGEST, PROVENANCE));
         assertEquals("RUNNING", state(build));
     }
 
@@ -220,13 +222,13 @@ public class BuildCoordinatorTest {
         BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
         Lease lease = coordinator.claim("node-1").orElseThrow().lease();
         assertThrows(Fenced.class, () -> coordinator.toPublishing(
-            new Lease(build, lease.generation() + 1, "node-1"), DIGEST));
+            new Lease(build, lease.generation() + 1, "node-1"), DIGEST, PROVENANCE));
         assertThrows(Fenced.class, () -> coordinator.toPublishing(
-            new Lease(build, lease.generation(), "node-2"), DIGEST));
+            new Lease(build, lease.generation(), "node-2"), DIGEST, PROVENANCE));
         assertFalse(coordinator.renew(new Lease(build, lease.generation() - 1, "node-1")));
-        coordinator.toPublishing(lease, DIGEST);
+        coordinator.toPublishing(lease, DIGEST, PROVENANCE);
         assertEquals("PUBLISHING", state(build));
-        assertThrows(Fenced.class, () -> coordinator.toPublishing(lease, DIGEST),
+        assertThrows(Fenced.class, () -> coordinator.toPublishing(lease, DIGEST, PROVENANCE),
             "RUNNING -> PUBLISHING applied twice");
     }
 
@@ -282,7 +284,7 @@ public class BuildCoordinatorTest {
 
         UUID publishing = queued("alice");
         Lease p = coordinator.claim("n2").orElseThrow().lease();
-        coordinator.toPublishing(p, DIGEST);
+        coordinator.toPublishing(p, DIGEST, PROVENANCE);
         assertEquals(BuildCoordinator.CancelOutcome.REFUSED_PUBLISHING,
             coordinator.cancel(contentOf(publishing), publishing, "alice"));
         assertEquals("PUBLISHING", state(publishing));
@@ -292,6 +294,67 @@ public class BuildCoordinatorTest {
         assertEquals(BuildCoordinator.CancelOutcome.NOT_FOUND,
             coordinator.cancel(contentOf(queued("bob")), running, "bob"),
             "a build was cancelled through another content item");
+    }
+
+    private String provenanceOf(UUID build) {
+        return jdbc.queryForObject("SELECT provenance::text FROM skald.build WHERE id = ?", String.class, build);
+    }
+
+    private String limitsOf(UUID build) {
+        return jdbc.queryForObject("SELECT effective_limits::text FROM skald.build WHERE id = ?", String.class, build);
+    }
+
+    @Test
+    public void theBuildRecordKeepsTheProvenanceItsOutcomeCarried() {
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        Map<String, Object> record = Map.of("schema", "skald.build-provenance/v1", "limits", Map.of("memory", "4g"));
+
+        // An image is written with its provenance, whose limits become effective_limits.
+        UUID built = queued("alice");
+        Lease b = coordinator.claim("n1").orElseThrow().lease();
+        assertThrows(IllegalArgumentException.class, () -> coordinator.toPublishing(b, DIGEST, null));
+        assertThrows(IllegalArgumentException.class, () -> coordinator.toPublishing(b, DIGEST, Map.of("x", 1)));
+        assertEquals("RUNNING", state(built), "a refused provenance changed the attempt");
+        coordinator.toPublishing(b, DIGEST, record);
+        assertEquals("{\"limits\": {\"memory\": \"4g\"}, \"schema\": \"skald.build-provenance/v1\"}",
+            provenanceOf(built));
+        assertEquals("{\"memory\": \"4g\"}", limitsOf(built));
+        // A publication that then fails keeps the image's record, whatever the failure carries.
+        coordinator.fail(b, "PUBLISH_VERIFY", "no such manifest", Map.of("schema", "other"));
+        assertEquals("FAILED", state(built));
+        assertTrue(provenanceOf(built).contains("skald.build-provenance/v1"), provenanceOf(built));
+
+        // A failure while RUNNING records what it carries, and nothing when it carries nothing.
+        UUID failed = queued("alice");
+        Lease f = coordinator.claim("n1").orElseThrow().lease();
+        coordinator.fail(f, "BUILD_FAILED", "exit 1", record);
+        assertEquals("{\"limits\": {\"memory\": \"4g\"}, \"schema\": \"skald.build-provenance/v1\"}",
+            provenanceOf(failed));
+        assertEquals("{\"memory\": \"4g\"}", limitsOf(failed));
+        UUID bare = queued("alice");
+        Lease n = coordinator.claim("n1").orElseThrow().lease();
+        coordinator.fail(n, "CONTEXT", "no such bundle");
+        assertNull(provenanceOf(bare));
+        assertEquals("{}", limitsOf(bare));
+
+        // Through the runner: a driver's failure carries its record to the row.
+        UUID run = queued("alice");
+        assertEquals(BuildRunner.Result.FAILED, new BuildRunner(coordinator, ONE).runOnce("n1",
+            (c, stop) -> new BuildDriver.Failed("BUILD_FAILED", "exit 1", record)));
+        assertTrue(provenanceOf(run).contains("skald.build-provenance/v1"));
+        UUID ran = queued("alice");
+        assertEquals(BuildRunner.Result.PUBLISHING, new BuildRunner(coordinator, ONE).runOnce("n1",
+            (c, stop) -> new BuildDriver.Built(DIGEST, record)));
+        assertTrue(provenanceOf(ran).contains("skald.build-provenance/v1"));
+    }
+
+    @Test
+    public void anOutcomeRefusesAProvenanceWithoutASchema() {
+        assertThrows(IllegalArgumentException.class, () -> new BuildDriver.Built(DIGEST, null));
+        assertThrows(IllegalArgumentException.class, () -> new BuildDriver.Built(DIGEST, Map.of()));
+        assertThrows(IllegalArgumentException.class, () -> new BuildDriver.Built(DIGEST, Map.of("schema", 1)));
+        assertThrows(IllegalArgumentException.class, () -> new BuildDriver.Failed("X", "y", Map.of("a", "b")));
+        assertNull(new BuildDriver.Failed("X", "y").provenance());
     }
 
     // ------------------------------------------------------------------ the runner, with fake drivers
@@ -305,7 +368,7 @@ public class BuildCoordinatorTest {
         }));
 
         UUID built = queued("alice");
-        assertEquals(BuildRunner.Result.PUBLISHING, runner.runOnce("n1", (b, stop) -> new BuildDriver.Built(DIGEST)));
+        assertEquals(BuildRunner.Result.PUBLISHING, runner.runOnce("n1", (b, stop) -> new BuildDriver.Built(DIGEST, PROVENANCE)));
         assertEquals("PUBLISHING", state(built));
         assertEquals(DIGEST, jdbc.queryForObject("SELECT output_image FROM skald.build WHERE id = ?", String.class, built));
         coordinator.fail(new Lease(built, 1, "n1"), "TEST_DONE", "free the slot");
@@ -325,7 +388,7 @@ public class BuildCoordinatorTest {
     @Test
     public void publicationIsVerifiedInsideTheLeaseAndAFailedCheckFailsTheAttempt() {
         BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
-        BuildDriver built = (b, stop) -> new BuildDriver.Built(DIGEST);
+        BuildDriver built = (b, stop) -> new BuildDriver.Built(DIGEST, PROVENANCE);
 
         UUID verified = queued("alice");
         assertEquals(BuildRunner.Result.PUBLISHING, new BuildRunner(coordinator, ONE, (b, image) -> {
@@ -433,7 +496,7 @@ public class BuildCoordinatorTest {
             for (int i = 0; i < 300 && !stop.getAsBoolean(); i++) {
                 Thread.sleep(100);
             }
-            return stop.getAsBoolean() ? new BuildDriver.Stopped() : new BuildDriver.Built(DIGEST);
+            return stop.getAsBoolean() ? new BuildDriver.Stopped() : new BuildDriver.Built(DIGEST, PROVENANCE);
         }));
         assertTrue(running.await(30, TimeUnit.SECONDS));
         assertEquals(BuildCoordinator.CancelOutcome.REQUESTED, coordinator.cancel(contentOf(build), build, "alice"));
@@ -459,7 +522,7 @@ public class BuildCoordinatorTest {
             for (int i = 0; i < 300 && !stop.getAsBoolean(); i++) {
                 Thread.sleep(100);
             }
-            return new BuildDriver.Built(DIGEST);
+            return new BuildDriver.Built(DIGEST, PROVENANCE);
         }));
         assertTrue(running.await(30, TimeUnit.SECONDS));
         expireLease(build);
@@ -488,7 +551,7 @@ public class BuildCoordinatorTest {
         });
         BuildRunner.Result result = new BuildRunner(coordinator, fast).runOnce("n1", (b, stop) -> {
             Thread.sleep(5000);
-            return new BuildDriver.Built(DIGEST);
+            return new BuildDriver.Built(DIGEST, PROVENANCE);
         });
         assertEquals(BuildRunner.Result.PUBLISHING, result);
         assertEquals(0, reaped.get());
@@ -540,7 +603,7 @@ public class BuildCoordinatorTest {
                 }
                 Thread.sleep(100);
             }
-            return new BuildDriver.Built(DIGEST);
+            return new BuildDriver.Built(DIGEST, PROVENANCE);
         });
         assertFalse(sawStop.get(), "one failed renewal stopped a healthy build");
         assertEquals(BuildRunner.Result.PUBLISHING, result);
@@ -570,11 +633,11 @@ public class BuildCoordinatorTest {
             for (int i = 0; i < 100; i++) {
                 if (stop.getAsBoolean()) {
                     stoppedAfterMs[0] = (System.nanoTime() - start) / 1_000_000;
-                    return new BuildDriver.Built(DIGEST);
+                    return new BuildDriver.Built(DIGEST, PROVENANCE);
                 }
                 Thread.sleep(50);
             }
-            return new BuildDriver.Built(DIGEST);
+            return new BuildDriver.Built(DIGEST, PROVENANCE);
         });
         assertEquals(BuildRunner.Result.FENCED, result);
         assertTrue(stoppedAfterMs[0] >= 0, "the driver was never told to stop");
@@ -633,11 +696,11 @@ public class BuildCoordinatorTest {
             for (int i = 0; i < 200; i++) {
                 if (stop.getAsBoolean()) {
                     stoppedAfterMs[0] = (System.nanoTime() - start) / 1_000_000;
-                    return new BuildDriver.Built(DIGEST);
+                    return new BuildDriver.Built(DIGEST, PROVENANCE);
                 }
                 Thread.sleep(50);
             }
-            return new BuildDriver.Built(DIGEST);
+            return new BuildDriver.Built(DIGEST, PROVENANCE);
         });
         assertTrue(stoppedAfterMs[0] >= 0, "the driver was never told to stop");
         assertTrue(stoppedAfterMs[0] < 2900, "told to stop only after " + stoppedAfterMs[0]
@@ -664,7 +727,7 @@ public class BuildCoordinatorTest {
                 for (int i = 0; i < 300 && !stop.getAsBoolean(); i++) {
                     Thread.sleep(100);
                 }
-                return new BuildDriver.Built(DIGEST);
+                return new BuildDriver.Built(DIGEST, PROVENANCE);
             }));
         assertTrue(running.await(30, TimeUnit.SECONDS));
         jdbc.update("UPDATE skald.build SET deadline_at = now() - interval '1 second' WHERE id = ?", build);
@@ -683,7 +746,7 @@ public class BuildCoordinatorTest {
         jdbc.update("UPDATE skald.build SET deadline_at = now() - interval '1 second',"
             + " cancel_requested_at = now() WHERE id = ?", build);
         assertFalse(coordinator.renew(lease));
-        assertThrows(Fenced.class, () -> coordinator.toPublishing(lease, DIGEST), "a late success");
+        assertThrows(Fenced.class, () -> coordinator.toPublishing(lease, DIGEST, PROVENANCE), "a late success");
         assertThrows(Fenced.class, () -> coordinator.fail(lease, "X", "late"));
         assertThrows(Fenced.class, () -> coordinator.confirmCancelled(lease));
         assertEquals("RUNNING", state(build));
@@ -744,7 +807,7 @@ public class BuildCoordinatorTest {
         BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
         UUID build = queued("alice");
         assertEquals(BuildRunner.Result.FAILED, new BuildRunner(coordinator, ONE).runOnce("n1",
-            (b, stop) -> new BuildDriver.Built("registry:5000/c:latest")));
+            (b, stop) -> new BuildDriver.Built("registry:5000/c:latest", PROVENANCE)));
         assertEquals("FAILED", state(build));
         assertEquals("DRIVER_ERROR", jdbc.queryForObject("SELECT error_code FROM skald.build WHERE id = ?",
             String.class, build));

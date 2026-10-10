@@ -36,6 +36,7 @@ import org.mandas.docker.client.exceptions.NotFoundException;
 import org.mandas.docker.client.exceptions.VolumeNotFoundException;
 import org.mandas.docker.client.messages.ContainerConfig;
 import org.mandas.docker.client.messages.ContainerExit;
+import org.mandas.docker.client.messages.ContainerInfo;
 import org.mandas.docker.client.messages.HostConfig;
 import org.mandas.docker.client.messages.NetworkConfig;
 import org.mandas.docker.client.messages.Volume;
@@ -452,6 +453,32 @@ public final class DockerWorkerLauncher {
             });
         }
         return errors;
+    }
+
+    /**
+     * The launched attempt's side of its provenance record: the isolation profile
+     * ({@link WorkerProfile#identity()}) and the worker and gateway images, each by the
+     * reference configured AND the image id its container actually runs (a tag that moves
+     * later does not change what this attempt ran). Inspects the attempt's own containers,
+     * by name and label; one that is not the attempt's is a refusal.
+     */
+    public Map<String, Object> provenance(Handle h) throws DockerException, InterruptedException {
+        Map<String, Object> ran = new LinkedHashMap<>();
+        for (String[] c : new String[][] {{"worker", h.worker(), images.worker()},
+                {"gateway", h.gateway(), images.gateway()}}) {
+            ContainerInfo info = docker.inspectContainer(c[1]);
+            if (!ours(info.config().labels(), h)) {
+                throw new IllegalStateException("container " + c[1] + " is not this attempt's");
+            }
+            Map<String, Object> image = new LinkedHashMap<>();
+            image.put("reference", c[2]);
+            image.put("id", info.image());
+            ran.put(c[0], image);
+        }
+        Map<String, Object> worker = new LinkedHashMap<>();
+        worker.put("profile", profile.identity());
+        worker.put("images", ran);
+        return worker;
     }
 
     /**

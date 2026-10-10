@@ -61,6 +61,7 @@ public class ContentDeletionTest {
     private static JdbcTemplate jdbc;
     private static TransactionTemplate tx;
     private static final String DIGEST = "registry:5000/c@sha256:" + "c".repeat(64);
+    private static final Map<String, Object> PROVENANCE = Map.of("schema", "test");
     private static final CoordinatorSettings MANY = new CoordinatorSettings(
         Duration.ofSeconds(60), Duration.ofSeconds(20), Duration.ofMinutes(20), 50);
 
@@ -133,7 +134,7 @@ public class ContentDeletionTest {
         admit(queued);
         assertThrows(ContentDeletionGuard.BuildsInProgress.class, () -> delete(queued), "QUEUED");
 
-        coordinator.toPublishing(r, DIGEST);
+        coordinator.toPublishing(r, DIGEST, PROVENANCE);
         assertThrows(ContentDeletionGuard.BuildsInProgress.class, () -> delete(running), "PUBLISHING");
         assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM skald.content", Integer.class),
             "a refused deletion removed something");
@@ -149,7 +150,7 @@ public class ContentDeletionTest {
         UUID c = content();
         UUID build = admit(c);
         Lease lease = coordinator.claim("n").orElseThrow().lease();
-        coordinator.toPublishing(lease, DIGEST);
+        coordinator.toPublishing(lease, DIGEST, PROVENANCE);
         // The image is in the ledger from the moment it exists, linked to its build.
         assertEquals("LIVE", jdbc.queryForObject("SELECT state FROM skald.artifact WHERE subject_build_id = ?",
             String.class, build));
@@ -172,10 +173,10 @@ public class ContentDeletionTest {
         admit(c);
         Lease lease = coordinator.claim("n").orElseThrow().lease();
         assertThrows(Fenced.class, () -> coordinator.toPublishing(
-            new Lease(lease.buildId(), lease.generation() + 1, lease.owner()), DIGEST));
+            new Lease(lease.buildId(), lease.generation() + 1, lease.owner()), DIGEST, PROVENANCE));
         assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM skald.artifact", Integer.class),
             "a fenced transition still recorded its image");
-        coordinator.toPublishing(lease, DIGEST);
+        coordinator.toPublishing(lease, DIGEST, PROVENANCE);
         coordinator.markLogComplete(lease, 1);
         UUID version = coordinator.succeed(lease, null).id();
         Map<String, Object> record = jdbc.queryForMap("SELECT pinned, subject_version_id FROM skald.artifact"
@@ -194,12 +195,12 @@ public class ContentDeletionTest {
         UUID c = content();
         UUID first = admit(c);
         Lease one = coordinator.claim("n1").orElseThrow().lease();
-        coordinator.toPublishing(one, DIGEST);
+        coordinator.toPublishing(one, DIGEST, PROVENANCE);
         jdbc.update("UPDATE skald.build SET lease_expires_at = now() - interval '1 second' WHERE id = ?", first);
         coordinator.reap();
         UUID second = admit(c);
         Lease two = coordinator.claim("n2").orElseThrow().lease();
-        coordinator.toPublishing(two, DIGEST);
+        coordinator.toPublishing(two, DIGEST, PROVENANCE);
         coordinator.markLogComplete(two, 1);
         UUID version = coordinator.succeed(two, null).id();
 
@@ -224,7 +225,7 @@ public class ContentDeletionTest {
         UUID c = content();
         UUID build = admit(c);
         Lease lease = coordinator.claim("n").orElseThrow().lease();
-        coordinator.toPublishing(lease, DIGEST);
+        coordinator.toPublishing(lease, DIGEST, PROVENANCE);
         coordinator.markLogComplete(lease, 1);
         jdbc.update("DELETE FROM skald.artifact WHERE subject_build_id = ?", build);
         assertThrows(IllegalStateException.class, () -> coordinator.succeed(lease, null));

@@ -65,6 +65,7 @@ public class BuildFinalizationTest {
 
     private static JdbcTemplate jdbc;
     private static final String DIGEST = "registry:5000/c@sha256:" + "c".repeat(64);
+    private static final Map<String, Object> PROVENANCE = Map.of("schema", "test");
     private static final CoordinatorSettings MANY = new CoordinatorSettings(
         Duration.ofSeconds(60), Duration.ofSeconds(20), Duration.ofMinutes(20), 50);
 
@@ -111,7 +112,7 @@ public class BuildFinalizationTest {
         new BuildAdmission(jdbc, new AdmissionLimits(100, 100)).request(c, "alice",
             "k-" + UUID.randomUUID(), new BuildAdmission.Inputs(validatedBundle(c), Map.of()));
         Lease lease = coordinator.claim("n-" + UUID.randomUUID()).orElseThrow().lease();
-        coordinator.toPublishing(lease, DIGEST);
+        coordinator.toPublishing(lease, DIGEST, PROVENANCE);
         coordinator.markLogComplete(lease, 42);
         return lease;
     }
@@ -163,7 +164,7 @@ public class BuildFinalizationTest {
         new BuildAdmission(jdbc, new AdmissionLimits(100, 100)).request(c, "alice", "k",
             new BuildAdmission.Inputs(validatedBundle(c), Map.of()));
         Lease lease = coordinator.claim("n").orElseThrow().lease();
-        coordinator.toPublishing(lease, DIGEST);
+        coordinator.toPublishing(lease, DIGEST, PROVENANCE);
         assertThrows(Fenced.class, () -> coordinator.succeed(lease, null));
         assertEquals("PUBLISHING", state(lease.buildId()));
         assertEquals(0, versions(c));

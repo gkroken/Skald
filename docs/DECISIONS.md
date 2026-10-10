@@ -401,3 +401,42 @@ needs no cache-invalidation step.** That hole was spec-id reuse. Ids are now UUI
 so content at a reclaimed path has a different id and a different cache key, and nothing
 caches on the path at all. A mechanism built for a problem that no longer exists is one
 nobody maintains correctly.
+
+---
+
+## ADR-0012 -- Build provenance: the platform's record and an SLSA attestation
+
+**Date:** 2026-10-10 | **Status:** accepted (delegated: user, 2026-10-09)
+
+T7's Pass line asks for "an actual built image with recorded digest/provenance", and the
+plan puts provenance in the build record and requires it to bind "the validated bundle
+inventory, generated recipe and effective isolation/limit policy". Until T7 part 4e the
+record held only the digest.
+
+**Decision: both layers, because each answers a question the other cannot.**
+
+1. **The platform's record** (`skald.build.provenance`, V3, schema
+   `skald.build-provenance/v1`). What only Skald knows: the bundle's receipt digests, the
+   manifest as validated, the base by digest and its catalog entry, the generated recipe and
+   the uploaded lock by digest, the dependency cache key, the mirrors, the effective limits,
+   the egress policy, the isolation profile (spec and seccomp by digest, the waived bounds)
+   and the worker and gateway images by the id their containers ran. Queryable, joins with
+   the rest of the registry, and written in the same fenced transition as the image. A
+   CHECK holds that a build with an image has provenance. A failed build records what it
+   got as far as: which base and lock it ran against is what its owner needs.
+2. **BuildKit's SLSA v1 provenance attestation** on the image itself (`mode=max`). The
+   standard, portable statement of what built the image, carried with it into any registry
+   and verifiable by standard tooling without access to Skald. `mode=max` records the
+   Dockerfile and build-argument values; Skald passes no build argument, the Dockerfile is
+   the server's recipe, and the registry credential is the client's docker config, not a
+   build input. A test reads the pushed attestation back and checks the credential is not
+   in it.
+
+**Rejected:** the image attestation alone (it cannot state the bundle receipt, the
+isolation profile or the worker that ran it, and is not queryable); the database record
+alone (not portable, nothing travels with the image); `mode=min` (drops the Dockerfile,
+which is what makes the statement reproducible); reusing the `recipe` column (it holds the
+admission inputs, which are part of the idempotency fingerprint).
+
+**Deferred, needs sign-off:** an SBOM attestation. BuildKit generates it with a scanner
+image (docker/buildkit-syft-scanner), which would be a new trusted image in the build path.

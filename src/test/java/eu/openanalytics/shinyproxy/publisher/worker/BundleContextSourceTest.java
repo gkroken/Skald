@@ -22,6 +22,7 @@
  */
 package eu.openanalytics.shinyproxy.publisher.worker;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -191,6 +192,31 @@ public class BundleContextSourceTest {
             var resolved = catalog.resolveEntry("shiny", "python", "3.13.16", "amd64").orElseThrow();
             assertEquals(eu.openanalytics.shinyproxy.publisher.recipe.DependencyCacheKey.of(resolved.entry(),
                     resolved.base(), MIRRORS, expected), p.cacheKey());
+            // The provenance inputs: the receipt's digests, the manifest as validated, the
+            // base by digest, the generated recipe and the lock by digest, the cache key.
+            var receipt = bundles.readReceipt(c.contentId(), c.bundleId()).orElseThrow();
+            JsonNode in = JSON.valueToTree(p.inputs());
+            assertEquals(receipt.archiveSha256(), in.path("bundle").path("archive_sha256").asText());
+            assertEquals(receipt.manifestSha256(), in.path("bundle").path("manifest_sha256").asText());
+            assertEquals(receipt.inventorySha256(), in.path("bundle").path("inventory_sha256").asText());
+            assertEquals(receipt.archiveBytes(), in.path("bundle").path("archive_bytes").asLong());
+            assertEquals("3.13.16", in.path("manifest").path("runtime_version").asText());
+            assertEquals(PY_REF, in.path("base").path("reference").asText());
+            assertEquals(resolved.entry().id(), in.path("base").path("catalog_id").asText());
+            assertEquals(resolved.entry().recipeRevision(), in.path("base").path("recipe_revision").asInt());
+            assertEquals(sha256(expected.dockerfile().getBytes(StandardCharsets.UTF_8)),
+                    in.path("recipe").path("dockerfile_sha256").asText());
+            assertEquals(expected.files().size(), in.path("recipe").path("files_sha256").size());
+            for (var f : expected.files().entrySet()) {
+                assertEquals(sha256(f.getValue()), in.path("recipe").path("files_sha256").path(f.getKey()).asText(),
+                        f.getKey());
+            }
+            assertEquals(sha256(app.get("requirements.lock")),
+                    in.path("dependencies").path("uploaded_lock_sha256").asText());
+            assertEquals(p.cacheKey(), in.path("dependencies").path("cache_key").asText());
+            assertEquals(MIRRORS.cran().toString(), in.path("dependencies").path("mirrors").path("cran").asText());
+            assertEquals(MIRRORS.pypiIndex().toString(),
+                    in.path("dependencies").path("mirrors").path("pypi_index").asText());
         } finally {
             p.release().run();
         }

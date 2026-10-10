@@ -172,8 +172,15 @@ public final class BuildCoordinator {
      * Keyed by digest, the second was silently dropped and a published version's image looked
      * like a failed build's (6ae3868-F1). Retention is therefore by reference: a digest may be
      * collected only when no pinned record carries it (T10's collector).
+     *
+     * <p>The provenance is written in the same fenced UPDATE (V3: a build with an image has
+     * provenance), and its "limits", when present, become the row's effective_limits.
      */
-    public void toPublishing(Lease lease, String image) {
+    public void toPublishing(Lease lease, String image, Map<String, Object> provenance) {
+        if (provenance == null) {
+            throw new IllegalArgumentException("an output image is recorded with its provenance");
+        }
+        String record = provenance(provenance);
         int at = image.indexOf("@sha256:");
         if (at <= 0) {
             throw new IllegalArgumentException("an output image is a digest reference: " + image);
@@ -181,8 +188,9 @@ public final class BuildCoordinator {
         String tagRef = image.substring(0, at) + ":build-" + lease.buildId();
         String digest = image.substring(at + 1);
         tx.executeWithoutResult(status -> {
-            fenced(lease, "RUNNING", "state = 'PUBLISHING', publishing_at = now(), output_image = ?",
-                    List.of(image), "build.publishing");
+            fenced(lease, "RUNNING", "state = 'PUBLISHING', publishing_at = now(), output_image = ?,"
+                    + " provenance = ?::jsonb, effective_limits = COALESCE(?::jsonb -> 'limits', effective_limits)",
+                    List.of(image, record, record), "build.publishing");
             jdbc.update("INSERT INTO skald.artifact (kind, ref, digest, subject_content_id,"
                     + " subject_bundle_id, subject_build_id) SELECT 'image', ?, ?, content_id,"
                     + " bundle_id, id FROM skald.build WHERE id = ?", tagRef, digest, lease.buildId());
@@ -191,12 +199,26 @@ public final class BuildCoordinator {
 
     /** RUNNING or PUBLISHING -> FAILED. */
     public void fail(Lease lease, String code, String detail) {
+        fail(lease, code, detail, null);
+    }
+
+    /**
+     * RUNNING or PUBLISHING -> FAILED, recording the provenance the attempt got as far as
+     * (null: none, and whatever the row holds is kept -- a PUBLISHING attempt's is its
+     * image's, and is never replaced).
+     */
+    public void fail(Lease lease, String code, String detail, Map<String, Object> provenance) {
+        String record = provenance == null ? null : provenance(provenance);
         int changed = jdbc.update("UPDATE skald.build SET state = 'FAILED', finished_at = now(),"
-                + " updated_at = now(), error_code = ?, error_detail = ?"
+                + " updated_at = now(), error_code = ?, error_detail = ?,"
+                + " provenance = CASE WHEN output_image IS NULL THEN COALESCE(?::jsonb, provenance)"
+                + " ELSE provenance END,"
+                + " effective_limits = CASE WHEN output_image IS NULL"
+                + " THEN COALESCE(?::jsonb -> 'limits', effective_limits) ELSE effective_limits END"
                 + " WHERE id = ? AND lease_generation = ? AND lease_owner = ?"
                 + " AND state IN ('RUNNING', 'PUBLISHING') AND lease_expires_at > now()"
                 + " AND deadline_at > now()",
-                code, detail, lease.buildId(), lease.generation(), lease.owner());
+                code, detail, record, record, lease.buildId(), lease.generation(), lease.owner());
         requireOne(changed, lease, "FAILED");
         audit(lease.owner(), "build.failed", lease.buildId(), Map.of("code", code));
     }
@@ -283,6 +305,18 @@ public final class BuildCoordinator {
                     Map.of("version", String.valueOf(version.version())));
             return version;
         });
+    }
+
+    /** The provenance as the JSON the column holds: a record with a string "schema". */
+    private String provenance(Map<String, Object> provenance) {
+        if (!(provenance.get("schema") instanceof String)) {
+            throw new IllegalArgumentException("provenance is a record with a string schema");
+        }
+        try {
+            return json.writeValueAsString(provenance);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalArgumentException("provenance is not JSON: " + ex.getOriginalMessage());
+        }
     }
 
     private void fenced(Lease lease, String from, String set, List<Object> setArgs, String action) {

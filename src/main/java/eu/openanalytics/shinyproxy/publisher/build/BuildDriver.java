@@ -40,11 +40,43 @@ public interface BuildDriver {
     /** How the attempt ended, from the driver's side. */
     sealed interface Outcome permits Built, Failed, Stopped { }
 
-    /** An image exists at this digest reference; the attempt moves on to PUBLISHING. */
-    record Built(String image) implements Outcome { }
+    /**
+     * An image exists at this digest reference; the attempt moves on to PUBLISHING. The
+     * provenance is the build record's (V3: an image whose inputs are not on record is not
+     * one the platform built): a JSON object with a string "schema", written with the image.
+     */
+    record Built(String image, Map<String, Object> provenance) implements Outcome {
 
-    /** A build step failed; {@code code} is short and machine-readable. */
-    record Failed(String code, String detail) implements Outcome { }
+        public Built {
+            requireProvenance(provenance);
+            provenance = java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(provenance));
+        }
+    }
+
+    /**
+     * A build step failed; {@code code} is short and machine-readable. The provenance, when
+     * the attempt got as far as knowing its inputs, is recorded with the failure: which base
+     * and lock a failed build ran against is what its owner needs to see. Null otherwise.
+     */
+    record Failed(String code, String detail, Map<String, Object> provenance) implements Outcome {
+
+        public Failed {
+            if (provenance != null) {
+                requireProvenance(provenance);
+                provenance = java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(provenance));
+            }
+        }
+
+        public Failed(String code, String detail) {
+            this(code, detail, null);
+        }
+    }
+
+    private static void requireProvenance(Map<String, Object> provenance) {
+        if (provenance == null || !(provenance.get("schema") instanceof String)) {
+            throw new IllegalArgumentException("provenance is a record with a string schema");
+        }
+    }
 
     /** The driver stopped the whole worker because a cancellation was requested. */
     record Stopped() implements Outcome { }

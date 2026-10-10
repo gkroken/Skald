@@ -2032,6 +2032,17 @@ below are marked passed by this planning document.
       no final.json, with outcome `INTERRUPTED` (0adc78e N2, e4306c6 N1). `registry-api`
       carries the build credential in a Basic header: operators should use https or a
       host-local address (5cd0826 N2).
+      **Part 4e-1 (provenance):** V3 adds `skald.build.provenance` (jsonb, schema
+      `skald.build-provenance/v1`): the bundle's receipt digests, the manifest as validated,
+      the base by digest with its catalog entry, the generated recipe's digests, the uploaded
+      lock's digest, the cache key, the mirrors, the effective limits (also written to
+      `effective_limits`), the egress policy, the isolation profile (spec and seccomp by
+      digest, every bound, the waived ones) and the worker and gateway images by the id their
+      containers ran. A build with an image has provenance (a CHECK); a failure records what it
+      got as far as. Every pushed image also carries BuildKit's SLSA v1 provenance
+      attestation (`mode=max`; no build argument or secret exists to leak), so the pushed
+      digest is an OCI index. An SBOM attestation is not part of T7: it needs BuildKit's
+      scanner image as a new trusted image (user sign-off).
       **Measured in part 3d-2a, carried to part 4 and T10:** the stop bound has two halves.
       The driver ISSUES the worker's SIGKILL within one poll of the stop (measured 0.5-0.8
       s). The daemon then needs time to end the container (measured 2.9-3.7 s alone; 6.1, 9.3,

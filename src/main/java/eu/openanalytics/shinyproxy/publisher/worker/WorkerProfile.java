@@ -142,11 +142,43 @@ public final class WorkerProfile {
     /** Bound name -> argument template, every bound this runtime launches with, by name. */
     private final TreeMap<String, String> arguments;
     private final String seccompJson;
+    /** The bounds the spec waives for this runtime, by name, sorted. */
+    private final List<String> waived;
+    /** SHA-256 of the spec as parsed (its compact JSON). */
+    private final String specSha256;
 
-    private WorkerProfile(String runtime, TreeMap<String, String> arguments, String seccompJson) {
+    private WorkerProfile(String runtime, TreeMap<String, String> arguments, String seccompJson,
+                          List<String> waived, String specSha256) {
         this.runtime = runtime;
         this.arguments = arguments;
         this.seccompJson = seccompJson;
+        this.waived = List.copyOf(waived);
+        this.specSha256 = specSha256;
+    }
+
+    /**
+     * What a build record states about the isolation it ran under: the spec by digest, the
+     * runtime, every bound's argument template, the waived bounds (the nnp waiver of
+     * 2026-09-26 is to be recorded wherever the profile is) and the seccomp profile by digest.
+     */
+    public Map<String, Object> identity() {
+        Map<String, Object> id = new LinkedHashMap<>();
+        id.put("spec", "isolation-profile-v1");
+        id.put("spec_sha256", specSha256);
+        id.put("runtime", runtime);
+        id.put("bounds", new TreeMap<>(arguments));
+        id.put("waived", waived);
+        id.put("seccomp_sha256", sha256(seccompJson));
+        return id;
+    }
+
+    private static String sha256(String text) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     /** The shipped profile for {@code runtime}, or a refusal saying why it cannot launch. */
@@ -204,7 +236,8 @@ public final class WorkerProfile {
                 || !arguments.containsKey("workspace")) {
             throw new IllegalStateException("the profile lacks a seccomp, network or workspace bound");
         }
-        return new WorkerProfile(runtime, arguments, seccompJson);
+        return new WorkerProfile(runtime, arguments, seccompJson, new java.util.TreeSet<>(waived).stream().toList(),
+                sha256(compact(spec)));
     }
 
     /**
