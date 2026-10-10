@@ -127,6 +127,9 @@ rsconnect/Connect API compatibility without explicit sign-off (ADR-0003).
 
 - Every bundle is **untrusted code**. Builds and content containers run unprivileged:
   no Docker socket, no host mounts, resource limits, network policy where available.
+  **One exception, for content containers only** (user, 2026-10-10, ADR-0014): data
+  volumes an admin has registered and granted to that content item, read-only by default,
+  `nosuid,nodev,noexec`. A publisher never names a host path; builds never get one.
 - Encrypt secrets at rest; key from environment/KMS, never in the DB. Never log them.
 - API keys: shown once, stored hashed, revocable, last-use recorded.
 - Validate slugs, manifest content, and **bundle paths** — no traversal on extraction.

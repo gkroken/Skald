@@ -495,3 +495,83 @@ still copies everything).
 **Also tied:** `dev/shipping_worker.py`'s DAEMON_ARGS, the daemon the isolation probes
 measure, had nothing tying it to the launcher's. `DockerWorkerLauncherTest` now requires
 them equal.
+
+---
+
+## ADR-0014 -- Connections and data volumes: admin-defined, switched on per app
+
+**Date:** 2026-10-10 | **Status:** accepted (user, 2026-10-10)
+
+Real apps need data that cannot live in an image: databases and APIs reached with
+credentials, and large files on disk (Parquet read in place by DuckDB). Builds accept no
+secrets (WORKPLAN-BUNDLES.md section 8), and content containers currently have open egress
+and no data mounts.
+
+**Decision.** Two admin-defined resources, which content owners switch on per app:
+- a **connection**: endpoint(s) plus credentials, encrypted at rest with a key from the
+  environment or a KMS, never stored in clear, never logged; delivered as files at
+  container start only (below);
+- a **data volume**: an admin-registered host path or Docker volume, mounted at
+  `/data/<name>`, read-only by default, always `nosuid,nodev,noexec`; write access is its
+  own explicit grant.
+Each connection has an admin-chosen name (a slug, e.g. `sales`), and an app with several
+reaches each by name, as Heroku's attachment aliases do.
+
+**Delivery: secrets are files, never environment variables.** An environment variable is
+readable in `/proc/<pid>/environ` and `docker inspect`, inherited by every child process,
+and routinely printed by error pages and debugging. Each attached connection becomes a
+directory `$SERVICE_BINDING_ROOT/<name>/` with one file per value (`type`, `host`, `port`,
+`database`, `username`, `password`, ...), the layout of the Kubernetes Service Binding
+specification (servicebinding.io), so existing client libraries read it and nothing is
+Skald-specific. The files live on a Skald-owned tmpfs volume per content item, mounted
+read-only; no host path. Non-secret values are also set as `SKALD_<NAME>_HOST`, `_PORT`,
+`_DBNAME` and `_USER`. On top, per type:
+- PostgreSQL: a libpq service file (one section per connection) and a `.pgpass`, with
+  `PGSERVICEFILE` and `PGPASSFILE` set, so `dbConnect(RPostgres::Postgres(), service =
+  "sales")` connects with no credential in code or environment, and the same code runs on a
+  laptop with its own `~/.pg_service.conf`. `PGHOST` and the like are not set: they can
+  describe only one database.
+- Oracle: the admin points Skald at the server's `tnsnames.ora`; Skald lists its aliases and
+  the admin registers the ones to offer. An app gets a generated `tnsnames.ora` with only its
+  granted aliases, a wallet (secure external password store) and `sqlnet.ora`, with
+  `TNS_ADMIN` set; `dbname = "SALES"` resolves as on the server. The host's file is never
+  mounted, so an app cannot learn of databases it was not granted. Egress allows every
+  address in the alias's descriptor; an alias on a RAC SCAN host is flagged, because SCAN
+  redirects the client to node VIPs that must be allowed as well (the commonly reported
+  "tnsping works, connect fails"). Oracle Instant Client is under Oracle's OTN distribution
+  licence (redistribution binds end users to equivalent terms), so Skald ships only the
+  recipe for an optional Oracle base, which the operator builds and accepts the terms for;
+  that base needs user sign-off before it lands.
+
+**Admin guidance:** one database role per grant (app x connection), not one shared account:
+a leaked app credential then exposes only that app, and the database's audit log names it.
+The admin also decides which users and groups may attach each one. Skald renders the
+attachments into ShinyProxy's per-spec `container-env`, `container-volumes` and
+`container-network`, so a change applies at the next container start with no rebuild.
+Runtime egress becomes default-deny: an app reaches only what its attached connections
+name.
+
+**Security invariant amended.** "No host mounts" now has one exception, for content
+containers only: admin-registered data volumes granted to that content item, read-only by
+default. A publisher never names a path; builds never get one.
+
+**Deferred: connecting as the viewer.** Every viewer of an app reaches the database through
+the connection's one account. ShinyProxy passes the viewer's username and groups, so the app
+knows WHO is viewing, but that is not a credential: per-viewer rights in the database (row-
+level security keyed on the real user) need either the app to enforce them itself or the
+platform to hand it a credential for that viewer (Kerberos constrained delegation, or an
+OAuth token per viewer that the database accepts). Both depend on the customer's identity
+and database setup and are a track of their own; recorded here so the shared-account model
+is a known limit, not an accident. Until then separation between viewers rests on the app:
+it filters by the viewer's username and uses parameterised queries (an app that pastes input
+into SQL lets a viewer read other viewers' rows on purpose), and the per-grant role bounds
+what any app, and its publisher, can read at all. The user docs for #4b say so.
+
+**Rejected:** data in the image (size, and secrets would be baked into an artifact);
+publisher-supplied mount paths or credentials in the manifest (untrusted input choosing host
+resources); one shared service account for every app with no grant model (no per-app
+least privilege, no audit of who attached what); passwords in environment variables (see
+Delivery); mounting the server's own `tnsnames.ora` (it lists every database, granted or
+not); bundling Oracle Instant Client in a published base (licence).
+
+Tracked as spine item #4b in WORKPLAN.md.
