@@ -510,22 +510,66 @@ and no data mounts.
 **Decision.** Two admin-defined resources, which content owners switch on per app:
 - a **connection**: endpoint(s) plus credentials, encrypted at rest with a key from the
   environment or a KMS, never stored in clear, never logged; delivered as files at
-  container start only (below);
-- a **data volume**: an admin-registered host path or Docker volume, mounted at
+  container start only (Delivery, below);
+- a **data volume**: an admin-registered host directory or Docker volume, mounted at
   `/data/<name>`, read-only by default, always `nosuid,nodev,noexec`; write access is its
   own explicit grant.
-Each connection has an admin-chosen name (a slug, e.g. `sales`), and an app with several
-reaches each by name, as Heroku's attachment aliases do.
+The admin also decides which users and groups may attach each one. Each connection has an
+admin-chosen name (a slug, e.g. `sales`), and an app with several reaches each by name, as
+Heroku's attachment aliases do. Skald renders the attachments into ShinyProxy's per-spec
+container settings when the spec is built, so a change applies at the next container start
+with no rebuild.
 
-**Delivery: secrets are files, never environment variables.** An environment variable is
-readable in `/proc/<pid>/environ` and `docker inspect`, inherited by every child process,
-and routinely printed by error pages and debugging. Each attached connection becomes a
-directory `$SERVICE_BINDING_ROOT/<name>/` with one file per value (`type`, `host`, `port`,
+**Data volume registration is guarded, even for an admin** (a4aba70 N1): the path must be
+an existing directory; sockets, device nodes and symlinks out are refused, and so are `/`,
+`/etc`, `/proc`, `/sys`, `/dev`, `/run`, `/var/run`, `/boot` and the Docker data root, at any
+depth of resolution. `nosuid,nodev,noexec` does nothing against a bind of
+`/var/run/docker.sock`, and one typo must not hand an untrusted app the host. Deny tests
+cover each refusal. A write grant on a volume attached to several apps, or to one app with a
+container per viewer, is a channel between them; the admin UI says so where write is
+granted (N2).
+
+**Runtime network: default-deny, enforced at layer 4** (a4aba70-F1). Content containers sit
+on an internal network with no route out. Databases speak raw TCP (libpq, Oracle Net) and
+their clients ignore `HTTP_PROXY`, so the build gateway's squid cannot carry them. Each
+attached TCP endpoint instead gets its own forwarder on the app's network: a small TCP
+relay with its own address there, carrying a network alias equal to the endpoint's real
+host name, and forwarding to exactly that host and port and nothing else. Docker's embedded
+DNS answers the alias, so the app dials `db1.corp.example:5432` unchanged: no rewritten host,
+and TLS hostname verification (`sslmode=verify-full`, Oracle's server DN match) still sees the
+real name. Two databases on the same port are two forwarders with two addresses. An endpoint
+given only as an IP literal gets a forwarder too, and the injected host names it. HTTP(S)
+APIs keep going through squid, with the allow-list per app. A probe proves an attached
+endpoint is reachable and an unattached one, and anything else, is not.
+
+**Delivery: secrets are files, never environment variables** (a4aba70-F2). An environment
+variable is readable in `/proc/<pid>/environ` and `docker inspect`, inherited by every child
+process, and routinely printed by error pages and debugging. Each attached connection becomes
+a directory `$SERVICE_BINDING_ROOT/<name>/` with one file per value (`type`, `host`, `port`,
 `database`, `username`, `password`, ...), the layout of the Kubernetes Service Binding
 specification (servicebinding.io), so existing client libraries read it and nothing is
-Skald-specific. The files live on a Skald-owned tmpfs volume per content item, mounted
-read-only; no host path. Non-secret values are also set as `SKALD_<NAME>_HOST`, `_PORT`,
-`_DBNAME` and `_USER`. On top, per type:
+Skald-specific. How they get there:
+- The container starts with a single-use token: bound to that container's proxy, valid for
+  a short window, spent on first use. A small init that Skald puts in every image it builds
+  runs before the app. It redeems the token at Skald over the app's network (a forwarder
+  like any other), writes the bindings, removes the token from the environment it passes on,
+  and execs the app. The token is the only thing in the environment, and once the app runs
+  it is worth nothing.
+- The files go on a tmpfs of that container's own, never on disk and never shared: mode
+  0700 for the directory, 0600 for each file, owned by the app's uid. That ownership is what
+  libpq requires of a `.pgpass` (it ignores one readable by group or others), and Oracle of a
+  wallet. The app can write its own copy, which affects only itself. The tmpfs dies with the
+  container, so a detached connection is simply absent at the next start and a rotated
+  password is current. ContainerProxy 1.2.4's container spec has no tmpfs field (it has env,
+  env file, network, network connections, volumes), so this needs a backend seam, recorded
+  in UPSTREAM_CHANGES.md when built.
+- Not taken: a Docker tmpfs volume filled ahead of time (its contents do not survive from
+  the container that writes them to the one that reads them; the reviewer measured it), a
+  holder container keeping one open (a shared copy across viewers, and stale after a
+  detach), `docker exec` after start (Docker only, and a race with the app), Docker secrets
+  (Swarm only). On a Kubernetes backend a projected Secret volume can replace the token.
+Non-secret values are also set as `SKALD_<NAME>_HOST`, `_PORT`, `_DBNAME` and `_USER`. On
+top, per type:
 - PostgreSQL: a libpq service file (one section per connection) and a `.pgpass`, with
   `PGSERVICEFILE` and `PGPASSFILE` set, so `dbConnect(RPostgres::Postgres(), service =
   "sales")` connects with no credential in code or environment, and the same code runs on a
@@ -535,35 +579,41 @@ read-only; no host path. Non-secret values are also set as `SKALD_<NAME>_HOST`, 
   the admin registers the ones to offer. An app gets a generated `tnsnames.ora` with only its
   granted aliases, a wallet (secure external password store) and `sqlnet.ora`, with
   `TNS_ADMIN` set; `dbname = "SALES"` resolves as on the server. The host's file is never
-  mounted, so an app cannot learn of databases it was not granted. Egress allows every
-  address in the alias's descriptor; an alias on a RAC SCAN host is flagged, because SCAN
-  redirects the client to node VIPs that must be allowed as well (the commonly reported
-  "tnsping works, connect fails"). Oracle Instant Client is under Oracle's OTN distribution
-  licence (redistribution binds end users to equivalent terms), so Skald ships only the
-  recipe for an optional Oracle base, which the operator builds and accepts the terms for;
-  that base needs user sign-off before it lands.
+  mounted, so an app cannot learn of databases it was not granted. Every address in the
+  alias's descriptor gets a forwarder. RAC SCAN: the SCAN listener redirects the client to a
+  node VIP, which the client dials itself (the commonly reported "tnsping works, connect
+  fails"). That works only if the redirect names the VIP by host name (the database's
+  `LOCAL_LISTENER`) and each VIP is registered, so it has a forwarder and an alias of its
+  own; a redirect by bare IP cannot be followed, and Oracle Connection Manager in front of
+  the cluster is then the supported route. Skald flags SCAN aliases at registration and
+  tells the admin which of the two applies. Oracle Instant Client is under Oracle's OTN
+  distribution licence (redistribution binds end users to equivalent terms), so Skald ships
+  only the recipe for an optional Oracle base, which the operator builds and accepts the
+  terms for; that base needs user sign-off before it lands.
 
 **Admin guidance:** one database role per grant (app x connection), not one shared account:
 a leaked app credential then exposes only that app, and the database's audit log names it.
-The admin also decides which users and groups may attach each one. Skald renders the
-attachments into ShinyProxy's per-spec `container-env`, `container-volumes` and
-`container-network`, so a change applies at the next container start with no rebuild.
-Runtime egress becomes default-deny: an app reaches only what its attached connections
-name.
 
 **Security invariant amended.** "No host mounts" now has one exception, for content
 containers only: admin-registered data volumes granted to that content item, read-only by
 default. A publisher never names a path; builds never get one.
 
+**Viewer identity, and the token ShinyProxy already passes** (a4aba70-F3). ShinyProxy gives
+the container the viewer's username and groups: an identity, not a credential. With OpenID
+login, ContainerProxy 1.2.4 also sets `SHINYPROXY_OIDC_ACCESS_TOKEN`
+(`OpenIDAuthenticationBackend.customizeContainerEnv`): a bearer credential, in the
+environment, today. Decision for #4b: it is suppressed by default, and an app whose owner
+needs it (to call an API as the viewer) gets it as a file through the same delivery, never
+as a variable. Suppressing it is an upstream seam, recorded in UPSTREAM_CHANGES.md.
+
 **Deferred: connecting as the viewer.** Every viewer of an app reaches the database through
-the connection's one account. ShinyProxy passes the viewer's username and groups, so the app
-knows WHO is viewing, but that is not a credential: per-viewer rights in the database (row-
-level security keyed on the real user) need either the app to enforce them itself or the
-platform to hand it a credential for that viewer (Kerberos constrained delegation, or an
-OAuth token per viewer that the database accepts). Both depend on the customer's identity
-and database setup and are a track of their own; recorded here so the shared-account model
-is a known limit, not an accident. Until then separation between viewers rests on the app:
-it filters by the viewer's username and uses parameterised queries (an app that pastes input
+the connection's one account; the app knows WHO is viewing, but the database does not.
+Per-viewer rights in the database (row-level security keyed on the real user) need the
+platform to hand the app a credential for that viewer (Kerberos constrained delegation, or a
+per-viewer OAuth token the database accepts). Both depend on the customer's identity and
+database setup and are a track of their own; recorded here so the shared-account model is a
+known limit, not an accident. Until then separation between viewers rests on the app: it
+filters by the viewer's username and uses parameterised queries (an app that pastes input
 into SQL lets a viewer read other viewers' rows on purpose), and the per-grant role bounds
 what any app, and its publisher, can read at all. The user docs for #4b say so.
 
@@ -572,6 +622,9 @@ publisher-supplied mount paths or credentials in the manifest (untrusted input c
 resources); one shared service account for every app with no grant model (no per-app
 least privilege, no audit of who attached what); passwords in environment variables (see
 Delivery); mounting the server's own `tnsnames.ora` (it lists every database, granted or
-not); bundling Oracle Instant Client in a published base (licence).
+not); bundling Oracle Instant Client in a published base (licence); squid for database
+traffic (an HTTP proxy, which database clients cannot use); an nftables-routed allow-list
+(it needs the gateway as the app's router, which an internal Docker network cannot give
+without NET_ADMIN in the app's container).
 
 Tracked as spine item #4b in WORKPLAN.md.

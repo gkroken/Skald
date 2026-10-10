@@ -219,57 +219,67 @@ the content.
 
 Apps need data that cannot live in the image: Postgres and other databases or APIs
 reached with credentials, and large files (Parquet read in place by DuckDB) on disk.
-Decided by the user 2026-10-10 (ADR-0014): the admin defines what exists and who may use
-it; a content owner switches it on per app; Skald turns that into ShinyProxy's per-spec
-`container-env`, `container-volumes` and `container-network` when the spec is built, so it
-works with no rebuild and nothing reaches the build, the image or the logs.
+Decided by the user 2026-10-10 (ADR-0014, which holds the mechanisms and the reasons): the
+admin defines what exists and who may use it; a content owner switches it on per app; Skald
+renders that into the spec's container settings when the spec is built, so it works with no
+rebuild and nothing reaches the build, the image or the logs.
 
 - [ ] **Connections (admin).** A named connection: host + port (one or a small list),
       credentials stored encrypted at rest (key from env/KMS, never in the DB, never
       logged), and the users/groups allowed to attach it. Rotation applies at the next
       container start.
-- [ ] **Data volumes (admin).** A named volume: an admin-registered host path or Docker
-      volume, and who may attach it. Mounted at `/data/<name>`, **read-only by default**,
-      always `nosuid,nodev,noexec`; write access is a separate, explicit grant per volume.
-      Publishers never name a host path.
+- [ ] **Data volumes (admin).** A named volume: an admin-registered host directory or
+      Docker volume, and who may attach it. Mounted at `/data/<name>`, **read-only by
+      default**, always `nosuid,nodev,noexec`; write access is a separate, explicit grant
+      per volume, and the UI warns that a shared write grant is a channel between apps and
+      viewers. Registration refuses non-directories, sockets, device nodes and the system
+      trees (`/`, `/etc`, `/proc`, `/sys`, `/dev`, `/run`, `/var/run`, `/boot`, the Docker
+      data root), with a deny test for each. Publishers never name a host path.
 - [ ] **Switch panel (owner, in #4's content settings).** Attach or detach the
       connections and volumes the owner is allowed to use; every change audited.
-- [ ] **Injection: secrets as files, layout per the Service Binding spec.** Each attached
-      connection is a directory `$SERVICE_BINDING_ROOT/<name>/` with one file per value
-      (`type`, `host`, `port`, `database`, `username`, `password`, ...), on a Skald-owned
-      tmpfs volume per content item, mounted read-only. Non-secret values are also set as
-      `SKALD_<NAME>_HOST/_PORT/_DBNAME/_USER`; a password is never an environment variable
-      (environment leaks: `/proc/<pid>/environ`, `docker inspect`, child processes, error
-      dumps). On top, per type: Postgres gets a `pg_service.conf` + `.pgpass`
-      (`PGSERVICEFILE`, `PGPASSFILE`); Oracle gets a generated `tnsnames.ora` with only the
-      granted aliases, plus a wallet and `sqlnet.ora` (`TNS_ADMIN`). Never in the manifest,
-      the build or the image.
+- [ ] **Runtime egress default-deny, at layer 4.** Content containers today have open
+      egress. Each attached TCP endpoint gets its own forwarder on the app's internal
+      network, aliased to the endpoint's real host name, relaying to that host:port only;
+      the app dials the real name and TLS verification still sees it. HTTP(S) APIs go
+      through squid with a per-app allow-list. A probe proves an attached endpoint is
+      reachable and anything unattached is not.
+- [ ] **Delivery: secrets as files.** A single-use, short-lived token is the container's
+      only secret-related variable; an init Skald adds to every image redeems it before the
+      app starts and writes `$SERVICE_BINDING_ROOT/<name>/` (Service Binding layout) onto a
+      per-container tmpfs, 0700/0600, owned by the app uid (libpq ignores a looser
+      `.pgpass`; Oracle wallets likewise). Non-secret values also as
+      `SKALD_<NAME>_HOST/_PORT/_DBNAME/_USER`; a password is never an environment variable.
+      Postgres: `pg_service.conf` + `.pgpass` (`PGSERVICEFILE`, `PGPASSFILE`). Oracle: a
+      generated `tnsnames.ora` with only the granted aliases, a wallet and `sqlnet.ora`
+      (`TNS_ADMIN`). ContainerProxy 1.2.4's spec has no tmpfs field: a backend seam,
+      recorded in UPSTREAM_CHANGES.md.
 - [ ] **Oracle.** The admin points Skald at the server's `tnsnames.ora`; Skald lists its
       aliases and the admin registers the ones to offer. The host's file is never mounted.
-      Egress allows every address in an alias's descriptor; an alias on a RAC SCAN host gets
-      a warning that its node VIPs must be added too (SCAN redirects to them). Oracle Instant
-      Client is under Oracle's OTN distribution licence, so Skald ships only the recipe for
-      an optional `r-shiny-oracle` base, which the operator builds and accepts the terms
-      for (needs user sign-off before it lands).
-- [ ] **Runtime egress default-deny.** Content containers today have open egress (build
-      egress is already allow-listed). Each app gets only what its attached connections
-      name, on the same gateway pattern T7 uses for builds; a probe proves an unattached
-      host is unreachable and an attached one is.
-- [ ] **Scratch for engines that spill** (DuckDB temp, Arrow): a size-bounded tmpfs or quota
-      volume per container, never the read-only data mount.
-- [ ] **Identity pass-through stays available**: ShinyProxy's username/groups (and the OIDC
-      token where configured). This tells the app WHO is viewing; it is not a credential, so
-      the database still sees only the connection's account. Connecting AS the viewer
-      (Kerberos delegation, per-viewer OAuth tokens) is deferred, see ADR-0014.
+      Every descriptor address gets a forwarder. A RAC SCAN alias is flagged: it works only
+      when the redirect names each node VIP by host name and every VIP is registered, else
+      Oracle Connection Manager in front is the route. Oracle Instant Client is under
+      Oracle's OTN distribution licence, so Skald ships only the recipe for an optional
+      `r-shiny-oracle` base, which the operator builds and accepts the terms for (needs
+      user sign-off before it lands).
+- [ ] **Scratch for engines that spill** (DuckDB temp, Arrow): a size-bounded tmpfs per
+      container, so one viewer's spill cannot fill another's; never the read-only data
+      mount.
+- [ ] **Viewer identity.** ShinyProxy's username and groups stay available; they say who
+      is viewing and are not credentials. The OIDC access token ContainerProxy 1.2.4 puts
+      in the environment (`SHINYPROXY_OIDC_ACCESS_TOKEN`) IS a credential: suppressed by
+      default, and delivered as a file only to apps whose owner needs it (an upstream seam,
+      recorded in UPSTREAM_CHANGES.md). Connecting to a database AS the viewer is deferred
+      (ADR-0014).
 - [ ] **Admin guidance:** one database role per grant (app x connection), not one shared
       account, so a leaked app credential exposes only that app and the database's audit
       log names the app.
 
 **Done when:** a Shiny app attached to an admin-defined Postgres connection queries it with
-injected credentials and no credential in its bundle, image or logs; the same app reads a
-multi-GB Parquet file with DuckDB from a read-only data volume; detaching either takes
-effect at the next start; an unattached host and an unregistered path are unreachable,
-with deny tests for a publisher attaching something they were not granted.
+injected credentials and no credential in its bundle, image, environment or logs; the same
+app reads a multi-GB Parquet file with DuckDB from a read-only data volume; detaching either
+takes effect at the next start; an unattached host and an unregistered path are unreachable;
+deny tests cover a publisher attaching something they were not granted and every refused
+volume path; the OIDC token is absent from the environment.
 
 ---
 
