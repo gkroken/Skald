@@ -2135,7 +2135,8 @@ below are marked passed by this planning document.
       provenance record (V3) and BuildKit's SLSA v1 attestation, pulled cold by digest from
       the probe registry and served as uid 10001 with /app read-only (4e-1); decision 7's
       cache reused within its key and content item only, a lock, mirror or other-content
-      change missing and another item unable to read or change it (4e-2); a failed restore,
+      change missing, and another item never importing nor changing it (a direct read
+      through the gateway is T9's attack row; e418c3c N1) (4e-2); a failed restore,
       an unreachable repository, a push failure, a cancellation, the worker's death and a
       timeout each ending in its own state with a complete log that names its cause,
       nothing left on the host, and the worker building again (4e-3); and a process killed
@@ -2150,6 +2151,57 @@ below are marked passed by this planning document.
       **Carried on:** finishing a PUBLISHING attempt after a restart, with `succeed()`, to
       T9; signed provenance, the SBOM and the deployment notes to T10; build speed (shared
       Linux R binaries, the fixed launch cost) to T7b.
+
+- [ ] **T7b. Build speed: shared Linux R binaries and a warm path.** Depends T7. Placed
+      before T8 by the user (2026-10-10): a publish should take about a minute, and an R
+      app's cold restore compiles every package from source (330-590 s measured in T7's
+      pass probe). Target, measured per phase in the pass probe: a source-only republish
+      under 30 s, a small first publish under 60 s, and an R first publish whose packages
+      all have binaries close to the Python one.
+      **Shared binaries, built once per server (option 3b, user 2026-10-10).** forge now
+      serves Linux binaries for CRAN packages (`.../cran-public/__linux__/<distro>/latest`;
+      renv sends R's version and CPU, forge answers with a binary for that platform or the
+      source). A binary is shared by every app on the platform, so how one is made decides
+      what every later build installs. The rules:
+      - Skald compiles each package version a build needs and forge lacks, ONCE per
+        platform, each package in its OWN sandbox (the T5 worker profile, no secrets, the
+        package's dependencies installed as binaries), so one package's install scripts
+        can never touch another package's binary. Never inside an app's restore step,
+        which builds every package of the app in one library.
+      - The binary is uploaded by a trusted Skald component OUTSIDE the sandbox, holding a
+        forge token scoped to the platform's tree; nothing in a sandbox ever holds it.
+        The upload records provenance (the package, version, source digest, builder
+        image digest, LinkingTo versions; forge keeps them too).
+      - Residual, stated: a LinkingTo-only dependency runs during the compile and could
+        tamper with that one package's binary; forge records LinkingTo versions, so it is
+        traceable, and removal is one audited forge call.
+      - The first app's build does not wait at first: it restores from source as today,
+        and the per-package compiles run beside it for the next apps. Waiting on parallel
+        per-package compiles is a measured follow-up, adopted if it beats the serial
+        restore.
+      - The platform the binaries are registered for is Skald's published R base (its
+        digest is forge's platform registration), so a binary always matches the runtime
+        it is installed into. A base change is a new platform registration.
+      - An operator's own CI builder (forge's documented helper) remains possible beside
+        it; both upload to the same platform tree.
+      - New trust boundary: flag the forge write credential's storage (encrypted, never
+        logged), the uploader's egress (forge only), and the per-package queue's limits
+        (admission, retries, a package that never builds falls back to source with a
+        visible reason). Security review before it is enabled.
+      Steps: pin the new forge image (dev/bases-probe.py FORGE_IMAGE); switch the CRAN
+      mirror default to forge's Linux URL (a one-time cache miss: the mirror is in the
+      key); the per-package builder and uploader; the pass probe measures a cold R build
+      (binaries absent), the per-package compiles, then a second app's R build (binaries
+      present), with a probe row proving a package's sandbox cannot write another
+      package's binary and that no sandbox sees the token.
+      **The fixed cost (moved here from T10, user 2026-10-10):** ~45-60 s before any
+      recipe step (six launch containers in sequence, and every attempt pulling and
+      extracting its base into an empty workspace). Pre-extract each published base on
+      the host into a read-only store the worker reads but never writes (platform-owned,
+      so no tenant data is shared), and keep a small pool of pre-launched, never-used
+      workers.
+      **Pass:** the targets above met and measured per phase; the binary rows' isolation
+      and token rows red under their mutants; T5's isolation probes rerun green.
 
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus
@@ -2221,21 +2273,7 @@ below are marked passed by this planning document.
       verification. **After T7 (user, 2026-10-10):** an SBOM attestation from BuildKit's
       scanner (docker/buildkit-syft-scanner, pinned by digest, flagged as a new trusted image
       in the build path, licence checked), with the provenance record naming it.
-      **Build latency, after T7 (user, 2026-10-10):** the fixed cost of a build is ~45-60 s
-      before any recipe step (six launch containers in sequence, and every attempt pulling
-      and extracting its base into an empty workspace). Pre-extract each published base on
-      the host into a read-only store the worker reads but never writes (platform-owned, so
-      no tenant data is shared), and keep a small pool of pre-launched, never-used workers;
-      measure every phase in the probe and set targets (a source-only republish under 30 s,
-      a small first publish under 60 s). Linux binary R packages are forge's to provide
-      (code_review/forge-issues/003); without them a cold R restore compiles from source.
-      **Carried from T7 (6890924 review N2, N3), for the deployment docs:** the build
-      workspace must be local disk: WorkspaceLock is an fcntl lock, which NFS without lockd
-      and some FUSE or CIFS mounts do not honour, so a second process would not be refused.
-      And AttemptSweeper.stop() waits up to 70 s for a sweep's helper removal: under
-      Kubernetes' default 30 s terminationGracePeriodSeconds a pod can be killed first (not
-      a leak: the next process removes a stale sweep helper), so the Helm chart sets the
-      grace period above that or says why not.
+      **Build latency:** moved to T7b (user, 2026-10-10).
       **Carried from T7 (c939203 review N1):** every (content, key) pair
       leaves a BuildKit cache ref at `skald/cache/<content UUID>:<key>`; the GC (artifact
       ledger, mark/recheck/delete) owns those refs too and deletes them with the content
