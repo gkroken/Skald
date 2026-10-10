@@ -172,18 +172,23 @@ def client_args(socket_volume):
 
 
 def start(name, network, volume, seccomp_profile, socket_volume, extra=(),
-          include_waived=False, omit=(), daemon_extra=()):
+          include_waived=False, omit=(), daemon_extra=(), entrypoint=None):
     """Starts the worker; returns the argv used. `socket_volume` carries the daemon's unix
     socket to the trusted client. `omit` drops profile arguments by prefix, for self-tests
     that must see a check fail when a bound is missing. `daemon_extra` is passed to
-    buildkitd, after DAEMON_ARGS -- e.g. a --config for a probe's registry."""
+    buildkitd, after DAEMON_ARGS -- e.g. a --config for a probe's registry. `entrypoint`
+    replaces the image's ENTRYPOINT, for self-tests only (e.g. without setpriv --nnp)."""
     args = profile_arguments({"egress_network": network, "quota_volume": volume,
                               "seccomp_profile": seccomp_profile},
                              include_waived=include_waived)
     args = [a for a in args if not any(a.startswith(o) for o in omit)]
     extra = list(extra) + ["-v", "%s:%s" % (socket_volume, SOCKET_MOUNT)]
+    # docker run's --entrypoint takes one word; the rest of a replacement leads the command.
+    first, rest = (["--entrypoint", entrypoint[0]], list(entrypoint[1:])) if entrypoint \
+        else ([], [])
     argv = (["run", "-d", "--name", name, "--network-alias", name] + args + ENVIRONMENT
-            + list(extra) + [BUILDKIT_IMAGE] + DAEMON_ARGS + list(daemon_extra))
+            + list(extra) + first + [BUILDKIT_IMAGE] + rest + DAEMON_ARGS
+            + list(daemon_extra))
     docker(argv, timeout=300)
     return argv
 

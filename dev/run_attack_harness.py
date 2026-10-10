@@ -248,16 +248,18 @@ def setup(tmp):
     return profile
 
 
-def start_worker(omit=(), extra=(), quota=True, volume_options=quota_volume.OPTIONS):
+def start_worker(omit=(), extra=(), quota=True, volume_options=quota_volume.OPTIONS,
+                 entrypoint=None):
     """(Re)starts the worker on a fresh workspace. The defaults are the shipping launch.
 
     The parameters exist for self-tests, which must see a check fail when its defence is
     removed: `omit` drops profile arguments by prefix, `extra` adds docker run arguments
     (placed after the profile's, so a later --env overrides an earlier one), `quota=False`
     gives a plain Docker volume instead of the loop-backed one, and `volume_options`
-    changes the quota volume's mount options."""
+    changes the quota volume's mount options, and `entrypoint` replaces the image's (a
+    worker without setpriv --nnp)."""
     if JAVA:
-        if omit or extra or not quota or volume_options != quota_volume.OPTIONS:
+        if omit or extra or not quota or volume_options != quota_volume.OPTIONS or entrypoint:
             _java_only_shipped("start_worker(omit=%r, extra=%r, quota=%r)" % (omit, extra, quota))
         _java_relaunch(**state["egress"])
         return
@@ -274,7 +276,7 @@ def start_worker(omit=(), extra=(), quota=True, volume_options=quota_volume.OPTI
              extra=["--env=http_proxy=http://%s:8888" % GATEWAY,
                     "--env=HTTP_PROXY=http://%s:8888" % GATEWAY,
                     "--volume=%s:/buildkitd.toml:ro" % state["toml"]] + list(extra),
-             omit=omit, daemon_extra=["--config", "/buildkitd.toml"])
+             omit=omit, daemon_extra=["--config", "/buildkitd.toml"], entrypoint=entrypoint)
     if not sw.wait_ready(WORKER):
         raise SystemExit("the worker did not become ready: %s"
                          % sw.logs(WORKER).strip()[-200:])

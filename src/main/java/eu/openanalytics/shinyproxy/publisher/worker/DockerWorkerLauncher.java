@@ -86,16 +86,6 @@ public final class DockerWorkerLauncher {
     static final List<String> ENVIRONMENT = List.of("HOME=/tmp/home", "TMPDIR=/tmp",
             "XDG_RUNTIME_DIR=/tmp/run");
     /**
-     * buildkitd's arguments; the isolation probes run the same daemon (dev/shipping_worker.py
-     * DAEMON_ARGS, checked equal by DockerWorkerLauncherTest). The snapshotter is kernel
-     * overlayfs, mounted by buildkitd inside its rootless user namespace: no device (T5 began
-     * with native to avoid fuse-overlayfs's /dev/fuse), no seccomp or capability change. native
-     * stores every layer and step as a FULL copy of its parent, and the r-shiny base's layers
-     * alone exhausted the 8 GiB workspace before the first RUN (the T7 pass probe); overlayfs
-     * stores differences only. RUN steps still cannot mount (BuildKit's default seccomp, no
-     * capabilities), and the upper directories stay on the nosuid,nodev workspace.
-     */
-    /**
      * The worker's entrypoint, set by the launcher whatever the configured image's own is
      * (61635b7-F1): rootlesskit keeps newuidmap's file capability (the 2026-09-26 waiver), and
      * its child buildkitd, with runc and every RUN step under it, runs under no_new_privs. On
@@ -110,6 +100,16 @@ public final class DockerWorkerLauncher {
      */
     static final List<String> DAEMON_NNP = List.of("sh", "-c", "for p in $(pidof buildkitd); do"
             + " echo \"$(cat /proc/$p/comm) $(awk '$1==\"NoNewPrivs:\"{print $2}' /proc/$p/status)\"; done");
+    /**
+     * buildkitd's arguments; the isolation probes run the same daemon (dev/shipping_worker.py
+     * DAEMON_ARGS, checked equal by DockerWorkerLauncherTest). The snapshotter is kernel
+     * overlayfs, mounted by buildkitd inside its rootless user namespace: no device (T5 began
+     * with native to avoid fuse-overlayfs's /dev/fuse), no seccomp or capability change. native
+     * stores every layer and step as a FULL copy of its parent, and the r-shiny base's layers
+     * alone exhausted the 8 GiB workspace before the first RUN (the T7 pass probe); overlayfs
+     * stores differences only. RUN steps still cannot mount (BuildKit's default seccomp, no
+     * capabilities), and the upper directories stay on the nosuid,nodev workspace.
+     */
     static final List<String> DAEMON_ARGS = List.of("--oci-worker-snapshotter=overlayfs", "--root",
             "/workspace/buildkit", "--addr", SOCKET_ADDRESS, "--config", CONFIG_MOUNT + "/buildkitd.toml");
     /** Where quota images live: one shared named volume, one file per attempt. */

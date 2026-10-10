@@ -82,6 +82,19 @@ echo "run_root_opts=$(awk '$5=="/"{print $6}' /proc/self/mountinfo | head -1)"
 # file capabilities on every mount. The overlayfs snapshotter's root mount does not inherit
 # the workspace's nosuid, so this is what keeps a setuid file from changing a step's identity.
 echo "run_nnp=$(awk '$1=="NoNewPrivs:"{print $2}' /proc/self/status)"
+# And what the flag is for, done rather than read (61635b7 review N1): a setuid-root file on
+# the RUN's root, run by an unprivileged user. EUID_ELF is 136 bytes of x86-64 that exits with
+# its effective uid: geteuid (b8 6b 00 00 00, 0f 05), exit(euid) (89 c7, b8 3c 00 00 00,
+# 0f 05) behind one ELF and one program header; built by hand so the probe needs no
+# compiler, and readable here in full. Exit codes are mod 256: root 0, nobody (65534) 254.
+# Controls: the file really is setuid root, it reports root when root runs it, and a plain
+# copy reports nobody when nobody runs it.
+echo "f0VMRgIBAQAAAAAAAAAAAAIAPgABAAAAeABAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAEAAOAABAAAAAAAAAAEAAAAFAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAiAAAAAAAAACIAAAAAAAAAAAQAAAAAAAAuGsAAAAPBYnHuDwAAAAPBQ==" | base64 -d > /suid-euid && cp /suid-euid /plain-euid
+chown 0:0 /suid-euid && chmod 4755 /suid-euid && chmod 755 /plain-euid
+echo "suid_mode=$(stat -c %a:%u /suid-euid)"
+timeout 10 /suid-euid; echo "suid_as_root=$?"
+timeout 10 su nobody -s /bin/sh -c /plain-euid; echo "plain_as_nobody=$?"
+timeout 10 su nobody -s /bin/sh -c /suid-euid; echo "suid_as_nobody=$?"
 """
 
 MEMORY = r"""
@@ -195,6 +208,23 @@ def judge_nnp(report):
     identity."""
     nnp = _value(report, "run_nnp")
     return nnp == "1", "NoNewPrivs in a RUN step: %s" % (nnp or "not read")
+
+
+def judge_setuid(report):
+    """A setuid-root file run by an unprivileged user in a RUN keeps that user's euid
+    (65534, exit 254); 0 means the bit was honoured. The controls must hold first: the file
+    is 4755 root, root running it gets 0, and nobody running a plain copy gets 254 -- so
+    "254" is the program reporting, not the program failing."""
+    mode, as_root = _value(report, "suid_mode"), _value(report, "suid_as_root")
+    plain, attempt = _value(report, "plain_as_nobody"), _value(report, "suid_as_nobody")
+    control = mode == "4755:0" and as_root == "0" and plain == "254"
+    detail = "nobody ran a setuid-root file: exit (euid%%256) %s, identity %s (controls: " \
+             "mode %s, as root %s, plain copy as nobody %s)" % (
+                 attempt or "not read", "kept" if attempt == "254" else "CHANGED",
+                 mode or "not read", as_root or "not read", plain or "not read")
+    if not control:
+        return False, detail + "  <- inconclusive: a control did not hold"
+    return attempt == "254", detail
 
 
 def adopt_launched_limits():
@@ -344,6 +374,8 @@ def run_all(tmp, label=""):
     check("mounts", judge_mounts(report, workspace_options()) if report
           else (False, "no report: %s" % blob.strip()[-160:]))
     check("nnp", judge_nnp(report) if report else (False, "no report: %s" % blob.strip()[-160:]))
+    check("setuid", judge_setuid(report) if report
+          else (False, "no report: %s" % blob.strip()[-160:]))
 
     report, _ = step(tmp, "memory" + label, MEMORY, target=MEMORY_TARGET_MB)
     check("memory", judge_memory(report))
@@ -398,6 +430,9 @@ def main(argv):
         ok, detail = got["nnp"]
         record("a RUN step has no_new_privs",
                "setuid bits and file capabilities change no step's identity", detail, ok)
+        ok, detail = got["setuid"]
+        record("a setuid file changes no RUN step's identity",
+               "a setuid-root file run by nobody keeps nobody's euid", detail, ok)
         ok, detail = got["memory"]
         record("memory is bounded from a RUN",
                "growth past the limit is OOM-killed at or below it", detail, ok)
@@ -504,6 +539,16 @@ def self_test(tmp):
     expect("a step without no_new_privs", judge_nnp(["run_nnp=0"]), False)
     expect("no_new_privs not read", judge_nnp([]), False)
     expect("no_new_privs held", judge_nnp(["run_nnp=1"]), True)
+    suid = ["suid_mode=4755:0", "suid_as_root=0", "plain_as_nobody=254"]
+    expect("a setuid file that was honoured", judge_setuid(suid + ["suid_as_nobody=0"]), False)
+    expect("setuid with a file that is not setuid",
+           judge_setuid(["suid_mode=755:0"] + suid[1:] + ["suid_as_nobody=254"]), False)
+    expect("setuid with a program that does not report",
+           judge_setuid(suid[:1] + ["suid_as_root=126"] + suid[2:] + ["suid_as_nobody=254"]),
+           False)
+    expect("setuid with su not dropping to nobody",
+           judge_setuid(suid[:2] + ["plain_as_nobody=0", "suid_as_nobody=254"]), False)
+    expect("setuid held", judge_setuid(suid + ["suid_as_nobody=254"]), True)
     flood = "#8 1.0 SKALD-LOG-START\n" + ("#8 1.0 " + "A" * 63 + "\n") * 100
     expect("a log that never reached the client",
            judge_log_speed("#8 [output clipped, log limit 200KiB/s reached]", True, 0),
@@ -535,21 +580,22 @@ def self_test(tmp):
         print("  ok   destroy() detaches it")
     shutil.rmtree(probe_dir, ignore_errors=True)
 
-    # Live, launch 1: every in-worker defence removed at once -- the SWAP bound (the
+    # Live, launch 1: every in-worker defence removed at once -- no_new_privs (rootlesskit
+    # starting buildkitd directly, the upstream entrypoint), the SWAP bound (the
     # memory limit stays, so the memory check going red shows --memory-swap specifically
     # is what holds it: Docker's default swap lets the growth finish), pids, cpus, the log
     # bounds (set to unlimited) -- and the quota volume without its options. Each check
     # must go red on its own evidence.
     print()
-    print("  -- live: a worker without --memory-swap, --pids-limit, --cpus, the log "
-          "bounds, and nosuid,nodev")
-    h.start_worker(omit=("--memory-swap", "--pids-limit", "--cpus",
+    print("  -- live: a worker without setpriv --nnp, --memory-swap, --pids-limit, --cpus, "
+          "the log bounds, and nosuid,nodev")
+    h.start_worker(entrypoint=["rootlesskit", "buildkitd"], omit=("--memory-swap", "--pids-limit", "--cpus",
                          "--env=BUILDKIT_STEP_LOG_MAX"),
                    extra=["--env=BUILDKIT_STEP_LOG_MAX_SIZE=-1",
                           "--env=BUILDKIT_STEP_LOG_MAX_SPEED=-1"],
                    volume_options="")
     got = run_all(tmp, "-weak")
-    for name in ("mounts", "memory", "pids", "cpu", "log speed", "log size"):
+    for name in ("mounts", "nnp", "setuid", "memory", "pids", "cpu", "log speed", "log size"):
         ok, detail = got[name]
         if ok:
             print("  FAIL NOT caught without its defence: %s (%s)" % (name, detail))
