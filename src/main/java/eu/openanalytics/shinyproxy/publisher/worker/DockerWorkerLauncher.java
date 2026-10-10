@@ -66,8 +66,9 @@ import java.util.regex.Pattern;
  *       by a privileged setup container. That privilege is the launcher's (decision 6
  *       allows it); the worker never sees the device;</li>
  *   <li>the worker, launched with {@link WorkerProfile}'s fields exactly, plus the
- *       read-only-root environment and the daemon's arguments the probes measured
- *       (dev/shipping_worker.py: ENVIRONMENT, SOCKET_MOUNT, DAEMON_ARGS).</li>
+ *       read-only-root environment, the entrypoint and the daemon's arguments the probes
+ *       measured (dev/shipping_worker.py: ENVIRONMENT, SOCKET_MOUNT, ENTRYPOINT,
+ *       DAEMON_ARGS). It is refused unless its daemon runs under no_new_privs.</li>
  * </ul>
  *
  * <p>A launch that fails part-way disposes of what it made before rethrowing. Disposal is
@@ -94,6 +95,21 @@ public final class DockerWorkerLauncher {
      * stores differences only. RUN steps still cannot mount (BuildKit's default seccomp, no
      * capabilities), and the upper directories stay on the nosuid,nodev workspace.
      */
+    /**
+     * The worker's entrypoint, set by the launcher whatever the configured image's own is
+     * (61635b7-F1): rootlesskit keeps newuidmap's file capability (the 2026-09-26 waiver), and
+     * its child buildkitd, with runc and every RUN step under it, runs under no_new_privs. On
+     * the overlayfs snapshotter that is the only thing between a setuid file in a build's
+     * snapshot and its exec, because a RUN's root does not inherit the workspace's nosuid.
+     * Mirrors dev/shipping_worker.py ENTRYPOINT, checked equal by DockerWorkerLauncherTest.
+     */
+    static final List<String> ENTRYPOINT = List.of("rootlesskit", "setpriv", "--nnp", "buildkitd");
+    /**
+     * Prints "&lt;comm&gt; &lt;NoNewPrivs&gt;" for every buildkitd in the worker. Run once, before
+     * any build has run, so nothing untrusted can have touched what it reads.
+     */
+    static final List<String> DAEMON_NNP = List.of("sh", "-c", "for p in $(pidof buildkitd); do"
+            + " echo \"$(cat /proc/$p/comm) $(awk '$1==\"NoNewPrivs:\"{print $2}' /proc/$p/status)\"; done");
     static final List<String> DAEMON_ARGS = List.of("--oci-worker-snapshotter=overlayfs", "--root",
             "/workspace/buildkit", "--addr", SOCKET_ADDRESS, "--config", CONFIG_MOUNT + "/buildkitd.toml");
     /** Where quota images live: one shared named volume, one file per attempt. */
@@ -425,12 +441,41 @@ public final class DockerWorkerLauncher {
                 .binds(binds)
                 .privileged(false)
                 .build();
-        docker.createContainer(ContainerConfig.builder().image(images.worker()).cmd(DAEMON_ARGS)
-                .env(env).labels(labels).hostConfig(hc).build(), h.worker());
+        docker.createContainer(ContainerConfig.builder().image(images.worker())
+                .entrypoint(ENTRYPOINT).cmd(DAEMON_ARGS).env(env).labels(labels).hostConfig(hc).build(), h.worker());
         docker.startContainer(h.worker());
         // 120 s: a 60 s wait was missed once under load (the daemon stalled after its fsverity
         // check and reported a worker only later); a healthy start takes a few seconds.
         waitForLog(h.worker(), "found worker", 120);
+        requireDaemonNoNewPrivs(h);
+    }
+
+    /**
+     * Refuses the attempt unless every buildkitd in the worker runs under no_new_privs. The
+     * entrypoint sets it, but an image whose setpriv is missing or wrapped, or a future change
+     * to either, would otherwise run every RUN step with neither nosuid nor no_new_privs, and
+     * say nothing (61635b7-F1). The daemon has reported a worker, so it is running.
+     */
+    private void requireDaemonNoNewPrivs(Handle h) throws DockerException, InterruptedException {
+        String id = docker.execCreate(h.worker(), DAEMON_NNP.toArray(String[]::new),
+                DockerClient.ExecCreateParam.attachStdout(), DockerClient.ExecCreateParam.attachStderr()).id();
+        LogStream stream = docker.execStart(id);
+        String out;
+        try {
+            out = stream.readFully();
+        } finally {
+            try {
+                stream.close();
+            } catch (IOException e) {
+                // the output is already read; a failed close leaks nothing of ours
+            }
+        }
+        List<String> lines = out.strip().lines().toList();
+        if (lines.isEmpty() || !lines.stream().allMatch("buildkitd 1"::equals)) {
+            throw new IllegalStateException("the worker's daemon does not run under no_new_privs, so RUN steps"
+                    + " would honour setuid files; refusing it (expected 'buildkitd 1' for every buildkitd): "
+                    + tail(out));
+        }
     }
 
     /**

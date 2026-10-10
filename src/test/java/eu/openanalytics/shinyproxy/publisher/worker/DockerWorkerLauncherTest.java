@@ -277,6 +277,79 @@ public class DockerWorkerLauncherTest {
         assertEquals(List.of("--config", DockerWorkerLauncher.CONFIG_MOUNT + "/buildkitd.toml"), shipped.subList(n - 2, n));
         assertEquals(shipped.subList(0, n - 2), probe);
         assertTrue(probe.contains("--oci-worker-snapshotter=overlayfs"), probe.toString());
+        // And the entrypoint: the launcher sets the one the image is generated with (61635b7-F1).
+        java.util.regex.Matcher entry = java.util.regex.Pattern.compile("(?m)^ENTRYPOINT = \\[(.*)\\]$").matcher(py);
+        assertTrue(entry.find(), "ENTRYPOINT");
+        assertEquals(DockerWorkerLauncher.ENTRYPOINT, java.util.Arrays.stream(entry.group(1).split(","))
+                .map(s -> s.strip().replaceAll("^\"|\"$", "")).toList());
+    }
+
+    @Test
+    public void aWorkerImageWithTheUpstreamEntrypointStillRunsItsDaemonUnderNoNewPrivs() throws Exception {
+        // 61635b7-F1's repro: the worker image as built before 4e-1c, whose ENTRYPOINT is
+        // upstream's. The launcher sets its own, so the image's does not decide.
+        String image = variant("upstream-entrypoint", "ENTRYPOINT [\"rootlesskit\", \"buildkitd\"]\n");
+        try {
+            DockerWorkerLauncher old = new DockerWorkerLauncher(docker, WorkerProfile.load("runc-rootless"),
+                    Images.of(image, GATEWAY));
+            Handle h = old.launch(request(attempt()));
+            try {
+                assertEquals(DockerWorkerLauncher.ENTRYPOINT, docker.inspectContainer(h.worker()).config().entrypoint());
+                String nnp = exec(h.worker(), DockerWorkerLauncher.DAEMON_NNP.toArray(String[]::new));
+                assertTrue(!nnp.isBlank() && nnp.strip().lines().allMatch("buildkitd 1"::equals), nnp);
+            } finally {
+                assertEquals(List.of(), old.dispose(h));
+            }
+        } finally {
+            docker.removeImage(image);
+        }
+    }
+
+    @Test
+    public void aWorkerWhoseDaemonLacksNoNewPrivsIsRefused() throws Exception {
+        // The launcher's entrypoint is not trusted to have worked: here the image's setpriv
+        // drops --nnp and runs the daemon anyway, as a wrapper or a later change might. The
+        // daemon starts and reports a worker; the launch is refused, and nothing is left.
+        String image = variant("setpriv-without-nnp", "USER root\n"
+                + "RUN rm /bin/setpriv && printf '#!/bin/sh\\n[ \"$1\" = --nnp ] && shift\\nexec \"$@\"\\n'"
+                + " > /bin/setpriv && chmod 755 /bin/setpriv\n"
+                + "USER 2401:2401\n");
+        try {
+            DockerWorkerLauncher wrapped = new DockerWorkerLauncher(docker, WorkerProfile.load("runc-rootless"),
+                    Images.of(image, GATEWAY));
+            String id = attempt();
+            Handle[] launched = new Handle[1];
+            try {
+                IllegalStateException e = assertThrows(IllegalStateException.class,
+                        () -> launched[0] = wrapped.launch(request(id)));
+                assertTrue(e.getMessage().contains("does not run under no_new_privs"), e.getMessage());
+                assertTrue(e.getMessage().contains("buildkitd 0"), e.getMessage());
+                assertFalse(e.getMessage().contains("LEFT BEHIND"), e.getMessage());
+                assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(id)));
+            } finally {
+                // A launch that wrongly succeeds holds the image; dispose of it, or its
+                // failure is hidden behind the image's removal and its worker outlives the test.
+                if (launched[0] != null) {
+                    wrapped.dispose(launched[0]);
+                }
+            }
+        } finally {
+            docker.removeImage(image);
+        }
+    }
+
+    /** The test worker image with `lines` appended, under a tag of its own. */
+    private static String variant(String what, String lines) throws Exception {
+        Path dir = Files.createTempDirectory("skald-worker-" + what);
+        try {
+            Files.writeString(dir.resolve("Dockerfile"), "FROM " + WORKER + "\n" + lines);
+            String image = "skald-buildkit-worker:test-" + what + "-" + attempt();
+            docker.build(dir, image);
+            return image;
+        } finally {
+            Files.delete(dir.resolve("Dockerfile"));
+            Files.delete(dir);
+        }
     }
 
     @Test

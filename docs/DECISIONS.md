@@ -481,6 +481,12 @@ what it replaces, since `RUN` steps previously ran with NoNewPrivs 0. It is prov
 a `RUN` by `dev/run-bounds-probe.py` ("a RUN step has no_new_privs"), and for the daemon by
 `DockerWorkerLauncherTest`. The three replacement checks of the waiver are unchanged.
 
+The launcher, not the image, decides this (61635b7-F1): it sets that entrypoint on the worker
+container whatever the configured image's own is, so an image built before this change or
+from upstream still gets it; and once the daemon reports a worker, before any build runs, it
+reads buildkitd's NoNewPrivs and refuses the attempt unless it is 1, so a missing or wrapped
+`setpriv` is a refused launch rather than a silent downgrade.
+
 **Rejected:** a larger quota on native (it only moves the wall, since every step copies the
 whole root filesystem again, and it is slow); fuse-overlayfs (a host device grant, and the
 setuid `fusermount3` the worker image strips); flattening the bases to one layer (each step

@@ -2059,8 +2059,9 @@ below are marked passed by this planning document.
       probes rerun on it.
       **Part 4e-1c (overlayfs, and the pass):** buildkitd runs the kernel overlayfs snapshotter
       (ADR-0013, user 2026-10-10). Its RUN root does not inherit the workspace's nosuid, so
-      the worker's entrypoint is `rootlesskit setpriv --nnp buildkitd`: buildkitd and every
-      RUN step run with no_new_privs (RUN steps had none before), proved from a RUN by the
+      the worker's entrypoint is `rootlesskit setpriv --nnp buildkitd`, set by the launcher
+      whatever the image's own, and a launch whose buildkitd lacks the flag is refused
+      (61635b7-F1): buildkitd and every RUN step run with no_new_privs (RUN steps had none before), proved from a RUN by the
       bounds probe; the waiver's three replacements are unchanged. The isolation probes'
       daemon is now tied to the launcher's by a test. The R image's push then failed
       intermittently: squid 6.x aborted large uploads (a zero-size read taken for the
