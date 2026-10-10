@@ -2163,7 +2163,18 @@ below are marked passed by this planning document.
       renv sends R's version and CPU, forge answers with a binary for that platform or the
       source). A binary is shared by every app on the platform, so how one is made decides
       what every later build installs. The rules:
-      - Skald compiles each package version a build needs and forge lacks, ONCE per
+      - Only public sources enter the shared tree (c18c5ab-F1). A binary is served to
+        every app by name, version and platform, so only a package whose source tarball
+        comes from the configured public repository set (forge's CRAN proxy), verified
+        against that repository's digest for that name and version, is ever built for it.
+        A lockfile's remotes (GitHub, URLs), packages local to a bundle and per-tenant or
+        private repositories always build from source inside the app's own restore, as
+        today, and are never uploaded; the binary's provenance records its source
+        repository and digest, and the uploader refuses anything else. Sharing binaries of
+        a private repository would need a tree per audience: its own decision. A probe
+        row: a lockfile naming a remote package with a CRAN package's name and version
+        never produces an upload, and the CRAN package's binary is unchanged.
+      - Skald compiles each such package version a build needs and forge lacks, ONCE per
         platform, each package in its OWN sandbox (the T5 worker profile, no secrets, the
         package's dependencies installed as binaries), so one package's install scripts
         can never touch another package's binary. Never inside an app's restore step,
@@ -2178,7 +2189,9 @@ below are marked passed by this planning document.
       - The first app's build does not wait at first: it restores from source as today,
         and the per-package compiles run beside it for the next apps. Waiting on parallel
         per-package compiles is a measured follow-up, adopted if it beats the serial
-        restore.
+        restore. Until then the first build and the queue compile the same packages at
+        once, about twice the CPU: the queue's admission limits leave room for running
+        builds, so a burst of first R publishes cannot starve them (c18c5ab N1).
       - The platform the binaries are registered for is Skald's published R base (its
         digest is forge's platform registration), so a binary always matches the runtime
         it is installed into. A base change is a new platform registration.
@@ -2196,12 +2209,14 @@ below are marked passed by this planning document.
       package's binary and that no sandbox sees the token.
       **The fixed cost (moved here from T10, user 2026-10-10):** ~45-60 s before any
       recipe step (six launch containers in sequence, and every attempt pulling and
-      extracting its base into an empty workspace). Pre-extract each published base on
-      the host into a read-only store the worker reads but never writes (platform-owned,
-      so no tenant data is shared), and keep a small pool of pre-launched, never-used
-      workers.
-      **Pass:** the targets above met and measured per phase; the binary rows' isolation
-      and token rows red under their mutants; T5's isolation probes rerun green.
+      extracting its base into an empty workspace). Pre-extract each published base into
+      a platform-owned Docker volume the worker mounts read-only and never writes (never
+      a host path: builds get no host mounts; no tenant data is shared), and keep a small
+      pool of pre-launched, never-used workers.
+      **Pass:** the targets above met and measured per phase; the binary rows' isolation,
+      source and token rows red under their mutants; T5's isolation probes rerun green,
+      the bounds probe's mounts row among them, since the read-only base store is a new
+      mount in the worker (c18c5ab N2).
 
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus
@@ -2274,6 +2289,13 @@ below are marked passed by this planning document.
       scanner (docker/buildkit-syft-scanner, pinned by digest, flagged as a new trusted image
       in the build path, licence checked), with the provenance record naming it.
       **Build latency:** moved to T7b (user, 2026-10-10).
+      **Carried from T7 (6890924 review N2, N3), for the deployment docs:** the build
+      workspace must be local disk: WorkspaceLock is an fcntl lock, which NFS without lockd
+      and some FUSE or CIFS mounts do not honour, so a second process would not be refused.
+      And AttemptSweeper.stop() waits up to 70 s for a sweep's helper removal: under
+      Kubernetes' default 30 s terminationGracePeriodSeconds a pod can be killed first (not
+      a leak: the next process removes a stale sweep helper), so the Helm chart sets the
+      grace period above that or says why not.
       **Carried from T7 (c939203 review N1):** every (content, key) pair
       leaves a BuildKit cache ref at `skald/cache/<content UUID>:<key>`; the GC (artifact
       ledger, mark/recheck/delete) owns those refs too and deletes them with the content
