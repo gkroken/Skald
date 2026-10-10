@@ -16,3 +16,6 @@
 __pycache__/
 # Jazzer's working corpus from `make fuzz`: grows across runs, kept locally, never committed.
 /.cifuzz-corpus/
+# The coder/reviewer handoff files (reports, watch state): local to the review workflow,
+# never committed.
+/code_review/

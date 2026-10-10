@@ -261,7 +261,9 @@ rebuild and nothing reaches the build, the image or the logs.
       is the forwarder's; single use is the protection, and tests prove a replayed and an
       expired token both fail. Content built before #4b has no init: its switches stay
       disabled with "republish to enable" (provenance records the init), never an attach
-      that silently delivers nothing.
+      that silently delivers nothing. skald.build-provenance/v1 (V3) has no such field: #4b
+      adds it (a new field under V3's checks, or a v2), and a build recorded without it
+      reads as "no init", not as an error (222eb0f review N1).
 - [ ] **Oracle.** The admin points Skald at the server's `tnsnames.ora`; Skald lists its
       aliases and the admin registers the ones to offer. The host's file is never mounted.
       Every descriptor address gets a forwarder. A RAC SCAN alias is flagged: it works only
