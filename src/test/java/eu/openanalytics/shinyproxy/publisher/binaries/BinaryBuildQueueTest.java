@@ -718,6 +718,71 @@ public class BinaryBuildQueueTest {
         assertEquals("REFUSED", state(dependent), "and its dependents are refused in the same pass");
     }
 
+    // ------------------------------------------------------------------ deferral (9262bd8-F1)
+
+    private static double secondsUntilNotBefore(UUID row) {
+        return jdbc.queryForObject("SELECT extract(epoch FROM not_before - now()) FROM skald.binary_build"
+            + " WHERE id = ?", Double.class, row);
+    }
+
+    private static void wake(UUID row) {
+        jdbc.update("UPDATE skald.binary_build SET not_before = now() - interval '1 second' WHERE id = ?", row);
+    }
+
+    @Test
+    public void aDeferralCountsNoAttemptAndWaitsWithBackoff() {
+        BinaryBuildQueue q = queue();
+        UUID a = q.enqueue(KEY, "aaa", "1.0", null);
+        Duration first = Duration.ofSeconds(60);
+        Duration max = Duration.ofSeconds(200);
+        Duration bound = Duration.ofHours(48);
+        assertEquals(BinaryBuildQueue.Deferred.DEFERRED, q.defer(q.claimSource("v").orElseThrow().lease(),
+            first, max, bound, "INDEX_BEHIND", "behind"));
+        Map<String, Object> r = row(a);
+        assertEquals("PENDING_SOURCE", r.get("state"));
+        assertEquals(0, r.get("attempts"), "no attempt counted");
+        assertEquals(1, r.get("deferrals"));
+        assertEquals("INDEX_BEHIND", r.get("error_code"));
+        assertNull(r.get("lease_owner"));
+        assertTrue(Math.abs(secondsUntilNotBefore(a) - 60) < 5, "first wait");
+        assertFalse(q.claimSource("v").isPresent(), "not claimable before not_before");
+        wake(a);
+        q.defer(q.claimSource("v").orElseThrow().lease(), first, max, bound, "INDEX_BEHIND", "behind");
+        assertTrue(Math.abs(secondsUntilNotBefore(a) - 120) < 5, "doubles: " + secondsUntilNotBefore(a));
+        wake(a);
+        q.defer(q.claimSource("v").orElseThrow().lease(), first, max, bound, "INDEX_BEHIND", "behind");
+        assertTrue(Math.abs(secondsUntilNotBefore(a) - 200) < 5, "capped: " + secondsUntilNotBefore(a));
+        assertEquals(0, row(a).get("attempts"));
+        assertEquals(3, row(a).get("deferrals"));
+    }
+
+    @Test
+    public void aDeferralPastTheBoundIsRefused() {
+        BinaryBuildQueue q = queue();
+        UUID a = q.enqueue(KEY, "aaa", "1.0", null);
+        q.defer(q.claimSource("v").orElseThrow().lease(), Duration.ofSeconds(1), Duration.ofSeconds(1),
+            Duration.ofHours(48), "INDEX_BEHIND", "behind");
+        jdbc.update("UPDATE skald.binary_build SET not_before = NULL, deferred_since = now() - interval '49 hours'"
+            + " WHERE id = ?", a);
+        assertEquals(BinaryBuildQueue.Deferred.REFUSED, q.defer(q.claimSource("v").orElseThrow().lease(),
+            Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofHours(48), "INDEX_BEHIND", "still behind"));
+        Map<String, Object> r = row(a);
+        assertEquals("REFUSED", r.get("state"));
+        assertEquals("INDEX_BEHIND", r.get("refusal_code"));
+    }
+
+    @Test
+    public void onlyAVerifyingRowIsDeferredAndANameIsNeeded() {
+        BinaryBuildQueue q = queue();
+        verified(q, "aaa");
+        BuildClaim c = q.claimBuild("b").orElseThrow();
+        assertThrows(Fenced.class, () -> q.defer(c.lease(), Duration.ofSeconds(1), Duration.ofSeconds(1),
+            Duration.ofHours(1), "X", null));
+        assertThrows(IllegalArgumentException.class, () -> q.defer(c.lease(), Duration.ofSeconds(1),
+            Duration.ofSeconds(1), Duration.ofHours(1), " ", null));
+        assertEquals("RUNNING", state(c.rowId()));
+    }
+
     // ------------------------------------------------------------------ settings
 
     @Test

@@ -286,12 +286,13 @@ public class SourceReadersTest {
     @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     public void aReadThatBlocksIsStoppedAtTheDeadlineWhileTheHeartbeatBeats() throws Exception {
         var timer = timer();
+        var timer2 = timer();
         try (java.io.PipedOutputStream never = new java.io.PipedOutputStream();
              InputStream blocked = new java.io.PipedInputStream(never)) {
             AtomicInteger beats = new AtomicInteger();
             long start = System.nanoTime();
             IOException failure;
-            try (TransferGuard guard = new TransferGuard(timer, Duration.ofMillis(1500), Duration.ofMillis(100), () -> {
+            try (TransferGuard guard = new TransferGuard(timer, timer2, Duration.ofMillis(1500), Duration.ofMillis(100), () -> {
                 beats.incrementAndGet();
                 return true;
             })) {
@@ -306,6 +307,7 @@ public class SourceReadersTest {
             assertFalse(Thread.currentThread().isInterrupted(), "no interrupt leaks past close()");
         } finally {
             timer.shutdownNow();
+            timer2.shutdownNow();
         }
     }
 
@@ -313,11 +315,12 @@ public class SourceReadersTest {
     @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     public void aLostLeaseStopsABlockedRead() throws Exception {
         var timer = timer();
+        var timer2 = timer();
         try (java.io.PipedOutputStream never = new java.io.PipedOutputStream();
              InputStream blocked = new java.io.PipedInputStream(never)) {
             long start = System.nanoTime();
             IOException failure;
-            try (TransferGuard guard = new TransferGuard(timer, Duration.ofMinutes(5), Duration.ofMillis(200),
+            try (TransferGuard guard = new TransferGuard(timer, timer2, Duration.ofMinutes(5), Duration.ofMillis(200),
                     () -> false)) {
                 InputStream in = guard.watch(blocked);
                 failure = guard.failure(assertThrows(IOException.class, in::read));
@@ -328,6 +331,7 @@ public class SourceReadersTest {
             assertFalse(Thread.currentThread().isInterrupted());
         } finally {
             timer.shutdownNow();
+            timer2.shutdownNow();
         }
     }
 
@@ -335,10 +339,11 @@ public class SourceReadersTest {
     @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     public void aReadThatIgnoresInterruptsIsStoppedByClosingIt() throws Exception {
         var timer = timer();
+        var timer2 = timer();
         try {
             long start = System.nanoTime();
             IOException failure;
-            try (TransferGuard guard = new TransferGuard(timer, Duration.ofMillis(1000), Duration.ofMillis(100),
+            try (TransferGuard guard = new TransferGuard(timer, timer2, Duration.ofMillis(1000), Duration.ofMillis(100),
                     () -> true)) {
                 InputStream in = guard.watch(new Uninterruptible());
                 failure = guard.failure(assertThrows(IOException.class, in::read));
@@ -348,13 +353,45 @@ public class SourceReadersTest {
             assertFalse(Thread.currentThread().isInterrupted());
         } finally {
             timer.shutdownNow();
+            timer2.shutdownNow();
+        }
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aRenewalThatBlocksDoesNotDelayTheDeadline() throws Exception {
+        var timer = timer();
+        var timer2 = timer();
+        try (java.io.PipedOutputStream never = new java.io.PipedOutputStream();
+             InputStream blocked = new java.io.PipedInputStream(never)) {
+            long start = System.nanoTime();
+            IOException failure;
+            try (TransferGuard guard = new TransferGuard(timer, timer2, Duration.ofMillis(1000), Duration.ofMillis(50),
+                    () -> {
+                        try {
+                            Thread.sleep(20_000);
+                        } catch (InterruptedException ignored) {
+                            Thread.currentThread().interrupt();
+                        }
+                        return true;
+                    })) {
+                InputStream in = guard.watch(blocked);
+                failure = guard.failure(assertThrows(IOException.class, in::read));
+            }
+            long ms = (System.nanoTime() - start) / 1_000_000;
+            assertTrue(failure instanceof java.net.SocketTimeoutException, failure.toString());
+            assertTrue(ms < 5000, "the deadline fired on time while a renewal was blocked: " + ms + " ms");
+        } finally {
+            timer.shutdownNow();
+            timer2.shutdownNow();
         }
     }
 
     @Test
     public void aTransferThatEndsInTimeIsLeftAlone() throws Exception {
         var timer = timer();
-        try (TransferGuard guard = new TransferGuard(timer, Duration.ofSeconds(30), Duration.ofSeconds(10), () -> true)) {
+        var timer2 = timer();
+        try (TransferGuard guard = new TransferGuard(timer, timer2, Duration.ofSeconds(30), Duration.ofSeconds(10), () -> true)) {
             InputStream in = guard.watch(new ByteArrayInputStream("abc".getBytes(StandardCharsets.US_ASCII)));
             assertEquals("abc", new String(in.readAllBytes(), StandardCharsets.US_ASCII));
             assertEquals(TransferGuard.Reason.NONE, guard.reason());
@@ -362,6 +399,7 @@ public class SourceReadersTest {
             assertTrue(guard.failure(own) == own, "an unrelated failure is itself");
         } finally {
             timer.shutdownNow();
+            timer2.shutdownNow();
         }
     }
 
@@ -380,6 +418,16 @@ public class SourceReadersTest {
         assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-max-byte", "1")));
         assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-max-bytes", "0")));
         assertEquals(1234, SourceSettings.fromOverrides(Map.of("source-max-bytes", "1234")).maxSourceBytes());
+        SourceSettings behind = SourceSettings.fromOverrides(Map.of("source-behind-retry-seconds", "60",
+            "source-behind-max-retry-seconds", "600", "source-behind-bound-hours", "72"));
+        assertEquals(Duration.ofSeconds(60), behind.behindRetry());
+        assertEquals(Duration.ofSeconds(600), behind.behindMaxRetry());
+        assertEquals(Duration.ofHours(72), behind.behindBound());
+        assertEquals(Duration.ofHours(48), SourceSettings.DEFAULTS.behindBound(), "a day past forge's 24 h index cache");
+        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of(
+            "source-behind-retry-seconds", "600", "source-behind-max-retry-seconds", "60")), "max below first");
+        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of(
+            "source-behind-retry-seconds", "0")));
     }
 
     @Test

@@ -2346,7 +2346,15 @@ below are marked passed by this planning document.
       a dependency whose locked version equals the one in the base image's system library
       is not queued; the sandbox already has it from the trusted base, and the base's
       digest is the platform registration, so the binary matches what every app has. That
-      leaves the archived question to genuinely archived CRAN packages.
+      leaves the archived question to genuinely archived CRAN packages. The base image's
+      library versions come from the trusted side (the catalog or the platform
+      registration), never from inside a sandbox (9262bd8 N2).
+      **An index behind the lock (9262bd8-F1):** forge caches a proxy's index for 24 h by
+      default, so a version released today can be newer than the index for a day. Such a
+      row is deferred, not failed: back to PENDING_SOURCE with no attempt counted, waiting
+      5 min doubling to 6 h, and refused INDEX_BEHIND only 48 h after its first deferral
+      (`source-behind-*`). Renewals and deadlines run on separate timers, so a renewal
+      blocked in the database cannot delay a deadline (9262bd8 N1).
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

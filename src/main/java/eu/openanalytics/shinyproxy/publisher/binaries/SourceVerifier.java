@@ -67,14 +67,18 @@ import java.util.concurrent.ScheduledExecutorService;
  * (e149183-F1). No database call runs under the guard. A lost lease writes nothing.
  *
  * <p>An index whose version for the package is OLDER than the one claimed (a release newer
- * than the cached or proxied index) is fetched once more, ignoring the TTL; still older, it is
- * a failed attempt, retried later, never a final refusal of a current version (e149183 N3).
+ * than the cached or proxied index) is fetched once more, ignoring the TTL (e149183 N3); still
+ * older, the row is DEFERRED, not failed: back to PENDING_SOURCE with no attempt counted, not
+ * claimable for {@code source-behind-retry}, doubling to {@code source-behind-max-retry}, and
+ * refused INDEX_BEHIND only once {@code source-behind-bound} has passed since its first
+ * deferral (9262bd8-F1: forge caches a proxy's index for a day, and two quick failed attempts
+ * would have FAILED the row and refused its dependents for good).
  */
 public final class SourceVerifier implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(SourceVerifier.class);
 
-    /** What one call did: the row, and how it ended (QUEUED, REFUSED:<code>, FAILED, FENCED). */
+    /** What one call did: the row, and how it ended (QUEUED, REFUSED:<code>, DEFERRED, FAILED, FENCED). */
     public record Result(java.util.UUID rowId, String outcome) { }
 
     private final BinaryBuildQueue queue;
@@ -82,11 +86,9 @@ public final class SourceVerifier implements AutoCloseable {
     private final SourceSettings settings;
     private final BinaryQueueSettings queueSettings;
     private final CranIndex index;
-    private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "skald-source-guard");
-        t.setDaemon(true);
-        return t;
-    });
+    // Two timers: renewals (JDBC) on one, deadlines alone on the other (9262bd8 N1).
+    private final ScheduledExecutorService beats = timer("skald-source-renew");
+    private final ScheduledExecutorService deadlines = timer("skald-source-deadline");
 
     public SourceVerifier(BinaryBuildQueue queue, SourceFetcher fetcher, SourceSettings settings,
                           BinaryQueueSettings queueSettings) {
@@ -116,6 +118,12 @@ public final class SourceVerifier implements AutoCloseable {
             log.info("binary source {}: {}", what, recorded);
             return Optional.of(new Result(claim.rowId(), recorded == BinaryBuildQueue.Recorded.QUEUED
                     ? "QUEUED" : "REFUSED:DEPENDENCY_CYCLE"));
+        } catch (IndexBehind behind) {
+            BinaryBuildQueue.Deferred d = queue.defer(claim.lease(), settings.behindRetry(), settings.behindMaxRetry(),
+                    settings.behindBound(), "INDEX_BEHIND", behind.getMessage());
+            log.info("binary source {}: {} ({})", what, d, behind.getMessage());
+            return Optional.of(new Result(claim.rowId(), d == BinaryBuildQueue.Deferred.DEFERRED
+                    ? "DEFERRED" : "REFUSED:INDEX_BEHIND"));
         } catch (SourceRefusal refusal) {
             queue.refuse(claim.lease(), refusal.code(), refusal.getMessage());
             log.info("binary source {} refused: {} {}", what, refusal.code(), refusal.getMessage());
@@ -137,13 +145,13 @@ public final class SourceVerifier implements AutoCloseable {
 
     private record Checked(SourceTarball.Read read, List<BinaryBuildQueue.Dependency> dependencies) { }
 
-    private Checked check(BinaryBuildQueue.SourceClaim claim) throws IOException, SourceRefusal {
+    private Checked check(BinaryBuildQueue.SourceClaim claim) throws IOException, SourceRefusal, IndexBehind {
         Map<String, String> lock = queue.lockOf(claim.requestedBy()).orElseThrow(() -> new SourceRefusal(
                 "NO_LOCK", "no recorded lock resolves this package's dependencies"));
         Optional<List<String>> recorded = queue.recordedSource(claim.rowId());
         CranIndex.Entry entry;
         SourceTarball.Read read;
-        try (TransferGuard guard = new TransferGuard(timer, settings.transferDeadline(), queueSettings.renewEvery(),
+        try (TransferGuard guard = new TransferGuard(beats, deadlines, settings.transferDeadline(), queueSettings.renewEvery(),
                 () -> queue.renew(claim.lease()))) {
             entry = indexEntry(claim, guard);
             URI tarball = settings.repository().resolve("src/contrib/" + claim.pkg() + "_" + claim.version() + ".tar.gz");
@@ -176,13 +184,13 @@ public final class SourceVerifier implements AutoCloseable {
 
     /** The index's entry for exactly the claimed version, refetched once if the index is behind. */
     private CranIndex.Entry indexEntry(BinaryBuildQueue.SourceClaim claim, TransferGuard guard)
-            throws IOException, SourceRefusal {
+            throws IOException, SourceRefusal, IndexBehind {
         Optional<CranIndex.Entry> entry = index.lookup(claim.pkg(), false, guard);
         if (entry.isPresent() && behind(entry.get(), claim.version())) {
             entry = index.lookup(claim.pkg(), true, guard);
             if (entry.isPresent() && behind(entry.get(), claim.version())) {
-                throw new IOException("the public index lists " + claim.pkg() + " " + entry.get().version()
-                        + ", older than the locked " + claim.version() + "; retried later");
+                throw new IndexBehind("the public index lists " + claim.pkg() + " " + entry.get().version()
+                        + ", older than the locked " + claim.version());
             }
         }
         CranIndex.Entry found = entry.orElseThrow(() -> new SourceRefusal("NOT_IN_PUBLIC_INDEX",
@@ -194,13 +202,29 @@ public final class SourceVerifier implements AutoCloseable {
         return found;
     }
 
+    /** The index lags the lock: time resolves it, a retry does not. */
+    private static final class IndexBehind extends Exception {
+        IndexBehind(String message) {
+            super(RDependencies.printable(message));
+        }
+    }
+
     private static boolean behind(CranIndex.Entry entry, String version) {
         return RDependencies.compare(entry.version(), version) < 0;
     }
 
+    private static ScheduledExecutorService timer(String name) {
+        return Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, name);
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
     @Override
     public void close() {
-        timer.shutdownNow();
+        beats.shutdownNow();
+        deadlines.shutdownNow();
     }
 
     private static Map<String, String> description(String text) throws SourceRefusal {

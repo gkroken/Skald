@@ -46,6 +46,10 @@ import java.util.function.BooleanSupplier;
  * </ul>
  * {@link #failure} then turns that IOException into what happened: a {@link
  * SocketTimeoutException} for the deadline, the lease's own exception for a lost lease.
+ *
+ * <p>The heartbeat and the deadline run on DIFFERENT timers (9262bd8 N1): a renewal that
+ * blocks in the database must never delay a deadline, so the deadline timer runs nothing but
+ * deadlines.
  * {@link #close} stops the timer and clears an interrupt the watchdog may have left, so it
  * never leaks into the thread's next database call.
  */
@@ -61,11 +65,12 @@ final class TransferGuard implements AutoCloseable {
     private Reason reason = Reason.NONE;
     private boolean done;
 
-    TransferGuard(ScheduledExecutorService timer, Duration deadline, Duration beatEvery, BooleanSupplier heartbeat) {
+    TransferGuard(ScheduledExecutorService beatTimer, ScheduledExecutorService deadlineTimer, Duration deadline,
+                  Duration beatEvery, BooleanSupplier heartbeat) {
         this.heartbeat = heartbeat;
         long every = Math.max(1, beatEvery.toMillis());
-        this.beats = timer.scheduleAtFixedRate(this::beat, every, every, TimeUnit.MILLISECONDS);
-        this.deadline = timer.schedule(() -> stop(Reason.DEADLINE), Math.max(1, deadline.toMillis()),
+        this.beats = beatTimer.scheduleAtFixedRate(this::beat, every, every, TimeUnit.MILLISECONDS);
+        this.deadline = deadlineTimer.schedule(() -> stop(Reason.DEADLINE), Math.max(1, deadline.toMillis()),
                 TimeUnit.MILLISECONDS);
     }
 

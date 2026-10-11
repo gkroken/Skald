@@ -58,6 +58,12 @@ CREATE TABLE skald.binary_build (
     lease_expires_at   timestamptz,
     lease_generation   bigint      NOT NULL DEFAULT 0,
     deadline_at        timestamptz,
+    -- A deferral (9262bd8-F1): not claimed before not_before. A public index that lags the
+    -- lock (forge caches a proxy's index for up to a day) is neither a refusal nor a failed
+    -- attempt; the row waits, backing off, until deferred_since + the bound, then is refused.
+    not_before         timestamptz,
+    deferrals          integer     NOT NULL DEFAULT 0,
+    deferred_since     timestamptz,
     -- The tarball as first verified: forge's SHA-256 and the public index's MD5sum.
     source_sha256      text,
     source_md5         text,
@@ -110,7 +116,8 @@ CREATE TABLE skald.binary_build (
         (source_sha256 IS NULL OR source_sha256 ~ '^[0-9a-f]{64}$')
         AND (source_md5 IS NULL OR source_md5 ~ '^[0-9a-f]{32}$')
         AND (binary_sha256 IS NULL OR binary_sha256 ~ '^[0-9a-f]{64}$')),
-    CONSTRAINT binary_build_attempts_nonnegative CHECK (attempts >= 0)
+    CONSTRAINT binary_build_attempts_nonnegative CHECK (attempts >= 0 AND deferrals >= 0),
+    CONSTRAINT binary_build_deferral_recorded CHECK ((deferrals = 0) = (deferred_since IS NULL))
 );
 CREATE INDEX binary_build_claim_order ON skald.binary_build (created_at, id)
     WHERE state IN ('PENDING_SOURCE', 'QUEUED');

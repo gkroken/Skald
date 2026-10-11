@@ -295,8 +295,16 @@ public class MigrationV4Test {
     }
 
     @Test
-    public void attemptsAreNotNegative() {
+    public void attemptsAndDeferralsAreNotNegative() {
         refusedBy("binary_build_attempts_nonnegative", () -> insert("attempts", "-1"));
+        refusedBy("binary_build_attempts_nonnegative", () -> insert("deferrals, deferred_since", "-1, now()"));
+    }
+
+    @Test
+    public void aDeferralRecordsWhenItBegan() {
+        insert("deferrals, deferred_since, not_before", "1, now(), now()");
+        refusedBy("binary_build_deferral_recorded", () -> insert("deferrals", "1"));
+        refusedBy("binary_build_deferral_recorded", () -> insert("deferred_since", "now()"));
     }
 
     // ------------------------------------------------------------------ what never changes

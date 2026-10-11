@@ -529,14 +529,36 @@ public class SourceVerifierTest {
     }
 
     @Test
-    public void anIndexStillBehindTheLockIsAFailedAttemptNotARefusal() {
+    public void anIndexStillBehindTheLockDefersTheRowUntilItCatchesUp() {
+        // 9262bd8-F1: forge caches a proxy's index for a day; the row waits, counting no attempt.
         BinaryBuildQueue q = queue();
         publish("aaa", "0.9", "");
         UUID id = enqueue(q, "aaa", "1.0", Map.of());
-        assertEquals("FAILED", outcome(q));
-        Map<String, Object> r = row(id);
-        assertEquals("PENDING_SOURCE", r.get("state"));
-        assertTrue(String.valueOf(r.get("error_detail")).contains("older than the locked"));
+        SourceVerifier v = verifier(q);
+        for (int i = 0; i < 4; i++) {
+            assertEquals("DEFERRED", v.verifyNext("v").orElseThrow().outcome());
+            Map<String, Object> r = row(id);
+            assertEquals("PENDING_SOURCE", r.get("state"));
+            assertEquals(0, r.get("attempts"), "a deferral is not an attempt");
+            assertEquals("INDEX_BEHIND", r.get("error_code"));
+            assertTrue(String.valueOf(r.get("error_detail")).contains("older than the locked"));
+            assertTrue(v.verifyNext("v").isEmpty(), "not claimable before its not_before");
+            jdbc.update("UPDATE skald.binary_build SET not_before = now() - interval '1 second' WHERE id = ?", id);
+        }
+        publish("aaa", "1.0", "");
+        assertEquals("QUEUED", v.verifyNext("v").orElseThrow().outcome(), "the index caught up");
+    }
+
+    @Test
+    public void anIndexBehindPastTheBoundIsRefused() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "0.9", "");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        assertEquals("DEFERRED", outcome(q));
+        jdbc.update("UPDATE skald.binary_build SET not_before = NULL, deferred_since = now() - interval '49 hours'"
+            + " WHERE id = ?", id);
+        assertEquals("REFUSED:INDEX_BEHIND", outcome(q));
+        assertEquals("REFUSED", row(id).get("state"));
     }
 
     @Test

@@ -196,6 +196,7 @@ public final class BinaryBuildQueue {
         List<Map<String, Object>> rows = jdbc.queryForList("UPDATE skald.binary_build SET"
                 + " state = 'VERIFYING'," + leaseSet() + ", attempts = attempts + 1"
                 + " WHERE id = (SELECT id FROM skald.binary_build WHERE state = 'PENDING_SOURCE'"
+                + "   AND (not_before IS NULL OR not_before <= now())"
                 + "   ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED)"
                 + " RETURNING id, platform_key, package, version, requested_by_build, lease_generation",
                 owner, settings.lease().toSeconds(), settings.deadline().toSeconds());
@@ -421,6 +422,52 @@ public final class BinaryBuildQueue {
                 + " provenance = ?::jsonb," + release() + FENCE, digest, provenance.get(0),
                 lease.rowId(), lease.generation(), lease.owner());
         requireOne(changed, lease, what);
+    }
+
+    /** What {@link #defer} did. */
+    public enum Deferred {
+        /** Back to PENDING_SOURCE, not claimable before its not_before; no attempt counted. */
+        DEFERRED,
+        /** The row had waited past the bound since its first deferral: REFUSED with the code. */
+        REFUSED
+    }
+
+    /**
+     * VERIFYING -> PENDING_SOURCE, not claimable for a while, WITHOUT counting the attempt
+     * (9262bd8-F1): for a condition that time resolves and a retry cannot, such as a public
+     * index that lags the lock. The wait doubles from {@code first} up to {@code max} per
+     * deferral; once {@code bound} has passed since the row's first deferral it is REFUSED
+     * with {@code code} instead, so nothing waits forever.
+     */
+    public Deferred defer(BinaryLease lease, java.time.Duration first, java.time.Duration max,
+                          java.time.Duration bound, String code, String detail) {
+        if (code == null || code.isBlank()) {
+            throw new IllegalArgumentException("a deferral names its code");
+        }
+        return tx.execute(status -> {
+            // The state is checked once, here, with the row locked for the rest of the transaction.
+            heldFor(lease, "'VERIFYING'", "a deferral");
+            boolean over = Boolean.TRUE.equals(jdbc.queryForObject("SELECT deferred_since IS NOT NULL"
+                    + " AND deferred_since <= now() - make_interval(secs => ?) FROM skald.binary_build WHERE id = ?",
+                    Boolean.class, bound.toSeconds(), lease.rowId()));
+            if (over) {
+                int changed = jdbc.update("UPDATE skald.binary_build SET state = 'REFUSED', refusal_code = ?,"
+                        + " refusal_detail = ?," + release() + FENCE,
+                        code, detail, lease.rowId(), lease.generation(), lease.owner());
+                requireOne(changed, lease, "REFUSED");
+                audit(lease.owner(), "binary.refused", lease.rowId(), Map.of("code", code, "after", "deferrals"));
+                return Deferred.REFUSED;
+            }
+            int changed = jdbc.update("UPDATE skald.binary_build SET state = 'PENDING_SOURCE',"
+                    + " attempts = attempts - 1, deferrals = deferrals + 1,"
+                    + " deferred_since = COALESCE(deferred_since, now()),"
+                    + " not_before = now() + make_interval(secs => LEAST(? * power(2, LEAST(deferrals, 30)), ?)),"
+                    + " error_code = ?, error_detail = ?, deadline_at = NULL," + idle() + FENCE, first.toSeconds(), max.toSeconds(), code, detail,
+                    lease.rowId(), lease.generation(), lease.owner());
+            requireOne(changed, lease, "a deferral");
+            audit(lease.owner(), "binary.deferred", lease.rowId(), Map.of("code", code));
+            return Deferred.DEFERRED;
+        });
     }
 
     /**
