@@ -76,6 +76,9 @@ public class BinaryUploaderTest {
     private static final Map<String, Integer> putStatus = new ConcurrentHashMap<>();
     private static final Map<String, Map<String, String>> putHeaders = new ConcurrentHashMap<>();
     private static volatile String registration;
+    /** Paths whose response stalls after its headers and a few bytes (ae287bf-F1). */
+    private static final java.util.Set<String> stalled = ConcurrentHashMap.newKeySet();
+    private static final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
 
     @BeforeAll
     public static void start() throws IOException {
@@ -88,6 +91,19 @@ public class BinaryUploaderTest {
         server.createContext("/", exchange -> {
             String path = exchange.getRequestURI().getPath();
             String auth = exchange.getRequestHeaders().getFirst("Authorization");
+            if (stalled.contains(exchange.getRequestMethod() + " " + path)) {
+                exchange.getRequestBody().readAllBytes();
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().write("{\"k".getBytes(StandardCharsets.UTF_8));
+                exchange.getResponseBody().flush();
+                try {
+                    release.await();
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+                exchange.close();
+                return;
+            }
             byte[] body = new byte[0];
             int status;
             if (path.equals("/api/v1/cran/platforms/" + KEY)) {
@@ -118,12 +134,14 @@ public class BinaryUploaderTest {
             }
             exchange.close();
         });
+        server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
         server.start();
         forge = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/");
     }
 
     @AfterAll
     public static void stop() {
+        release.countDown();
         server.stop(0);
         POSTGRES.stop();
     }
@@ -134,6 +152,7 @@ public class BinaryUploaderTest {
         stored.clear();
         putStatus.clear();
         putHeaders.clear();
+        stalled.clear();
         registration = "{\"key\":\"" + KEY + "\",\"rPlatform\":\"x86_64-pc-linux-gnu\",\"builderImage\":\"b\","
             + "\"builderDigest\":\"" + IMAGE_ID + "\"}";
     }
@@ -297,6 +316,59 @@ public class BinaryUploaderTest {
         assertEquals(BinaryUploader.Uploaded.FAILED, r.outcome());
         assertEquals("REGISTRATION", row(c.rowId()).get("error_code"));
         assertTrue(putHeaders.isEmpty());
+    }
+
+    // ------------------------------------------------------------------ stalls (ae287bf-F1)
+
+    private static ForgeSettings quick() {
+        return new ForgeSettings(forge, "cran-linux", TOKEN, Duration.ofSeconds(0), Duration.ofSeconds(2),
+            Duration.ofSeconds(3));
+    }
+
+    private static BinaryUploader.Result quickUpload(BinaryBuildQueue q, BuildClaim c, byte[] bin) throws Exception {
+        BinaryArchive.Checked checked = BinaryArchive.check(bin, c.pkg(), c.version(), "4.6.1", "x86_64-pc-linux-gnu",
+            BinaryArchive.Limits.DEFAULTS);
+        return new BinaryUploader(q, new BinaryGate(new ForgePlatforms(quick())), quick(), BinaryArchive.Limits.DEFAULTS)
+            .upload(c, bin, checked, List.of(), base(), "reg:5000/skald/base/r@sha256:" + "e".repeat(64),
+                Optional.of(IMAGE_ID));
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 30, threadMode = org.junit.jupiter.api.Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aPutWhoseAnswerStallsIsAFailedAttemptAtTheDeadline() throws Exception {
+        BinaryBuildQueue q = queue();
+        BuildClaim c = running(q);
+        stalled.add("PUT " + TREE + "aaa_1.0.tar.gz");
+        long start = System.nanoTime();
+        BinaryUploader.Result r = quickUpload(q, c, binary("aaa", "1.0", null));
+        assertTrue((System.nanoTime() - start) / 1_000_000 < 15_000, "returned after the deadline, not the stall");
+        assertEquals(BinaryUploader.Uploaded.FAILED, r.outcome(), r.detail());
+        assertEquals("QUEUED", row(c.rowId()).get("state"));
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 30, threadMode = org.junit.jupiter.api.Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aStalledExistingBinaryAfterA409IsAFailedAttemptAtTheDeadline() throws Exception {
+        BinaryBuildQueue q = queue();
+        BuildClaim c = running(q);
+        stored.put(TREE + "aaa_1.0.tar.gz", binary("aaa", "1.0", "other"));
+        stalled.add("GET " + TREE + "aaa_1.0.tar.gz");
+        long start = System.nanoTime();
+        BinaryUploader.Result r = quickUpload(q, c, binary("aaa", "1.0", null));
+        assertTrue((System.nanoTime() - start) / 1_000_000 < 15_000);
+        assertEquals(BinaryUploader.Uploaded.FAILED, r.outcome(), r.detail());
+        assertEquals("UPLOAD_409", row(c.rowId()).get("error_code"));
+    }
+
+    @Test
+    @org.junit.jupiter.api.Timeout(value = 30, threadMode = org.junit.jupiter.api.Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aStalledRegistrationIsUnreadableAtTheDeadline() {
+        stalled.add("GET /api/v1/cran/platforms/" + KEY);
+        long start = System.nanoTime();
+        BinaryGate.Decision d = new BinaryGate(new ForgePlatforms(quick())).decide(base(), Optional.of(IMAGE_ID));
+        assertTrue((System.nanoTime() - start) / 1_000_000 < 15_000);
+        assertFalse(d.binaries(), d.reason());
+        assertTrue(d.reason().contains("could not be read"), d.reason());
     }
 
     @Test

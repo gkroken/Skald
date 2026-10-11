@@ -2446,6 +2446,11 @@ below are marked passed by this planning document.
       X-Forge-Linking-To; 201 UPLOADED, 409 the existing binary's digest to the queue (Skald's
       own earlier upload or another's), 400 REFUSED with forge's reason, 403/5xx/transport a
       failed attempt. No redirects anywhere; the token in no record, audit or message.
+      Fixed in review (ae287bf-F1): every forge response body (the PUT's answer, the existing
+      binary after a 409, the registration) is read under a TransferGuard deadline, like the
+      hand-in's; an upload has its own deadline (`forge-upload-deadline-seconds`, 600 s).
+      **For 2e (ae287bf N2):** the claim's lease must be renewed by the binary loop across
+      the whole attempt -- hand-in, sandbox and upload -- since only the sandbox phase polls.
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

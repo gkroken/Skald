@@ -42,13 +42,22 @@ import java.util.regex.Pattern;
  * HTTP client sends it). Unset URL: shared binaries are off.
  */
 public record ForgeSettings(URI url, String binaryRepository, String token, Duration registrationTtl,
-                            Duration timeout) {
+                            Duration timeout, Duration uploadDeadline) {
 
     // Before DEFAULTS: static fields initialise in order, and DEFAULTS's constructor uses it.
     private static final Pattern REPOSITORY = Pattern.compile("[a-z0-9][a-z0-9._-]{0,63}");
 
     public static final ForgeSettings DEFAULTS = new ForgeSettings(null, "cran-linux", null,
-            Duration.ofSeconds(60), Duration.ofSeconds(30));
+            Duration.ofSeconds(60), Duration.ofSeconds(30), Duration.ofMinutes(10));
+
+    /**
+     * Settings with the default upload deadline. {@code timeout} bounds connecting and every
+     * small exchange (a registration); {@code uploadDeadline} bounds an upload and the 409
+     * path's read of the existing binary, whose time grows with the binary (ae287bf N1).
+     */
+    public ForgeSettings(URI url, String binaryRepository, String token, Duration registrationTtl, Duration timeout) {
+        this(url, binaryRepository, token, registrationTtl, timeout, Duration.ofMinutes(10));
+    }
 
     public ForgeSettings {
         if (url != null) {
@@ -60,7 +69,8 @@ public record ForgeSettings(URI url, String binaryRepository, String token, Dura
         if (binaryRepository == null || !REPOSITORY.matcher(binaryRepository).matches()) {
             throw new IllegalArgumentException("forge-binary-repository is not a repository name: " + binaryRepository);
         }
-        if (registrationTtl.isNegative() || timeout.isNegative() || timeout.isZero()) {
+        if (registrationTtl.isNegative() || timeout.isNegative() || timeout.isZero() || uploadDeadline.isNegative()
+                || uploadDeadline.isZero()) {
             throw new IllegalArgumentException("forge settings must be positive");
         }
     }
@@ -76,6 +86,7 @@ public record ForgeSettings(URI url, String binaryRepository, String token, Dura
         String token = DEFAULTS.token;
         Duration ttl = DEFAULTS.registrationTtl;
         Duration timeout = DEFAULTS.timeout;
+        Duration upload = DEFAULTS.uploadDeadline;
         for (Map.Entry<String, ?> e : overrides.entrySet()) {
             String value = String.valueOf(e.getValue()).trim();
             switch (normal(e.getKey())) {
@@ -84,12 +95,14 @@ public record ForgeSettings(URI url, String binaryRepository, String token, Dura
                 case "forge_token" -> token = value.isEmpty() ? null : value;
                 case "forge_registration_ttl_seconds" -> ttl = Duration.ofSeconds(integer(e.getKey(), value));
                 case "forge_timeout_seconds" -> timeout = Duration.ofSeconds(integer(e.getKey(), value));
+                case "forge_upload_deadline_seconds" -> upload = Duration.ofSeconds(integer(e.getKey(), value));
                 default -> throw new IllegalArgumentException("unknown forge setting '" + e.getKey()
                         + "'; known settings are " + new TreeSet<>(List.of("forge_url", "forge_binary_repository",
-                        "forge_token", "forge_registration_ttl_seconds", "forge_timeout_seconds")));
+                        "forge_token", "forge_registration_ttl_seconds", "forge_timeout_seconds",
+                        "forge_upload_deadline_seconds")));
             }
         }
-        return new ForgeSettings(url, repo, token, ttl, timeout);
+        return new ForgeSettings(url, repo, token, ttl, timeout, upload);
     }
 
     private static long integer(String key, String value) {
@@ -107,6 +120,7 @@ public record ForgeSettings(URI url, String binaryRepository, String token, Dura
     @Override
     public String toString() {
         return "ForgeSettings[url=" + url + ", binaryRepository=" + binaryRepository + ", token="
-                + (token == null ? "unset" : "****") + ", registrationTtl=" + registrationTtl + ", timeout=" + timeout + "]";
+                + (token == null ? "unset" : "****") + ", registrationTtl=" + registrationTtl + ", timeout=" + timeout
+                + ", uploadDeadline=" + uploadDeadline + "]";
     }
 }

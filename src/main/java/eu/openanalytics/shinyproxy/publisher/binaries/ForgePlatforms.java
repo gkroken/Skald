@@ -61,6 +61,7 @@ public final class ForgePlatforms {
     private final HttpClient http;
     private final LongSupplier nanoTime;
     private final Map<String, Cached> cache = new HashMap<>();
+    private final ForgeTransfers transfers = new ForgeTransfers();
 
     public ForgePlatforms(ForgeSettings settings) {
         this(settings, System::nanoTime);
@@ -116,10 +117,9 @@ public final class ForgePlatforms {
             Thread.currentThread().interrupt();
             throw new java.io.InterruptedIOException("interrupted reading " + uri);
         }
-        byte[] body;
-        try (InputStream in = response.body()) {
-            body = in.readNBytes(MAX_BYTES + 1);
-        }
+        // Within forge-timeout, from outside the read (ae287bf-F1): the gate runs before every
+        // R build and upload, and a stalled registration must not hold them.
+        byte[] body = transfers.read(response.body(), settings.timeout(), in -> in.readNBytes(MAX_BYTES + 1));
         int status = response.statusCode();
         if (status == 404) {
             return Optional.empty();

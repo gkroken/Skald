@@ -72,12 +72,15 @@ public final class BinaryUploader {
 
     static final String PROVENANCE_SCHEMA = "skald.binary-provenance/v1";
     private static final int MAX_LINKING_TO = 4096;
+    /** forge's answer to a PUT is a line of text; more than this is not read. */
+    private static final int MAX_ANSWER = 64 * 1024;
 
     private final BinaryBuildQueue queue;
     private final BinaryGate gate;
     private final ForgeSettings forge;
     private final BinaryArchive.Limits limits;
     private final HttpClient http;
+    private final ForgeTransfers transfers = new ForgeTransfers();
 
     public BinaryUploader(BinaryBuildQueue queue, BinaryGate gate, ForgeSettings forge, BinaryArchive.Limits limits) {
         if (forge.url() == null) {
@@ -117,23 +120,28 @@ public final class BinaryUploader {
         queue.intendUpload(claim.lease(), checked.sha256(), provenance(claim, checked, handedIn, base, baseReference,
                 imageId.orElseThrow(), linkingTo));
         URI uri = ForgeTree.binary(forge, claim.platformKey(), claim.pkg(), claim.version());
-        HttpRequest put = HttpRequest.newBuilder(uri).timeout(forge.timeout())
+        // The upload's own deadline (ae287bf N1): sending the binary and forge's source check
+        // count against the request timeout, and both grow with the binary.
+        HttpRequest put = HttpRequest.newBuilder(uri).timeout(forge.uploadDeadline())
                 .PUT(HttpRequest.BodyPublishers.ofByteArray(binary))
                 .header("Authorization", "Bearer " + forge.token())
                 .header("Content-Type", "application/gzip")
                 .header("X-Forge-Builder-Digest", imageId.orElseThrow())
                 .header("X-Forge-Linking-To", linkingTo).build();
-        HttpResponse<String> response;
+        int status;
+        String said;
         try {
-            response = http.send(put, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<InputStream> response = http.send(put, HttpResponse.BodyHandlers.ofInputStream());
+            status = response.statusCode();
+            // forge's answer, bounded in bytes and time (ae287bf-F1, N4).
+            said = RDependencies.printable(new String(transfers.read(response.body(), forge.timeout(),
+                    in -> ForgeTransfers.bounded(in, MAX_ANSWER)), java.nio.charset.StandardCharsets.UTF_8).strip());
         } catch (IOException e) {
             return failed(claim, "UPLOAD", e.getClass().getSimpleName() + ": " + e.getMessage());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return failed(claim, "UPLOAD", "interrupted");
         }
-        int status = response.statusCode();
-        String said = RDependencies.printable(response.body() == null ? "" : response.body().strip());
         switch (status) {
             case 201 -> {
                 queue.uploaded(claim.lease(), checked.sha256());
@@ -173,11 +181,18 @@ public final class BinaryUploader {
                 .header("Authorization", "Bearer " + forge.token()).build();
         try {
             HttpResponse<InputStream> r = http.send(get, HttpResponse.BodyHandlers.ofInputStream());
-            try (InputStream in = r.body()) {
-                if (r.statusCode() != 200) {
-                    throw new IOException("forge answered " + r.statusCode());
+            if (r.statusCode() != 200) {
+                r.body().close();
+                throw new IOException("forge answered " + r.statusCode());
+            }
+            // The existing binary, up to the archive limit, within the upload deadline (ae287bf-F1).
+            return transfers.read(r.body(), forge.uploadDeadline(), in -> {
+                MessageDigest sha;
+                try {
+                    sha = MessageDigest.getInstance("SHA-256");
+                } catch (NoSuchAlgorithmException e) {
+                    throw new IllegalStateException(e);
                 }
-                MessageDigest sha = MessageDigest.getInstance("SHA-256");
                 byte[] buf = new byte[64 * 1024];
                 long total = 0;
                 int n;
@@ -189,12 +204,10 @@ public final class BinaryUploader {
                     sha.update(buf, 0, n);
                 }
                 return HexFormat.of().formatHex(sha.digest());
-            }
+            });
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new java.io.InterruptedIOException("interrupted");
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
         }
     }
 
