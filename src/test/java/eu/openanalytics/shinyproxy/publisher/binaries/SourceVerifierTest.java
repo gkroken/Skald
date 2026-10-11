@@ -29,6 +29,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -69,6 +70,8 @@ public class SourceVerifierTest {
     private static final Map<String, byte[]> served = new ConcurrentHashMap<>();
     private static final Map<String, Integer> statusOf = new ConcurrentHashMap<>();
     private static final AtomicInteger indexFetches = new AtomicInteger();
+    private static final int STALL = -1;
+    private static final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
 
     @BeforeAll
     public static void beforeAll() throws IOException {
@@ -87,6 +90,19 @@ public class SourceVerifierTest {
             }
             byte[] body = served.get(file);
             int status = statusOf.getOrDefault(file, body == null ? 404 : 200);
+            if (status == STALL) {
+                // Headers and a few bytes, then nothing: a stall after the response began.
+                exchange.sendResponseHeaders(200, 0);
+                exchange.getResponseBody().write(body, 0, Math.min(20, body.length));
+                exchange.getResponseBody().flush();
+                try {
+                    release.await();
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+                exchange.close();
+                return;
+            }
             if (status != 200) {
                 exchange.sendResponseHeaders(status, -1);
             } else {
@@ -95,12 +111,14 @@ public class SourceVerifierTest {
             }
             exchange.close();
         });
+        server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool());
         server.start();
         repository = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/repository/cran-proxy/");
     }
 
     @AfterAll
     public static void afterAll() {
+        release.countDown();
         server.stop(0);
         POSTGRES.stop();
     }
@@ -121,6 +139,11 @@ public class SourceVerifierTest {
     private static SourceVerifier verifier(BinaryBuildQueue q) {
         return verifier(q, new SourceSettings(repository, 1 << 20, 1 << 20, 1 << 24, Duration.ofSeconds(5),
             Duration.ofMinutes(1), Duration.ofMinutes(5)), BinaryQueueSettings.DEFAULTS);
+    }
+
+    private static SourceSettings deadline(Duration deadline) {
+        return new SourceSettings(repository, 1 << 20, 1 << 20, 1 << 24, Duration.ofSeconds(5), deadline,
+            Duration.ofMinutes(5));
     }
 
     private static SourceVerifier verifier(BinaryBuildQueue q, SourceSettings s, BinaryQueueSettings qs) {
@@ -397,6 +420,123 @@ public class SourceVerifierTest {
         Map<String, Object> r = row(id);
         assertEquals("VERIFYING", r.get("state"), "left to the reaper");
         assertNull(r.get("source_sha256"));
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aTarballThatStallsAfterItsHeadersIsStoppedAtTheDeadline() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.0", "");
+        statusOf.put("src/contrib/aaa_1.0.tar.gz", STALL);
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        long start = System.nanoTime();
+        assertEquals("FAILED", verifier(q, deadline(Duration.ofSeconds(2)), BinaryQueueSettings.DEFAULTS)
+            .verifyNext("v").orElseThrow().outcome());
+        long ms = (System.nanoTime() - start) / 1_000_000;
+        assertTrue(ms < 10_000, "returned " + ms + " ms after a 2 s deadline");
+        Map<String, Object> r = row(id);
+        assertEquals("PENDING_SOURCE", r.get("state"));
+        assertTrue(String.valueOf(r.get("error_detail")).contains("deadline"), String.valueOf(r.get("error_detail")));
+        assertTrue(!Thread.currentThread().isInterrupted());
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void anIndexThatStallsAfterItsHeadersIsStoppedAtTheDeadline() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.0", "");
+        statusOf.put("src/contrib/PACKAGES", STALL);
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        long start = System.nanoTime();
+        assertEquals("FAILED", verifier(q, deadline(Duration.ofSeconds(2)), BinaryQueueSettings.DEFAULTS)
+            .verifyNext("v").orElseThrow().outcome());
+        assertTrue((System.nanoTime() - start) / 1_000_000 < 10_000);
+        assertEquals("PENDING_SOURCE", row(id).get("state"));
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void theLeaseIsRenewedDuringAStallAndALostLeaseStopsIt() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.0", "");
+        statusOf.put("src/contrib/aaa_1.0.tar.gz", STALL);
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        BinaryQueueSettings fast = new BinaryQueueSettings(Duration.ofSeconds(60), Duration.ofMillis(200),
+            Duration.ofMinutes(60), 1, 2);
+        java.util.concurrent.ScheduledExecutorService side = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        java.util.List<java.sql.Timestamp> seen = new java.util.concurrent.CopyOnWriteArrayList<>();
+        try {
+            side.scheduleAtFixedRate(() -> seen.add(jdbc.queryForObject("SELECT lease_expires_at FROM"
+                + " skald.binary_build WHERE id = ?", java.sql.Timestamp.class, id)), 300, 300,
+                java.util.concurrent.TimeUnit.MILLISECONDS);
+            side.schedule(() -> jdbc.update("UPDATE skald.binary_build SET lease_owner = 'someone-else' WHERE id = ?",
+                id), 2000, java.util.concurrent.TimeUnit.MILLISECONDS);
+            long start = System.nanoTime();
+            assertEquals("FENCED", verifier(q, deadline(Duration.ofMinutes(5)), fast).verifyNext("v").orElseThrow()
+                .outcome());
+            assertTrue((System.nanoTime() - start) / 1_000_000 < 10_000, "a lost lease stops the stalled read");
+        } finally {
+            side.shutdownNow();
+        }
+        assertTrue(new HashSet<>(seen.stream().filter(java.util.Objects::nonNull).toList()).size() >= 3,
+            "the lease was renewed while the read was blocked: " + seen);
+        assertNull(row(id).get("source_sha256"));
+    }
+
+    /** A fetcher whose {@code stalled} file blocks until closed, ignoring interrupts. */
+    private static SourceFetcher stallingOn(String stalled) {
+        HttpSourceFetcher http = new HttpSourceFetcher(Duration.ofSeconds(5));
+        return uri -> uri.getPath().endsWith(stalled) ? new Uninterruptible() : http.open(uri);
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aTarballReadThatIgnoresInterruptsIsClosedAtTheDeadline() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.0", "");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        SourceVerifier v = new SourceVerifier(q, stallingOn("aaa_1.0.tar.gz"), deadline(Duration.ofSeconds(2)),
+            BinaryQueueSettings.DEFAULTS);
+        assertEquals("FAILED", v.verifyNext("v").orElseThrow().outcome());
+        assertEquals("PENDING_SOURCE", row(id).get("state"));
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void anIndexReadThatIgnoresInterruptsIsClosedAtTheDeadline() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.0", "");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        SourceVerifier v = new SourceVerifier(q, stallingOn("PACKAGES"), deadline(Duration.ofSeconds(2)),
+            BinaryQueueSettings.DEFAULTS);
+        assertEquals("FAILED", v.verifyNext("v").orElseThrow().outcome());
+        assertEquals("PENDING_SOURCE", row(id).get("state"));
+    }
+
+    @Test
+    public void anIndexBehindTheLockIsFetchedAgain() {
+        BinaryBuildQueue q = queue();
+        publish("zzz", "1.0", "");
+        publish("aaa", "0.9", "");
+        enqueue(q, "zzz", "1.0", Map.of());
+        SourceVerifier v = verifier(q);
+        assertEquals("QUEUED", v.verifyNext("v").orElseThrow().outcome(), "primes the cached index with aaa 0.9");
+        publish("aaa", "1.0", "");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        assertEquals("QUEUED", v.verifyNext("v").orElseThrow().outcome(), "refetched despite the TTL");
+        assertEquals(2, indexFetches.get());
+        assertEquals("QUEUED", row(id).get("state"));
+    }
+
+    @Test
+    public void anIndexStillBehindTheLockIsAFailedAttemptNotARefusal() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "0.9", "");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        assertEquals("FAILED", outcome(q));
+        Map<String, Object> r = row(id);
+        assertEquals("PENDING_SOURCE", r.get("state"));
+        assertTrue(String.valueOf(r.get("error_detail")).contains("older than the locked"));
     }
 
     @Test

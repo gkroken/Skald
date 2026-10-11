@@ -68,23 +68,37 @@ final class CranIndex {
         this.nanoTime = nanoTime;
     }
 
-    /** The package's entry, if the index lists it exactly once. */
-    synchronized Optional<Entry> lookup(String pkg) throws IOException, SourceRefusal {
-        long now = nanoTime.getAsLong();
-        if (entries == null || now - fetchedAt >= ttlNanos) {
-            entries = fetch();
-            fetchedAt = now;
+    /**
+     * The package's entry, if the index lists it exactly once; the index is fetched when it is
+     * older than the TTL or {@code fresh} asks for it. The fetch runs OUTSIDE the monitor and
+     * under the caller's guard, so one stalled fetch never holds up another verification
+     * (e149183-F1); two stale callers may both fetch, and the later result stands.
+     */
+    Optional<Entry> lookup(String pkg, boolean fresh, TransferGuard guard) throws IOException, SourceRefusal {
+        Map<String, Entry> current;
+        synchronized (this) {
+            current = entries != null && !fresh && nanoTime.getAsLong() - fetchedAt < ttlNanos ? entries : null;
         }
-        return Optional.ofNullable(entries.get(pkg));
+        if (current == null) {
+            long at = nanoTime.getAsLong();
+            current = fetch(guard);
+            synchronized (this) {
+                entries = current;
+                fetchedAt = at;
+            }
+        }
+        return Optional.ofNullable(current.get(pkg));
     }
 
-    private Map<String, Entry> fetch() throws IOException, SourceRefusal {
+    private Map<String, Entry> fetch(TransferGuard guard) throws IOException, SourceRefusal {
         byte[] body;
-        try (InputStream in = fetcher.open(uri)) {
+        try (InputStream in = guard.watch(fetcher.open(uri))) {
             body = in.readNBytes((int) Math.min(Integer.MAX_VALUE - 8, maxBytes + 1));
         } catch (SourceFetcher.NotFound ex) {
             // Not transient: the configured repository has no source index at all.
             throw new SourceRefusal("NO_PUBLIC_INDEX", "the repository serves no " + uri);
+        } catch (IOException ex) {
+            throw guard.failure(ex);
         }
         if (body.length > maxBytes) {
             throw new IOException("the index " + uri + " is larger than " + maxBytes + " bytes");

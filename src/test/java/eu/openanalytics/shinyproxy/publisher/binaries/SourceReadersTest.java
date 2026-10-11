@@ -25,6 +25,7 @@ package eu.openanalytics.shinyproxy.publisher.binaries;
 import com.sun.net.httpserver.HttpServer;
 import eu.openanalytics.shinyproxy.publisher.build.BuildsConfig;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -54,8 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 public class SourceReadersTest {
 
-    private static final SourceTarball.Limits ROOMY = new SourceTarball.Limits(1L << 30, 1L << 30,
-        System.nanoTime() + Duration.ofMinutes(5).toNanos(), Long.MAX_VALUE, () -> { });
+    private static final SourceTarball.Limits ROOMY = new SourceTarball.Limits(1L << 30, 1L << 30);
 
     private static SourceTarball.Read read(byte[] tgz, String pkg) throws Exception {
         return SourceTarball.read(new ByteArrayInputStream(tgz), pkg, ROOMY);
@@ -244,29 +244,125 @@ public class SourceReadersTest {
     public void sizesAreBounded() {
         byte[] tgz = TarBuilder.source("foo", desc());
         SourceRefusal raw = assertThrows(SourceRefusal.class, () -> SourceTarball.read(new ByteArrayInputStream(tgz),
-            "foo", new SourceTarball.Limits(tgz.length - 1, 1L << 30, System.nanoTime() + 60_000_000_000L,
-                Long.MAX_VALUE, () -> { })));
+            "foo", new SourceTarball.Limits(tgz.length - 1, 1L << 30)));
         assertEquals("TOO_LARGE", raw.code());
         byte[] bomb = new TarBuilder().file("foo/DESCRIPTION", desc()).file("foo/zeros", "\0".repeat(1 << 20)).tgz();
         assertTrue(bomb.length < 10_000);
         SourceRefusal expanded = assertThrows(SourceRefusal.class, () -> SourceTarball.read(new ByteArrayInputStream(bomb),
-            "foo", new SourceTarball.Limits(1L << 30, 512 * 1024, System.nanoTime() + 60_000_000_000L,
-                Long.MAX_VALUE, () -> { })));
+            "foo", new SourceTarball.Limits(1L << 30, 512 * 1024)));
         assertEquals("TOO_LARGE", expanded.code());
     }
 
     @Test
-    public void theTransferHasAWallDeadlineAndBeatsItsHeartbeat() {
-        byte[] tgz = TarBuilder.source("foo", desc());
-        assertThrows(java.net.SocketTimeoutException.class, () -> SourceTarball.read(new ByteArrayInputStream(tgz),
-            "foo", new SourceTarball.Limits(1L << 30, 1L << 30, System.nanoTime() - 1, Long.MAX_VALUE, () -> { })));
-        AtomicInteger beats = new AtomicInteger();
-        assertThrows(IllegalStateException.class, () -> SourceTarball.read(new ByteArrayInputStream(tgz), "foo",
-            new SourceTarball.Limits(1L << 30, 1L << 30, System.nanoTime() + 60_000_000_000L, 0, () -> {
+    public void aPaxRecordThatChangesFramingIsRefused() {
+        refused("TARBALL_UNREADABLE", new TarBuilder().file("foo/DESCRIPTION", desc())
+            .entry("PaxHeader", 'x', TarBuilder.pax("size", "0")).file("foo/x", "abc").tgz(), "foo");
+        refused("TARBALL_UNREADABLE", new TarBuilder().file("foo/DESCRIPTION", desc())
+            .entry("PaxHeader", 'x', TarBuilder.pax("GNU.sparse.map", "0,1")).file("foo/x", "abc").tgz(), "foo");
+        refused("TARBALL_UNREADABLE", new TarBuilder().globalPax("size", "0").file("foo/DESCRIPTION", desc()).tgz(),
+            "foo");
+    }
+
+    @Test
+    public void anOldGnuHeadersTimesAreNotReadAsAPrefix() throws Exception {
+        // Old GNU: magic "ustar  \0", and bytes 345+ hold atime/ctime, not a name prefix.
+        byte[] h = TarBuilder.header("foo/DESCRIPTION", '0', desc().length());
+        byte[] magic = "ustar  \0".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(magic, 0, h, 257, magic.length);
+        byte[] times = "14672035401".getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(times, 0, h, 345, times.length);
+        TarBuilder.checksum(h);
+        byte[] content = Arrays.copyOf(desc().getBytes(StandardCharsets.UTF_8), 512);
+        assertEquals(desc(), read(TarBuilder.gzip(new TarBuilder().raw(h).raw(content).tar()), "foo").description());
+    }
+
+    // ------------------------------------------------------------------ the watchdog
+
+    private static java.util.concurrent.ScheduledExecutorService timer() {
+        return java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aReadThatBlocksIsStoppedAtTheDeadlineWhileTheHeartbeatBeats() throws Exception {
+        var timer = timer();
+        try (java.io.PipedOutputStream never = new java.io.PipedOutputStream();
+             InputStream blocked = new java.io.PipedInputStream(never)) {
+            AtomicInteger beats = new AtomicInteger();
+            long start = System.nanoTime();
+            IOException failure;
+            try (TransferGuard guard = new TransferGuard(timer, Duration.ofMillis(1500), Duration.ofMillis(100), () -> {
                 beats.incrementAndGet();
-                throw new IllegalStateException("stop");
-            })));
-        assertEquals(1, beats.get(), "a heartbeat that throws stops the read");
+                return true;
+            })) {
+                InputStream in = guard.watch(blocked);
+                IOException ex = assertThrows(IOException.class, in::read);
+                failure = guard.failure(ex);
+            }
+            long ms = (System.nanoTime() - start) / 1_000_000;
+            assertTrue(failure instanceof java.net.SocketTimeoutException, failure.toString());
+            assertTrue(ms >= 1400 && ms < 5000, "stopped at the deadline: " + ms + " ms");
+            assertTrue(beats.get() >= 8, "the heartbeat beat during the stall: " + beats.get());
+            assertFalse(Thread.currentThread().isInterrupted(), "no interrupt leaks past close()");
+        } finally {
+            timer.shutdownNow();
+        }
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aLostLeaseStopsABlockedRead() throws Exception {
+        var timer = timer();
+        try (java.io.PipedOutputStream never = new java.io.PipedOutputStream();
+             InputStream blocked = new java.io.PipedInputStream(never)) {
+            long start = System.nanoTime();
+            IOException failure;
+            try (TransferGuard guard = new TransferGuard(timer, Duration.ofMinutes(5), Duration.ofMillis(200),
+                    () -> false)) {
+                InputStream in = guard.watch(blocked);
+                failure = guard.failure(assertThrows(IOException.class, in::read));
+                assertEquals(TransferGuard.Reason.LEASE_LOST, guard.reason());
+            }
+            assertTrue(failure instanceof TransferGuard.LeaseLost, failure.toString());
+            assertTrue((System.nanoTime() - start) / 1_000_000 < 5000);
+            assertFalse(Thread.currentThread().isInterrupted());
+        } finally {
+            timer.shutdownNow();
+        }
+    }
+
+    @Test
+    @Timeout(value = 30, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aReadThatIgnoresInterruptsIsStoppedByClosingIt() throws Exception {
+        var timer = timer();
+        try {
+            long start = System.nanoTime();
+            IOException failure;
+            try (TransferGuard guard = new TransferGuard(timer, Duration.ofMillis(1000), Duration.ofMillis(100),
+                    () -> true)) {
+                InputStream in = guard.watch(new Uninterruptible());
+                failure = guard.failure(assertThrows(IOException.class, in::read));
+            }
+            assertTrue(failure instanceof java.net.SocketTimeoutException, failure.toString());
+            assertTrue((System.nanoTime() - start) / 1_000_000 < 5000);
+            assertFalse(Thread.currentThread().isInterrupted());
+        } finally {
+            timer.shutdownNow();
+        }
+    }
+
+    @Test
+    public void aTransferThatEndsInTimeIsLeftAlone() throws Exception {
+        var timer = timer();
+        try (TransferGuard guard = new TransferGuard(timer, Duration.ofSeconds(30), Duration.ofSeconds(10), () -> true)) {
+            InputStream in = guard.watch(new ByteArrayInputStream("abc".getBytes(StandardCharsets.US_ASCII)));
+            assertEquals("abc", new String(in.readAllBytes(), StandardCharsets.US_ASCII));
+            assertEquals(TransferGuard.Reason.NONE, guard.reason());
+            IOException own = new IOException("own");
+            assertTrue(guard.failure(own) == own, "an unrelated failure is itself");
+        } finally {
+            timer.shutdownNow();
+        }
     }
 
     // ------------------------------------------------------------------ settings

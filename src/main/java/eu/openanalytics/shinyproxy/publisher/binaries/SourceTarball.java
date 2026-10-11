@@ -47,8 +47,12 @@ import java.util.zip.ZipException;
  *   <li>a member's name comes from its header, a GNU long name, or a PAX path -- never two (a
  *       second metadata header before a member is refused), and a global PAX header may not
  *       name a path;</li>
- *   <li>bounded: the compressed bytes, the expanded bytes, the DESCRIPTION's size, and the
- *       wall time (checked on every read).</li>
+ *   <li>a PAX record that changes a member's framing ({@code size}, GNU sparse maps) is
+ *       refused: honoured by GNU tar and libarchive, it would make this reader and the
+ *       sandbox's disagree about every member after it (e149183 N1);</li>
+ *   <li>bounded: the compressed bytes, the expanded bytes and the DESCRIPTION's size. The
+ *       wall time and the lease are not bounded here: a read that blocks cannot check them.
+ *       {@link TransferGuard} does, from outside (e149183-F1).</li>
  * </ul>
  * A base-256 size, a sparse or other unknown member type, or a header whose checksum fails
  * is refused: R CMD build writes none of them.
@@ -62,8 +66,8 @@ final class SourceTarball {
     /** What one pass established. */
     record Read(String sha256, String md5, long bytes, String description) { }
 
-    /** Bounds for one read; {@code heartbeat} runs at most every {@code beatEveryNanos} and may throw to stop it. */
-    record Limits(long maxBytes, long maxExpandedBytes, long deadlineNanos, long beatEveryNanos, Runnable heartbeat) { }
+    /** Bounds for one read. */
+    record Limits(long maxBytes, long maxExpandedBytes) { }
 
     private SourceTarball() {
     }
@@ -192,7 +196,10 @@ final class SourceTarball {
 
     private static String headerName(byte[] h) {
         String name = cString(h, 0, 100);
-        boolean ustar = h[257] == 'u' && h[258] == 's' && h[259] == 't' && h[260] == 'a' && h[261] == 'r';
+        // POSIX ustar only ("ustar\0" "00"): old GNU headers ("ustar  \0") keep times where
+        // the prefix would be (e149183 N2).
+        boolean ustar = h[257] == 'u' && h[258] == 's' && h[259] == 't' && h[260] == 'a' && h[261] == 'r'
+                && h[262] == 0 && h[263] == '0' && h[264] == '0';
         String prefix = ustar ? cString(h, 345, 155) : "";
         return prefix.isEmpty() ? name : prefix + "/" + name;
     }
@@ -221,6 +228,9 @@ final class SourceTarball {
                 throw new SourceRefusal("TARBALL_UNREADABLE", "a PAX record without '='");
             }
             String key = record.substring(0, eq);
+            if (key.equals("size") || key.startsWith("GNU.sparse")) {
+                throw new SourceRefusal("TARBALL_UNREADABLE", "a PAX '" + key + "' record changes a member's framing");
+            }
             if (key.equals("path")) {
                 if (path != null) {
                     throw new SourceRefusal("TARBALL_UNREADABLE", "a PAX header names two paths");
@@ -307,7 +317,7 @@ final class SourceTarball {
         in.skipNBytes(n);
     }
 
-    /** Counts and bounds the raw bytes, checks the wall deadline and beats the heartbeat. */
+    /** Counts and bounds the raw bytes. */
     private static final class Bounded extends InputStream {
         static final class TooLarge extends IOException {
             TooLarge(String message) {
@@ -318,7 +328,6 @@ final class SourceTarball {
         private final InputStream in;
         private final Limits limits;
         private long count;
-        private long lastBeat = System.nanoTime();
 
         Bounded(InputStream in, Limits limits) {
             this.in = in;
@@ -331,14 +340,6 @@ final class SourceTarball {
                 if (count > limits.maxBytes()) {
                     throw new TooLarge("more than " + limits.maxBytes() + " bytes");
                 }
-            }
-            long now = System.nanoTime();
-            if (now - limits.deadlineNanos() > 0) {
-                throw new java.net.SocketTimeoutException("the transfer passed its deadline");
-            }
-            if (now - lastBeat >= limits.beatEveryNanos()) {
-                lastBeat = now;
-                limits.heartbeat().run();
             }
         }
 

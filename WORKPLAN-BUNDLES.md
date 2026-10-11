@@ -2336,6 +2336,17 @@ below are marked passed by this planning document.
       (NOT_IN_PUBLIC_INDEX, the detail says "archived") and its apps restore it from
       source, as today. Building it anyway would trust the proxy's first fetch alone
       (no cross-check); that relaxes point 2's rule and is the user's call.
+      Measured (e149183 N4) on the R fixture lock (dev/fixtures/apps/r-shiny, dated
+      2026-10-02) against CRAN's index of 2026-10-11: 11 of its 46 packages are no longer
+      current (KernSmooth, MASS, Matrix, class, cluster, lattice, nlme, nnet, spatial,
+      survival -- R's recommended packages -- and renv), and refusal cascades to one more
+      (mgcv): 12 of 46 refused on a nine-day-old lock, more as locks age. Ten of the eleven
+      are recommended packages the base image already carries in R's system library, at
+      the version R shipped. **Planned for 2c (decided, best for users, no rule relaxed):**
+      a dependency whose locked version equals the one in the base image's system library
+      is not queued; the sandbox already has it from the trusted base, and the base's
+      digest is the platform registration, so the binary matches what every app has. That
+      leaves the archived question to genuinely archived CRAN packages.
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

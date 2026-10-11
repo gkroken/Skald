@@ -34,6 +34,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * The trusted side's source check (WORKPLAN-BUNDLES T7b step 2, point 2; step 2b): claims a
@@ -57,10 +59,18 @@ import java.util.Optional;
  * </ol>
  * Then the SHA-256 computed here over the bytes received, the MD5, and the dependencies at
  * their locked versions are recorded ({@link BinaryBuildQueue#recordSource}). A transfer that
- * fails or a repository that errs is a failed attempt, not a refusal. The lease is renewed
- * while the tarball streams; a lost lease stops the read and nothing is written.
+ * fails or a repository that errs is a failed attempt, not a refusal.
+ *
+ * <p>The index and tarball transfers run under one {@link TransferGuard}: a timer renews the
+ * lease while they run and, at {@code source-transfer-deadline} or on a lost lease, closes
+ * them and interrupts this thread, so a server that stalls mid-body cannot hold it
+ * (e149183-F1). No database call runs under the guard. A lost lease writes nothing.
+ *
+ * <p>An index whose version for the package is OLDER than the one claimed (a release newer
+ * than the cached or proxied index) is fetched once more, ignoring the TTL; still older, it is
+ * a failed attempt, retried later, never a final refusal of a current version (e149183 N3).
  */
-public final class SourceVerifier {
+public final class SourceVerifier implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(SourceVerifier.class);
 
@@ -72,6 +82,11 @@ public final class SourceVerifier {
     private final SourceSettings settings;
     private final BinaryQueueSettings queueSettings;
     private final CranIndex index;
+    private final ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "skald-source-guard");
+        t.setDaemon(true);
+        return t;
+    });
 
     public SourceVerifier(BinaryBuildQueue queue, SourceFetcher fetcher, SourceSettings settings,
                           BinaryQueueSettings queueSettings) {
@@ -105,7 +120,7 @@ public final class SourceVerifier {
             queue.refuse(claim.lease(), refusal.code(), refusal.getMessage());
             log.info("binary source {} refused: {} {}", what, refusal.code(), refusal.getMessage());
             return Optional.of(new Result(claim.rowId(), "REFUSED:" + refusal.code()));
-        } catch (Fenced fenced) {
+        } catch (Fenced | TransferGuard.LeaseLost lost) {
             log.warn("binary source {}: the lease was lost; nothing recorded", what);
             return Optional.of(new Result(claim.rowId(), "FENCED"));
         } catch (IOException failure) {
@@ -125,26 +140,22 @@ public final class SourceVerifier {
     private Checked check(BinaryBuildQueue.SourceClaim claim) throws IOException, SourceRefusal {
         Map<String, String> lock = queue.lockOf(claim.requestedBy()).orElseThrow(() -> new SourceRefusal(
                 "NO_LOCK", "no recorded lock resolves this package's dependencies"));
-        CranIndex.Entry entry = index.lookup(claim.pkg()).orElseThrow(() -> new SourceRefusal(
-                "NOT_IN_PUBLIC_INDEX", "the public index does not list " + claim.pkg()));
-        if (!entry.version().equals(claim.version())) {
-            throw new SourceRefusal("NOT_IN_PUBLIC_INDEX", "the public index lists " + claim.pkg() + " "
-                    + entry.version() + ", not " + claim.version() + " (an archived version has no published checksum)");
-        }
-        URI tarball = settings.repository().resolve("src/contrib/" + claim.pkg() + "_" + claim.version() + ".tar.gz");
-        long deadline = System.nanoTime() + settings.transferDeadline().toNanos();
-        SourceTarball.Read read;
-        try (InputStream in = fetcher.open(tarball)) {
-            read = SourceTarball.read(in, claim.pkg(), new SourceTarball.Limits(settings.maxSourceBytes(),
-                    settings.maxExpandedBytes(), deadline, queueSettings.renewEvery().toNanos(), () -> {
-                        if (!queue.renew(claim.lease())) {
-                            throw new Fenced("binary row " + claim.rowId() + ": lease lost while reading its source");
-                        }
-                    }));
-        } catch (SourceFetcher.NotFound ex) {
-            throw new SourceRefusal("NOT_IN_PUBLIC_SOURCE", "the public repository has no " + tarball.getPath());
-        }
         Optional<List<String>> recorded = queue.recordedSource(claim.rowId());
+        CranIndex.Entry entry;
+        SourceTarball.Read read;
+        try (TransferGuard guard = new TransferGuard(timer, settings.transferDeadline(), queueSettings.renewEvery(),
+                () -> queue.renew(claim.lease()))) {
+            entry = indexEntry(claim, guard);
+            URI tarball = settings.repository().resolve("src/contrib/" + claim.pkg() + "_" + claim.version() + ".tar.gz");
+            try (InputStream in = guard.watch(fetcher.open(tarball))) {
+                read = SourceTarball.read(in, claim.pkg(), new SourceTarball.Limits(settings.maxSourceBytes(),
+                        settings.maxExpandedBytes()));
+            } catch (SourceFetcher.NotFound ex) {
+                throw new SourceRefusal("NOT_IN_PUBLIC_SOURCE", "the public repository has no " + tarball.getPath());
+            } catch (IOException ex) {
+                throw guard.failure(ex);
+            }
+        }
         if (recorded.isPresent() && !recorded.get().equals(List.of(read.sha256(), read.md5()))) {
             // 604d63b N1: a tarball republished under the same version is refused, never
             // re-recorded (V4's trigger would refuse the write too).
@@ -161,6 +172,35 @@ public final class SourceVerifier {
                     + " " + description.get("Version"));
         }
         return new Checked(read, dependencies(description, lock));
+    }
+
+    /** The index's entry for exactly the claimed version, refetched once if the index is behind. */
+    private CranIndex.Entry indexEntry(BinaryBuildQueue.SourceClaim claim, TransferGuard guard)
+            throws IOException, SourceRefusal {
+        Optional<CranIndex.Entry> entry = index.lookup(claim.pkg(), false, guard);
+        if (entry.isPresent() && behind(entry.get(), claim.version())) {
+            entry = index.lookup(claim.pkg(), true, guard);
+            if (entry.isPresent() && behind(entry.get(), claim.version())) {
+                throw new IOException("the public index lists " + claim.pkg() + " " + entry.get().version()
+                        + ", older than the locked " + claim.version() + "; retried later");
+            }
+        }
+        CranIndex.Entry found = entry.orElseThrow(() -> new SourceRefusal("NOT_IN_PUBLIC_INDEX",
+                "the public index does not list " + claim.pkg()));
+        if (!found.version().equals(claim.version())) {
+            throw new SourceRefusal("NOT_IN_PUBLIC_INDEX", "the public index lists " + claim.pkg() + " "
+                    + found.version() + ", not " + claim.version() + " (an archived version has no published checksum)");
+        }
+        return found;
+    }
+
+    private static boolean behind(CranIndex.Entry entry, String version) {
+        return RDependencies.compare(entry.version(), version) < 0;
+    }
+
+    @Override
+    public void close() {
+        timer.shutdownNow();
     }
 
     private static Map<String, String> description(String text) throws SourceRefusal {
