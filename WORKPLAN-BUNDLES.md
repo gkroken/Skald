@@ -2485,6 +2485,19 @@ below are marked passed by this planning document.
       published R base, the base's registry its only egress. `BinaryHousekeeping` reaps on the
       renewal cadence and sweeps, on the worker's sweep period, every "p" attempt on the host
       that no RUNNING row owns at that generation (never an app build's).
+      Fixed in review (fca2f81-F1): the sweep takes the host's inventory before the live
+      leases, as AttemptSweeper does, so a sandbox claimed and launched during the inventory
+      is never disposed of.
+      **Step 2e, part 2, done (this commit's part): re-opening, the queue's side.**
+      `BinaryBuildQueue.reopen(row, actor, forgeNoLongerHoldsIt)`: a FAILED, REFUSED or
+      PRESENT_FOREIGN row back to waiting (QUEUED with its source on record, PENDING_SOURCE
+      without), attempts and deferrals reset, and every row refused DEPENDENCY_NOT_SKALD_BUILT
+      that depends on it, transitively, back to QUEUED; audited with the actor; source digests,
+      kind and upload intents kept. PRESENT_FOREIGN only once the caller confirms forge no
+      longer holds that binary (its digest is cleared). A row FAILED by a lost upload write on
+      its last attempt (932cbd1 N1) is re-opened WITHOUT removing its binary from forge: the
+      next 409 matches its own intent. **Needs the user:** an HTTP admin endpoint for it is a
+      new public API shape (CLAUDE.md: ask first); until then it is the queue's method only.
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

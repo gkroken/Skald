@@ -546,6 +546,66 @@ public final class BinaryBuildQueue {
         return out;
     }
 
+    // ------------------------------------------------------------------ re-open (1fba61d N1)
+
+    /** What {@link #reopen} did. */
+    public record Reopened(String from, String to, int dependents) { }
+
+    /**
+     * An operator's audited re-open (WORKPLAN-BUNDLES T7b, "Re-opening"; 1fba61d N1): a row
+     * that ended FAILED, REFUSED or PRESENT_FOREIGN goes back to waiting -- QUEUED if its source
+     * is on record, PENDING_SOURCE if not -- with its attempts and deferrals reset, and every row
+     * refused DEPENDENCY_NOT_SKALD_BUILT that depends on it (transitively) goes back to QUEUED
+     * with it; one still blocked by another dependency is refused again at the next claim.
+     * The source digests and kind stay (a re-fetch must match them); the upload intents stay.
+     * <ul>
+     *   <li>PRESENT_FOREIGN only with {@code forgeNoLongerHoldsIt}: the caller has checked that
+     *       forge no longer holds that binary (the operator removed it); its digest is cleared
+     *       (the one change V4's trigger allows).</li>
+     *   <li>A row FAILED because its upload's write was lost on its LAST attempt (932cbd1 N1):
+     *       forge holds Skald's own binary. Re-open it WITHOUT removing that binary: the next
+     *       attempt's 409 matches the row's own intent and the row becomes UPLOADED.</li>
+     * </ul>
+     *
+     * @throws IllegalStateException the row is not one a re-open applies to
+     */
+    public Reopened reopen(UUID rowId, String actor, boolean forgeNoLongerHoldsIt) {
+        return tx.execute(status -> {
+            List<Map<String, Object>> rows = jdbc.queryForList("SELECT state, source_sha256 FROM skald.binary_build"
+                    + " WHERE id = ? FOR UPDATE", rowId);
+            if (rows.isEmpty()) {
+                throw new IllegalStateException("no binary row " + rowId);
+            }
+            String from = (String) rows.get(0).get("state");
+            if (!List.of("FAILED", "REFUSED", "PRESENT_FOREIGN").contains(from)) {
+                throw new IllegalStateException("binary row " + rowId + " is " + from + "; only FAILED, REFUSED or"
+                        + " PRESENT_FOREIGN rows are re-opened");
+            }
+            if (from.equals("PRESENT_FOREIGN") && !forgeNoLongerHoldsIt) {
+                throw new IllegalStateException("binary row " + rowId + " is PRESENT_FOREIGN: remove that binary from"
+                        + " forge first, and re-open once forge no longer holds it");
+            }
+            String to = rows.get(0).get("source_sha256") == null ? "PENDING_SOURCE" : "QUEUED";
+            jdbc.update("UPDATE skald.binary_build SET state = ?, finished_at = NULL, attempts = 0, deferrals = 0,"
+                    + " deferred_since = NULL, not_before = NULL, refusal_code = NULL, refusal_detail = NULL,"
+                    + " binary_sha256 = CASE WHEN state = 'PRESENT_FOREIGN' THEN NULL ELSE binary_sha256 END,"
+                    + " updated_at = now() WHERE id = ?", to, rowId);
+            List<UUID> dependents = jdbc.queryForList("WITH RECURSIVE up(id) AS ("
+                    + "   SELECT binary_build_id FROM skald.binary_build_dep WHERE dependency_id = ?"
+                    + "   UNION SELECT d.binary_build_id FROM skald.binary_build_dep d JOIN up u ON d.dependency_id = u.id)"
+                    + " UPDATE skald.binary_build b SET state = 'QUEUED', finished_at = NULL, attempts = 0,"
+                    + " refusal_code = NULL, refusal_detail = NULL, updated_at = now()"
+                    + " FROM up WHERE b.id = up.id AND b.state = 'REFUSED'"
+                    + " AND b.refusal_code = 'DEPENDENCY_NOT_SKALD_BUILT' RETURNING b.id", UUID.class, rowId);
+            audit(actor, "binary.reopened", rowId, Map.of("from", from, "to", to,
+                    "dependents", String.valueOf(dependents.size())));
+            for (UUID d : dependents) {
+                audit(actor, "binary.reopened", d, Map.of("from", "REFUSED", "to", "QUEUED", "because", rowId.toString()));
+            }
+            return new Reopened(from, to, dependents.size());
+        });
+    }
+
     // ------------------------------------------------------------------ reap
 
     /**

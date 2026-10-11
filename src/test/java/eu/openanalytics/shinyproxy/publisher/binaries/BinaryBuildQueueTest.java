@@ -809,6 +809,86 @@ public class BinaryBuildQueueTest {
         assertEquals("RUNNING", state(c.rowId()));
     }
 
+    // ------------------------------------------------------------------ re-open (1fba61d N1)
+
+    @Test
+    public void aFailedRowIsReopenedToTheQueueWithItsAttemptsReset() {
+        BinaryBuildQueue q = queue(new BinaryQueueSettings(Duration.ofSeconds(60), Duration.ofSeconds(20),
+            Duration.ofMinutes(60), 1, 1), CoordinatorSettings.DEFAULTS);
+        UUID a = verified(q, "aaa");
+        q.fail(q.claimBuild("b").orElseThrow().lease(), "COMPILE", "x");
+        assertEquals("FAILED", state(a));
+        BinaryBuildQueue.Reopened r = q.reopen(a, "operator", false);
+        assertEquals("FAILED", r.from());
+        assertEquals("QUEUED", r.to());
+        Map<String, Object> row = row(a);
+        assertEquals(0, row.get("attempts"));
+        assertNull(row.get("finished_at"));
+        assertEquals(SHA, row.get("source_sha256"), "the source on record stays");
+        assertTrue(q.claimBuild("b").isPresent(), "claimable again");
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.audit_event WHERE action = 'binary.reopened'"
+            + " AND actor = 'operator'", Integer.class));
+    }
+
+    @Test
+    public void aRowRefusedBeforeItsSourceWasRecordedGoesBackToVerification() {
+        BinaryBuildQueue q = queue();
+        UUID a = q.enqueue(KEY, "aaa", "1.0", null);
+        q.refuse(q.claimSource("v").orElseThrow().lease(), "NOT_IN_PUBLIC_INDEX", "x");
+        assertEquals("PENDING_SOURCE", q.reopen(a, "operator", false).to());
+        assertNull(row(a).get("refusal_code"));
+        assertTrue(q.claimSource("v").isPresent());
+    }
+
+    @Test
+    public void aForeignRowNeedsForgeToNoLongerHoldItAndItsDependentsComeBackToo() {
+        BinaryBuildQueue q = queue();
+        UUID top = verified(q, "aaa", "bbb");
+        UUID mid = verified(q, "bbb", "ccc");
+        UUID low = verified(q, "ccc");
+        q.alreadyPresent(q.claimBuild("b").orElseThrow().lease(), "9".repeat(64), "409");
+        q.refuseBlocked();
+        assertEquals("REFUSED", state(mid));
+        assertEquals("REFUSED", state(top));
+        assertThrows(IllegalStateException.class, () -> q.reopen(low, "operator", false),
+            "not until forge no longer holds the foreign binary");
+        BinaryBuildQueue.Reopened r = q.reopen(low, "operator", true);
+        assertEquals(2, r.dependents(), "bbb and aaa, refused because of it");
+        assertEquals("QUEUED", state(low));
+        assertNull(row(low).get("binary_sha256"), "the foreign digest cleared");
+        assertEquals("QUEUED", state(mid));
+        assertEquals("QUEUED", state(top));
+        assertEquals(low, q.claimBuild("b").orElseThrow().rowId(), "and built in dependency order again");
+    }
+
+    @Test
+    public void aLostWriteOnTheLastAttemptIsReopenedWithoutTouchingForge() {
+        // 932cbd1 N1: the upload landed, the write was lost, the reaper used the last attempt:
+        // FAILED, while forge holds Skald's own binary. Re-opened, the next 409 is recognised.
+        BinaryBuildQueue q = queue(new BinaryQueueSettings(Duration.ofSeconds(60), Duration.ofSeconds(20),
+            Duration.ofMinutes(60), 1, 1), CoordinatorSettings.DEFAULTS);
+        UUID a = verified(q, "aaa");
+        BuildClaim first = q.claimBuild("b").orElseThrow();
+        q.intendUpload(first.lease(), "1".repeat(64), PROVENANCE);
+        expire(a);
+        q.reap();
+        assertEquals("FAILED", state(a));
+        q.reopen(a, "operator", false);
+        BuildClaim again = q.claimBuild("b").orElseThrow();
+        assertEquals(BinaryBuildQueue.Present.OURS, q.alreadyPresent(again.lease(), "1".repeat(64), "409 on upload"));
+        assertEquals("UPLOADED", state(a));
+    }
+
+    @Test
+    public void onlyAnEndedRowIsReopened() {
+        BinaryBuildQueue q = queue();
+        UUID a = verified(q, "aaa");
+        assertThrows(IllegalStateException.class, () -> q.reopen(a, "operator", true), "QUEUED");
+        uploaded(q, a, "1".repeat(64));
+        assertThrows(IllegalStateException.class, () -> q.reopen(a, "operator", true), "UPLOADED is final");
+        assertThrows(IllegalStateException.class, () -> q.reopen(UUID.randomUUID(), "operator", true));
+    }
+
     // ------------------------------------------------------------------ settings
 
     @Test
