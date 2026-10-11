@@ -2277,6 +2277,24 @@ below are marked passed by this planning document.
       7. Off by default, enabled per deployment only after the security review T7b
          requires; the review records that integrity then rests on forge and the uploader
          (renv.lock's hashes cover DESCRIPTION metadata, not binary bytes: 53b63ec N3).
+      **Step 2a, done (this commit's part): the queue.** V4 adds `skald.binary_build` (one
+      row per key, package and version; the key, name and version in forge's and R's forms
+      only, since each becomes a forge path segment) and `skald.binary_build_dep` (edges
+      within one key). Two leased phases: PENDING_SOURCE -> VERIFYING (the trusted side
+      fetches and checks the source, step 2b) -> QUEUED with the source digests and the
+      edges; QUEUED -> RUNNING (a compile, step 2c) -> UPLOADED with Skald's own binary
+      digest and provenance. PRESENT_FOREIGN records a binary Skald did not produce, with
+      its digest, and is never handed in (89a33dc N1); REFUSED names its code; FAILED after
+      `max-attempts` claims of a phase (default 2). A lost lease goes back to its phase's
+      waiting state. A row is claimed only when every dependency is UPLOADED, and the claim
+      carries exactly those digests; a dependency that ends any other way refuses its
+      dependents (transitively, with the reason); a dependency cycle is refused when its
+      edges are recorded, under a per-key lock. The database holds that the identity and the
+      source digests recorded at first fetch never change (a trigger), so a tarball
+      republished under the same version can only be refused. Compiles yield to app builds:
+      claimed only when no app build is QUEUED, fewer than the app limit run, and fewer than
+      `skald.builds.binaries.max-running` (default 1) compiles run; app claims never count
+      compiles, so the host's worst case is the two limits added. Not wired yet (step 2e).
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

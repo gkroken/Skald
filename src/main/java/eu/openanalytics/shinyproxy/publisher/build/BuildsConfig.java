@@ -22,6 +22,7 @@
  */
 package eu.openanalytics.shinyproxy.publisher.build;
 
+import eu.openanalytics.shinyproxy.publisher.binaries.BinaryQueueSettings;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -32,7 +33,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Binds {@code skald.builds.admission.*} and {@code skald.builds.coordinator.*}, each as a
+ * Binds {@code skald.builds.admission.*}, {@code skald.builds.coordinator.*} and
+ * {@code skald.builds.binaries.*} (T7b's binary queue), each as a
  * free-form map for the reason {@code BundleLimitsConfig} gives (an unknown key must stop
  * startup rather than be ignored), and wires the build package when a database is configured.
  *
@@ -47,6 +49,7 @@ public class BuildsConfig {
 
     private Map<String, String> admission = new LinkedHashMap<>();
     private Map<String, String> coordinator = new LinkedHashMap<>();
+    private Map<String, String> binaries = new LinkedHashMap<>();
 
     public Map<String, String> getAdmission() {
         return admission;
@@ -64,6 +67,14 @@ public class BuildsConfig {
         this.coordinator = coordinator == null ? new LinkedHashMap<>() : coordinator;
     }
 
+    public Map<String, String> getBinaries() {
+        return binaries;
+    }
+
+    public void setBinaries(Map<String, String> binaries) {
+        this.binaries = binaries == null ? new LinkedHashMap<>() : binaries;
+    }
+
     @Bean
     public AdmissionLimits admissionLimits() {
         return AdmissionLimits.fromOverrides(admission);
@@ -72,6 +83,12 @@ public class BuildsConfig {
     @Bean
     public CoordinatorSettings coordinatorSettings() {
         return CoordinatorSettings.fromOverrides(coordinator);
+    }
+
+    /** Validated at startup; the queue itself is wired with the builder (T7b step 2e). */
+    @Bean
+    public BinaryQueueSettings binaryQueueSettings() {
+        return BinaryQueueSettings.fromOverrides(binaries);
     }
 
     /** The database-backed half, present only when a database is configured. */
