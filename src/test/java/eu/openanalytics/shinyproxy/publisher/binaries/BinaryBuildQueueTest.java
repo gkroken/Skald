@@ -820,14 +820,54 @@ public class BinaryBuildQueueTest {
         assertEquals("FAILED", state(a));
         BinaryBuildQueue.Reopened r = q.reopen(a, "operator", false);
         assertEquals("FAILED", r.from());
-        assertEquals("QUEUED", r.to());
+        assertEquals("PENDING_SOURCE", r.to(), "verified again (90cf453-F1)");
         Map<String, Object> row = row(a);
         assertEquals(0, row.get("attempts"));
         assertNull(row.get("finished_at"));
-        assertEquals(SHA, row.get("source_sha256"), "the source on record stays");
-        assertTrue(q.claimBuild("b").isPresent(), "claimable again");
+        assertNull(row.get("deadline_at"));
+        assertEquals(SHA, row.get("source_sha256"), "the source on record stays: a re-fetch must match it");
+        assertFalse(q.claimBuild("b").isPresent(), "not compiled before it is verified again");
+        q.recordSource(q.claimSource("v").orElseThrow().lease(), SHA, MD5, List.of());
+        assertTrue(q.claimBuild("b").isPresent(), "claimable again once verified");
         assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.audit_event WHERE action = 'binary.reopened'"
             + " AND actor = 'operator'", Integer.class));
+    }
+
+    @Test
+    public void aCycleRefusalReopenedIsVerifiedAgainNeverCompiledWithoutItsEdges() {
+        // 90cf453-F1: a DEPENDENCY_CYCLE row has its digests on record and no edges.
+        BinaryBuildQueue q = queue();
+        verified(q, "aaa", "bbb");
+        UUID b = id("bbb");
+        assertEquals(Recorded.REFUSED_CYCLE, q.recordSource(claimSourceOf(q, b).lease(), SHA, MD5,
+            List.of(new Dependency("aaa", "1.0"))));
+        assertTrue(row(b).get("deadline_at") != null, "a refusal leaves the claim's deadline on the row");
+        assertEquals("PENDING_SOURCE", q.reopen(b, "operator", false).to());
+        assertNull(row(b).get("deadline_at"), "a re-opened row carries no stale deadline (90cf453 N2)");
+        assertFalse(q.claimBuild("x").isPresent(), "not claimable before its edges exist");
+        assertEquals(Recorded.REFUSED_CYCLE, q.recordSource(claimSourceOf(q, b).lease(), SHA, MD5,
+            List.of(new Dependency("aaa", "1.0"))), "still a cycle: refused again");
+        assertEquals(Recorded.QUEUED, q.recordSource(claimSourceOf(q, b = reopenAndReturn(q, b)).lease(), SHA, MD5,
+            List.of()), "a re-verify that reads no cycle queues it, with the same digests");
+    }
+
+    private static UUID reopenAndReturn(BinaryBuildQueue q, UUID row) {
+        q.reopen(row, "operator", false);
+        return row;
+    }
+
+    @Test
+    public void reVerifyingRecordsTheSameEdgesAgainWithoutFailing() {
+        BinaryBuildQueue q = queue(new BinaryQueueSettings(Duration.ofSeconds(60), Duration.ofSeconds(20),
+            Duration.ofMinutes(60), 1, 1), CoordinatorSettings.DEFAULTS);
+        UUID a = verified(q, "aaa", "bbb");
+        jdbc.update("UPDATE skald.binary_build SET state = 'FAILED', finished_at = now(), error_code = 'X'"
+            + " WHERE id = ?", a);
+        q.reopen(a, "operator", false);
+        assertEquals(Recorded.QUEUED, q.recordSource(claimSourceOf(q, a).lease(), SHA, MD5,
+            List.of(new Dependency("bbb", "1.0"))));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.binary_build_dep WHERE binary_build_id = ?",
+            Integer.class, a));
     }
 
     @Test
@@ -854,10 +894,12 @@ public class BinaryBuildQueueTest {
             "not until forge no longer holds the foreign binary");
         BinaryBuildQueue.Reopened r = q.reopen(low, "operator", true);
         assertEquals(2, r.dependents(), "bbb and aaa, refused because of it");
-        assertEquals("QUEUED", state(low));
+        assertEquals("PENDING_SOURCE", state(low));
         assertNull(row(low).get("binary_sha256"), "the foreign digest cleared");
-        assertEquals("QUEUED", state(mid));
+        assertEquals("QUEUED", state(mid), "its edges are on record: it waits for ccc");
         assertEquals("QUEUED", state(top));
+        assertFalse(q.claimBuild("b").isPresent(), "nothing claimable while ccc is re-verified");
+        q.recordSource(claimSourceOf(q, low).lease(), SHA, MD5, List.of());
         assertEquals(low, q.claimBuild("b").orElseThrow().rowId(), "and built in dependency order again");
     }
 
@@ -874,6 +916,7 @@ public class BinaryBuildQueueTest {
         q.reap();
         assertEquals("FAILED", state(a));
         q.reopen(a, "operator", false);
+        q.recordSource(q.claimSource("v").orElseThrow().lease(), SHA, MD5, List.of());
         BuildClaim again = q.claimBuild("b").orElseThrow();
         assertEquals(BinaryBuildQueue.Present.OURS, q.alreadyPresent(again.lease(), "1".repeat(64), "409 on upload"));
         assertEquals("UPLOADED", state(a));

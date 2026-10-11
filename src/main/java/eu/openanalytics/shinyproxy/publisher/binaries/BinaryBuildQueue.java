@@ -288,8 +288,9 @@ public final class BinaryBuildQueue {
                 return Recorded.REFUSED_CYCLE;
             }
             for (UUID dep : deps) {
+                // Idempotent: a re-opened row re-verifies and records the same edges again.
                 jdbc.update("INSERT INTO skald.binary_build_dep (binary_build_id, dependency_id,"
-                        + " platform_key) VALUES (?, ?, ?)", lease.rowId(), dep, key);
+                        + " platform_key) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", lease.rowId(), dep, key);
             }
             List<String> stored = jdbc.queryForList("UPDATE skald.binary_build SET " + digests + ", state = 'QUEUED',"
                     + " attempts = 0, deadline_at = NULL," + idle() + FENCE + " RETURNING source_kind",
@@ -553,8 +554,11 @@ public final class BinaryBuildQueue {
 
     /**
      * An operator's audited re-open (WORKPLAN-BUNDLES T7b, "Re-opening"; 1fba61d N1): a row
-     * that ended FAILED, REFUSED or PRESENT_FOREIGN goes back to waiting -- QUEUED if its source
-     * is on record, PENDING_SOURCE if not -- with its attempts and deferrals reset, and every row
+     * that ended FAILED, REFUSED or PRESENT_FOREIGN goes back to PENDING_SOURCE and is
+     * verified again -- its source must still match the digests of its first fetch, and its
+     * dependencies are read again, so a row refused as a dependency cycle (digests on record, no
+     * edges) can never be compiled without them (90cf453-F1) -- with its attempts and deferrals
+     * reset, and every row
      * refused DEPENDENCY_NOT_SKALD_BUILT that depends on it (transitively) goes back to QUEUED
      * with it; one still blocked by another dependency is refused again at the next claim.
      * The source digests and kind stay (a re-fetch must match them); the upload intents stay.
@@ -571,7 +575,7 @@ public final class BinaryBuildQueue {
      */
     public Reopened reopen(UUID rowId, String actor, boolean forgeNoLongerHoldsIt) {
         return tx.execute(status -> {
-            List<Map<String, Object>> rows = jdbc.queryForList("SELECT state, source_sha256 FROM skald.binary_build"
+            List<Map<String, Object>> rows = jdbc.queryForList("SELECT state FROM skald.binary_build"
                     + " WHERE id = ? FOR UPDATE", rowId);
             if (rows.isEmpty()) {
                 throw new IllegalStateException("no binary row " + rowId);
@@ -585,9 +589,10 @@ public final class BinaryBuildQueue {
                 throw new IllegalStateException("binary row " + rowId + " is PRESENT_FOREIGN: remove that binary from"
                         + " forge first, and re-open once forge no longer holds it");
             }
-            String to = rows.get(0).get("source_sha256") == null ? "PENDING_SOURCE" : "QUEUED";
+            String to = "PENDING_SOURCE";
             jdbc.update("UPDATE skald.binary_build SET state = ?, finished_at = NULL, attempts = 0, deferrals = 0,"
-                    + " deferred_since = NULL, not_before = NULL, refusal_code = NULL, refusal_detail = NULL,"
+                    + " deferred_since = NULL, not_before = NULL, deadline_at = NULL, refusal_code = NULL,"
+                    + " refusal_detail = NULL,"
                     + " binary_sha256 = CASE WHEN state = 'PRESENT_FOREIGN' THEN NULL ELSE binary_sha256 END,"
                     + " updated_at = now() WHERE id = ?", to, rowId);
             List<UUID> dependents = jdbc.queryForList("WITH RECURSIVE up(id) AS ("

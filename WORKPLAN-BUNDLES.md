@@ -2490,8 +2490,9 @@ below are marked passed by this planning document.
       is never disposed of.
       **Step 2e, part 2, done (this commit's part): re-opening, the queue's side.**
       `BinaryBuildQueue.reopen(row, actor, forgeNoLongerHoldsIt)`: a FAILED, REFUSED or
-      PRESENT_FOREIGN row back to waiting (QUEUED with its source on record, PENDING_SOURCE
-      without), attempts and deferrals reset, and every row refused DEPENDENCY_NOT_SKALD_BUILT
+      PRESENT_FOREIGN row back to PENDING_SOURCE, verified again (its source must match its
+      first fetch's digests, its dependencies are read again: a cycle refusal never compiles
+      without its edges, 90cf453-F1), attempts, deferrals and the old deadline reset, and every row refused DEPENDENCY_NOT_SKALD_BUILT
       that depends on it, transitively, back to QUEUED; audited with the actor; source digests,
       kind and upload intents kept. PRESENT_FOREIGN only once the caller confirms forge no
       longer holds that binary (its digest is cleared). A row FAILED by a lost upload write on
