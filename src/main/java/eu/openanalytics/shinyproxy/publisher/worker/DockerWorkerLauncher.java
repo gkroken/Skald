@@ -115,8 +115,12 @@ public final class DockerWorkerLauncher {
     /** Where quota images live: one shared named volume, one file per attempt. */
     static final String QUOTA_IMAGES_VOLUME = "skald-quota-images";
     private static final Pattern ATTEMPT = Pattern.compile("[a-z0-9]{8,40}");
-    /** One of an attempt's volume names (handle()), with the attempt id as group 1. */
-    private static final Pattern ATTEMPT_VOLUME = Pattern.compile("skald-b-([a-z0-9]{8,40})-(ctx|ws|sock|conf)");
+    /**
+     * One of an attempt's volume names (handle(), volumeNames()), with the attempt id as group 1.
+     * A test holds it to volumeNames(), so a new volume cannot drift out of the sweep's
+     * by-name inventory (9159de6-F1: the output volume did).
+     */
+    static final Pattern ATTEMPT_VOLUME = Pattern.compile("skald-b-([a-z0-9]{8,40})-(ctx|ws|sock|conf|out)");
     /** Marks the sweep's own inventory helper, so one a dead JVM left can be found. */
     static final String SWEEP_LABEL = "eu.skald.sweep-helper";
     /**
@@ -642,7 +646,7 @@ public final class DockerWorkerLauncher {
         return labels != null && h.attemptId().equals(labels.get(ATTEMPT_LABEL));
     }
 
-    private static List<String> volumeNames(Handle h) {
+    static List<String> volumeNames(Handle h) {
         return List.of(h.contextVolume(), h.workspaceVolume(), h.socketVolume(), h.configVolume(), h.outputVolume());
     }
 

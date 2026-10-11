@@ -237,4 +237,21 @@ public class BuildKitClientTest {
                     () -> client.stage(DockerWorkerLauncher.handle("aaaaaaaa"), dir, recipe), key);
         }
     }
+
+    @Test
+    public void everyVolumeAnAttemptOwnsIsInTheSweepsByNameInventory() {
+        // 9159de6-F1: the sweep finds a volume the daemon re-created unlabelled for a late bind
+        // only by its name, so every name the launcher gives an attempt's volumes must match.
+        for (String id : java.util.List.of("0123456789abcdef0123456789abcdef", "p0123456789abcdef01234567000000ff",
+                "abcd1234")) {
+            DockerWorkerLauncher.Handle h = DockerWorkerLauncher.handle(id);
+            java.util.List<String> names = DockerWorkerLauncher.volumeNames(h);
+            org.junit.jupiter.api.Assertions.assertTrue(names.contains(h.outputVolume()), "the output volume is one");
+            for (String v : names) {
+                java.util.regex.Matcher m = DockerWorkerLauncher.ATTEMPT_VOLUME.matcher(v);
+                org.junit.jupiter.api.Assertions.assertTrue(m.matches(), v + " is in the inventory");
+                org.junit.jupiter.api.Assertions.assertEquals(id, m.group(1), v);
+            }
+        }
+    }
 }

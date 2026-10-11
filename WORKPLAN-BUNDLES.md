@@ -2395,8 +2395,11 @@ below are marked passed by this planning document.
       Built (bytes + checked), Refused (HANDIN_DIGEST, OUTPUT, the archive's codes), Failed
       (HANDIN_FETCH, WORKER_LAUNCH, STAGE, BUILD_FAILED with the last line, WORKER_DIED,
       DEPENDENCY_CONFLICT), Stopped (the lease's signal; worker killed, everything disposed).
-      Package attempts are named "p" + 32 hex, never an app build's 32 hex, so T7's attempt
-      sweeper never disposes of a running sandbox. **Carried to 2e:** sweeping a dead
+      Package attempts are named "p" + 24 hex of the row id + 8 hex of the lease generation
+      (33 characters), never an app build's 32 hex, so T7's attempt
+      sweeper never disposes of a running sandbox; the sweep's by-name volume inventory covers
+      the output volume and is held to the launcher's volume list by a test (9159de6-F1).
+      **Carried to 2e:** sweeping a dead
       sandbox's leftovers against the queue's leases; the sandbox's full log to object
       storage (today the failure's last line); the version-conflict rate measured on two
       fixture locks weeks apart (ba5dd88 N1); the probe rows on a real R base (a two-level
