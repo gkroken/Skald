@@ -2431,6 +2431,21 @@ below are marked passed by this planning document.
       the reason in words. Wired before each R build and each upload in 2e/2d part 2.
       Published bases must be published again (the catalog changed in 2c, and the image IDs
       are new).
+      **Step 2d, part 2, done (this commit's part): the hand-in and the upload over forge.**
+      `ForgeHandIn` (binaries; the interface `PackageHandIn` moved there so the worker package
+      depends on binaries and not back) fetches the source from the proxy member -- the
+      Archive path for an 'archive' row -- and each closure member's binary from Skald's own
+      tree for the key with the token, bounded in bytes and by a TransferGuard deadline; every
+      failure an IOException (a failed attempt, never a refusal: 9159de6 N2); the lock is the
+      requesting build's (BuildClaim now carries requested_by_build and source_kind).
+      `BinaryUploader`: the gate again (and the base's key must be the row's), LinkingTo
+      versions from what was handed in or the base's library, the intent with provenance
+      (`skald.binary-provenance/v1`: source digests and kind, base reference and image ID,
+      the resolved closure handed in -- 9159de6 N4 --, LinkingTo, attempt, sandbox profile)
+      recorded before the PUT, then the PUT with X-Forge-Builder-Digest and
+      X-Forge-Linking-To; 201 UPLOADED, 409 the existing binary's digest to the queue (Skald's
+      own earlier upload or another's), 400 REFUSED with forge's reason, 403/5xx/transport a
+      failed attempt. No redirects anywhere; the token in no record, audit or message.
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

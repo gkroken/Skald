@@ -83,7 +83,15 @@ public final class BinaryBuildQueue {
     /** A row to compile: its verified source and the Skald-built binaries of its dependency closure. */
     public record BuildClaim(UUID rowId, String platformKey, String pkg, String version,
                              String sourceSha256, String sourceMd5, List<BuiltDependency> dependencies,
-                             BinaryLease lease) { }
+                             BinaryLease lease, UUID requestedBy, SourceKind sourceKind) {
+
+        /** A claim whose source was verified against the index, with no lock on record. */
+        public BuildClaim(UUID rowId, String platformKey, String pkg, String version, String sourceSha256,
+                          String sourceMd5, List<BuiltDependency> dependencies, BinaryLease lease) {
+            this(rowId, platformKey, pkg, version, sourceSha256, sourceMd5, dependencies, lease, null,
+                    SourceKind.INDEX);
+        }
+    }
 
     /** What {@link #alreadyPresent} found forge's binary to be. */
     public enum Present {
@@ -330,7 +338,7 @@ public final class BinaryBuildQueue {
                     + "     WHERE d.binary_build_id = b.id AND x.state <> 'UPLOADED')"
                     + "   ORDER BY b.created_at, b.id LIMIT 1 FOR UPDATE SKIP LOCKED)"
                     + " RETURNING id, platform_key, package, version, source_sha256, source_md5,"
-                    + " lease_generation",
+                    + " lease_generation, requested_by_build, source_kind",
                     owner, settings.lease().toSeconds(), settings.deadline().toSeconds());
             if (rows.isEmpty()) {
                 return Optional.<BuildClaim>empty();
@@ -349,7 +357,9 @@ public final class BinaryBuildQueue {
             audit(owner, "binary.claimed", lease.rowId(), Map.of("generation", String.valueOf(lease.generation())));
             return Optional.of(new BuildClaim(lease.rowId(), (String) row.get("platform_key"),
                     (String) row.get("package"), (String) row.get("version"),
-                    (String) row.get("source_sha256"), (String) row.get("source_md5"), deps, lease));
+                    (String) row.get("source_sha256"), (String) row.get("source_md5"), deps, lease,
+                    (UUID) row.get("requested_by_build"), "archive".equals(row.get("source_kind"))
+                            ? SourceKind.ARCHIVE : SourceKind.INDEX));
         });
     }
 

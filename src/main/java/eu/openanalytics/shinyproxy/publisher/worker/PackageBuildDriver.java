@@ -26,6 +26,7 @@ import eu.openanalytics.shinyproxy.publisher.binaries.BinaryArchive;
 import eu.openanalytics.shinyproxy.publisher.binaries.BinaryBuildQueue.BuildClaim;
 import eu.openanalytics.shinyproxy.publisher.binaries.BinaryBuildQueue.BuiltDependency;
 import eu.openanalytics.shinyproxy.publisher.binaries.PackageClosure;
+import eu.openanalytics.shinyproxy.publisher.binaries.PackageHandIn;
 import eu.openanalytics.shinyproxy.publisher.binaries.PackageRecipe;
 import eu.openanalytics.shinyproxy.publisher.binaries.PackageRecipe.HandedIn;
 import eu.openanalytics.shinyproxy.publisher.recipe.RecipeGenerator.Recipe;
@@ -64,17 +65,8 @@ import java.util.function.BooleanSupplier;
  */
 public final class PackageBuildDriver {
 
-    /** What the trusted side hands in for a claim; implemented over forge in step 2d. */
-    public interface HandIn {
-        /** The source tarball's bytes (the recipe checks them against the row's recorded digest). */
-        byte[] source(BuildClaim claim) throws IOException;
-
-        /** A dependency's Skald-uploaded binary (checked against its recorded digest). */
-        byte[] dependency(BuildClaim claim, BuiltDependency dependency) throws IOException;
-
-        /** The claimed row's lock, package -> version (BinaryBuildQueue#lockOf); empty if none. */
-        Map<String, String> lock(BuildClaim claim);
-    }
+    /** What the trusted side hands in for a claim: {@link PackageHandIn} (ForgeHandIn over forge). */
+    public interface HandIn extends PackageHandIn { }
 
     /** Renders the recipe; PackageRecipe in production, a stand-in in Docker tests without R. */
     public interface Renderer {
@@ -119,12 +111,12 @@ public final class PackageBuildDriver {
     private final DockerClient docker;
     private final DockerWorkerLauncher launcher;
     private final BuildKitClient client;
-    private final HandIn handIn;
+    private final PackageHandIn handIn;
     private final Renderer renderer;
     private final Config config;
 
     public PackageBuildDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
-                              HandIn handIn, Renderer renderer, Config config) {
+                              PackageHandIn handIn, Renderer renderer, Config config) {
         this.docker = docker;
         this.launcher = launcher;
         this.client = client;
