@@ -257,6 +257,104 @@ public class SourceVerifierTest {
         assertTrue(String.valueOf(row(id).get("refusal_detail")).contains("archived"), "the detail says why");
     }
 
+    // ------------------------------------------------------------------ archived versions (user, 2026-10-11)
+
+    private static String kind(UUID id) {
+        return jdbc.queryForObject("SELECT source_kind FROM skald.binary_build WHERE id = ?", String.class, id);
+    }
+
+    private static SourceVerifier archived(BinaryBuildQueue q) {
+        return verifier(q, deadline(Duration.ofMinutes(1)).withArchived(true), BinaryQueueSettings.DEFAULTS);
+    }
+
+    /** Serves {@code pkg} {@code version} under the Archive path only. */
+    private static byte[] archive(String pkg, String version) {
+        byte[] tgz = TarBuilder.source(pkg, TarBuilder.description(pkg, version, ""));
+        served.put("src/contrib/Archive/" + pkg + "/" + pkg + "_" + version + ".tar.gz", tgz);
+        return tgz;
+    }
+
+    @Test
+    public void anArchivedVersionIsFetchedFromTheArchiveAndTrustedOnItsFirstFetchWhenOn() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.1", "");
+        byte[] old = archive("aaa", "1.0");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        assertEquals("QUEUED", archived(q).verifyNext("v").orElseThrow().outcome());
+        Map<String, Object> r = row(id);
+        assertEquals(TarBuilder.digest("SHA-256", old), r.get("source_sha256"));
+        assertEquals(TarBuilder.digest("MD5", old), r.get("source_md5"), "computed: no published one to match");
+        assertEquals("archive", kind(id));
+    }
+
+    @Test
+    public void aPackageGoneFromTheIndexIsAnArchivedVersion() {
+        BinaryBuildQueue q = queue();
+        publish("other", "1.0", "");
+        archive("aaa", "1.0");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        assertEquals("QUEUED", archived(q).verifyNext("v").orElseThrow().outcome());
+        assertEquals("archive", kind(id));
+    }
+
+    @Test
+    public void aCurrentVersionIsStillCheckedAgainstTheIndexWhenArchivedIsOn() {
+        BinaryBuildQueue q = queue();
+        byte[] tgz = publish("aaa", "1.0", "");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        assertEquals("QUEUED", archived(q).verifyNext("v").orElseThrow().outcome());
+        assertEquals("index", kind(id));
+        assertEquals(TarBuilder.digest("MD5", tgz), row(id).get("source_md5"));
+        publish("bbb", "1.0", "");
+        index("bbb", "1.0", "0".repeat(32));
+        UUID bad = enqueue(q, "bbb", "1.0", Map.of());
+        assertEquals("REFUSED:MD5_MISMATCH", archived(q).verifyNext("v").orElseThrow().outcome());
+        assertEquals("REFUSED", row(bad).get("state"));
+    }
+
+    @Test
+    public void anArchivedVersionTheProxyCannotServeIsRefused() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.1", "");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        assertEquals("REFUSED:NOT_IN_PUBLIC_SOURCE", archived(q).verifyNext("v").orElseThrow().outcome());
+        assertEquals("REFUSED", row(id).get("state"));
+    }
+
+    @Test
+    public void anArchivedTarballThatChangedSinceItsFirstFetchIsRefused() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.1", "");
+        archive("aaa", "1.0");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        jdbc.update("UPDATE skald.binary_build SET source_sha256 = ?, source_md5 = ?, source_kind = 'archive'"
+            + " WHERE id = ?", "e".repeat(64), "e".repeat(32), id);
+        assertEquals("REFUSED:SOURCE_CHANGED", archived(q).verifyNext("v").orElseThrow().outcome());
+    }
+
+    @Test
+    public void anIndexBehindTheLockIsStillDeferredWhenArchivedIsOn() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "0.9", "");
+        archive("aaa", "1.0");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        assertEquals("DEFERRED", archived(q).verifyNext("v").orElseThrow().outcome(),
+            "a release newer than the index is not an archived one");
+        assertEquals("PENDING_SOURCE", row(id).get("state"));
+    }
+
+    @Test
+    public void aReOpenedRowKeepsTheKindOfItsFirstFetch() {
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.1", "");
+        byte[] old = archive("aaa", "1.0");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        jdbc.update("UPDATE skald.binary_build SET source_sha256 = ?, source_md5 = ?, source_kind = 'index'"
+            + " WHERE id = ?", TarBuilder.digest("SHA-256", old), TarBuilder.digest("MD5", old), id);
+        assertEquals("QUEUED", archived(q).verifyNext("v").orElseThrow().outcome());
+        assertEquals("index", kind(id), "verified against the index when current; archived since");
+    }
+
     @Test
     public void aPackageListedTwiceIsRefused() {
         BinaryBuildQueue q = queue();

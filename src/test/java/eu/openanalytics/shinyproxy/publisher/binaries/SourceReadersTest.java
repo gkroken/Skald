@@ -424,6 +424,10 @@ public class SourceReadersTest {
         assertEquals(Duration.ofSeconds(600), behind.behindMaxRetry());
         assertEquals(Duration.ofHours(72), behind.behindBound());
         assertEquals(Duration.ofHours(48), SourceSettings.DEFAULTS.behindBound(), "a day past forge's 24 h index cache");
+        assertFalse(SourceSettings.DEFAULTS.archived(), "archived versions are opt-in");
+        assertTrue(SourceSettings.fromOverrides(Map.of("source-archived", "true")).archived());
+        assertFalse(SourceSettings.fromOverrides(Map.of("source-archived", "false")).archived());
+        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-archived", "yes")));
         assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of(
             "source-behind-retry-seconds", "600", "source-behind-max-retry-seconds", "60")), "max below first");
         assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of(

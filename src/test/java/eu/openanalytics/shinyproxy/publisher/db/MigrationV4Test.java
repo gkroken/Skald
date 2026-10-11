@@ -336,6 +336,15 @@ public class MigrationV4Test {
     }
 
     @Test
+    public void aSourceKindIsKnownAndNeverChanges() {
+        refusedBy("binary_build_source_kind_known", () -> insert("source_kind", "'mirror'"));
+        UUID id = pending(KEY);
+        jdbc.update("UPDATE skald.binary_build SET source_kind = 'archive' WHERE id = ?", id);
+        refusedBy("binary_build_source_immutable", () -> jdbc.update(
+            "UPDATE skald.binary_build SET source_kind = 'index' WHERE id = ?", id));
+    }
+
+    @Test
     public void aBinaryDigestIsRecordedOnceAndNeverChanges() {
         UUID id = pending(KEY);
         jdbc.update("UPDATE skald.binary_build SET binary_sha256 = ? WHERE id = ?", SHA, id);

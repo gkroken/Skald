@@ -39,7 +39,8 @@ import java.util.TreeSet;
  */
 public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceBytes, long maxExpandedBytes,
                              Duration fetchTimeout, Duration transferDeadline, Duration indexTtl,
-                             Duration behindRetry, Duration behindMaxRetry, Duration behindBound) {
+                             Duration behindRetry, Duration behindMaxRetry, Duration behindBound,
+                             boolean archived) {
 
     /**
      * An index behind the lock (9262bd8-F1) is retried after 5 minutes, doubling to at most 6
@@ -48,19 +49,30 @@ public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceB
      */
     public static final SourceSettings DEFAULTS = new SourceSettings(null, 64L << 20, 256L << 20, 2L << 30,
             Duration.ofSeconds(30), Duration.ofMinutes(10), Duration.ofMinutes(5),
-            Duration.ofMinutes(5), Duration.ofHours(6), Duration.ofHours(48));
+            Duration.ofMinutes(5), Duration.ofHours(6), Duration.ofHours(48), false);
+
+    /**
+     * {@code source-archived} (user, 2026-10-11; off by default): build ARCHIVED versions too
+     * -- the ones the public index no longer lists, so no published checksum exists -- from the
+     * proxy's src/contrib/Archive path, trusting the first fetch (its SHA-256 is recorded and
+     * never changes; a later different fetch is refused) and recording source_kind 'archive'.
+     */
+    public SourceSettings withArchived(boolean on) {
+        return new SourceSettings(repository, maxIndexBytes, maxSourceBytes, maxExpandedBytes, fetchTimeout,
+                transferDeadline, indexTtl, behindRetry, behindMaxRetry, behindBound, on);
+    }
 
     /** These settings with other limits for an index behind the lock. */
     public SourceSettings withBehind(Duration retry, Duration maxRetry, Duration bound) {
         return new SourceSettings(repository, maxIndexBytes, maxSourceBytes, maxExpandedBytes, fetchTimeout,
-                transferDeadline, indexTtl, retry, maxRetry, bound);
+                transferDeadline, indexTtl, retry, maxRetry, bound, archived);
     }
 
     /** The defaults' limits for an index behind the lock. */
     public SourceSettings(URI repository, long maxIndexBytes, long maxSourceBytes, long maxExpandedBytes,
                           Duration fetchTimeout, Duration transferDeadline, Duration indexTtl) {
         this(repository, maxIndexBytes, maxSourceBytes, maxExpandedBytes, fetchTimeout, transferDeadline, indexTtl,
-                Duration.ofMinutes(5), Duration.ofHours(6), Duration.ofHours(48));
+                Duration.ofMinutes(5), Duration.ofHours(6), Duration.ofHours(48), false);
     }
 
     public SourceSettings {
@@ -92,9 +104,17 @@ public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceB
         Duration retry = DEFAULTS.behindRetry;
         Duration maxRetry = DEFAULTS.behindMaxRetry;
         Duration bound = DEFAULTS.behindBound;
+        boolean archived = DEFAULTS.archived;
         for (Map.Entry<String, ?> e : overrides.entrySet()) {
             String key = normal(e.getKey());
             String value = String.valueOf(e.getValue()).trim();
+            if (key.equals("source_archived")) {
+                if (!value.equals("true") && !value.equals("false")) {
+                    throw new IllegalArgumentException("source-archived is true or false, not " + value);
+                }
+                archived = Boolean.parseBoolean(value);
+                continue;
+            }
             if (key.equals("source_repository")) {
                 repository = value.isEmpty() ? null : SafeUrls.parse("source-repository", value);
                 continue;
@@ -121,10 +141,11 @@ public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceB
                         "source_max_index_bytes", "source_max_bytes", "source_max_expanded_bytes",
                         "source_fetch_timeout_seconds", "source_transfer_deadline_seconds",
                         "source_index_ttl_seconds", "source_behind_retry_seconds",
-                        "source_behind_max_retry_seconds", "source_behind_bound_hours")));
+                        "source_behind_max_retry_seconds", "source_behind_bound_hours", "source_archived")));
             }
         }
-        return new SourceSettings(repository, index, source, expanded, timeout, deadline, ttl, retry, maxRetry, bound);
+        return new SourceSettings(repository, index, source, expanded, timeout, deadline, ttl, retry, maxRetry, bound,
+                archived);
     }
 
     private static String normal(String key) {

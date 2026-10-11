@@ -47,8 +47,9 @@ import java.util.concurrent.ScheduledExecutorService;
  *   <li>NO_LOCK: the row has no recorded lock to resolve its dependencies against;</li>
  *   <li>NOT_IN_PUBLIC_INDEX: the public repository's index does not list this package at this
  *       version. CRAN's index lists only each package's CURRENT version, so an archived version
- *       is refused here: no checksum is published for it, and the plan's rule is a source
- *       verified against the public index's checksum;</li>
+ *       has no published checksum. With {@code source-archived} (user, 2026-10-11; off by
+ *       default) it is fetched from the proxy's src/contrib/Archive/&lt;pkg&gt;/ instead, its
+ *       first fetch trusted and recorded as source_kind 'archive'; without it, refused;</li>
  *   <li>the tarball, from the same repository: NOT_IN_PUBLIC_SOURCE if absent; its MD5 must be
  *       the index's (MD5_MISMATCH); SOURCE_CHANGED if the row recorded other digests at a
  *       first fetch (a re-opened row);</li>
@@ -131,7 +132,7 @@ public final class SourceVerifier implements AutoCloseable {
         try {
             Checked checked = check(claim);
             BinaryBuildQueue.Recorded recorded = queue.recordSource(claim.lease(), checked.read().sha256(),
-                    checked.read().md5(), checked.dependencies());
+                    checked.read().md5(), checked.kind(), checked.dependencies());
             log.info("binary source {}: {}", what, recorded);
             return Optional.of(new Result(claim.rowId(), recorded == BinaryBuildQueue.Recorded.QUEUED
                     ? "QUEUED" : "REFUSED:DEPENDENCY_CYCLE"));
@@ -160,7 +161,8 @@ public final class SourceVerifier implements AutoCloseable {
         }
     }
 
-    private record Checked(SourceTarball.Read read, List<BinaryBuildQueue.Dependency> dependencies) { }
+    private record Checked(SourceTarball.Read read, List<BinaryBuildQueue.Dependency> dependencies,
+                           BinaryBuildQueue.SourceKind kind) { }
 
     private Checked check(BinaryBuildQueue.SourceClaim claim) throws IOException, SourceRefusal, IndexBehind {
         Map<String, String> lock = queue.lockOf(claim.requestedBy()).orElseThrow(() -> new SourceRefusal(
@@ -171,7 +173,9 @@ public final class SourceVerifier implements AutoCloseable {
         try (TransferGuard guard = new TransferGuard(beats, deadlines, settings.transferDeadline(), queueSettings.renewEvery(),
                 () -> queue.renew(claim.lease()))) {
             entry = indexEntry(claim, guard);
-            URI tarball = settings.repository().resolve("src/contrib/" + claim.pkg() + "_" + claim.version() + ".tar.gz");
+            String file = claim.pkg() + "_" + claim.version() + ".tar.gz";
+            URI tarball = settings.repository().resolve(entry != null ? "src/contrib/" + file
+                    : "src/contrib/Archive/" + claim.pkg() + "/" + file);
             try (InputStream in = guard.watch(fetcher.open(tarball))) {
                 read = SourceTarball.read(in, claim.pkg(), new SourceTarball.Limits(settings.maxSourceBytes(),
                         settings.maxExpandedBytes()));
@@ -187,7 +191,9 @@ public final class SourceVerifier implements AutoCloseable {
             throw new SourceRefusal("SOURCE_CHANGED", "first fetched with sha256 " + recorded.get().get(0)
                     + "; now " + read.sha256());
         }
-        if (!read.md5().equals(entry.md5())) {
+        // An archived version has no published checksum: its first fetch's digests are what V4
+        // keeps (SOURCE_CHANGED above guards every later fetch), and source_kind says so.
+        if (entry != null && !read.md5().equals(entry.md5())) {
             throw new SourceRefusal("MD5_MISMATCH", "the tarball's MD5 is " + read.md5() + "; the public index says "
                     + entry.md5());
         }
@@ -196,10 +202,12 @@ public final class SourceVerifier implements AutoCloseable {
             throw new SourceRefusal("DESCRIPTION_MISMATCH", "the DESCRIPTION names " + description.get("Package")
                     + " " + description.get("Version"));
         }
-        return new Checked(read, dependencies(description, lock, baseLibrary.apply(claim.platformKey())));
+        return new Checked(read, dependencies(description, lock, baseLibrary.apply(claim.platformKey())),
+                entry != null ? BinaryBuildQueue.SourceKind.INDEX : BinaryBuildQueue.SourceKind.ARCHIVE);
     }
 
     /** The index's entry for exactly the claimed version, refetched once if the index is behind. */
+    /** The index's entry for exactly the claimed version, or null for an archived version when those are on. */
     private CranIndex.Entry indexEntry(BinaryBuildQueue.SourceClaim claim, TransferGuard guard)
             throws IOException, SourceRefusal, IndexBehind {
         Optional<CranIndex.Entry> entry = index.lookup(claim.pkg(), false, guard);
@@ -210,13 +218,19 @@ public final class SourceVerifier implements AutoCloseable {
                         + ", older than the locked " + claim.version());
             }
         }
-        CranIndex.Entry found = entry.orElseThrow(() -> new SourceRefusal("NOT_IN_PUBLIC_INDEX",
-                "the public index does not list " + claim.pkg()));
-        if (!found.version().equals(claim.version())) {
-            throw new SourceRefusal("NOT_IN_PUBLIC_INDEX", "the public index lists " + claim.pkg() + " "
-                    + found.version() + ", not " + claim.version() + " (an archived version has no published checksum)");
+        if (entry.isPresent() && entry.get().version().equals(claim.version())) {
+            return entry.get();
         }
-        return found;
+        // Not listed at this version: the package is gone from the index, or the index lists a
+        // NEWER release (an older one would have been deferred above). That is an archived
+        // version, with no published checksum.
+        if (settings.archived()) {
+            return null;
+        }
+        throw new SourceRefusal("NOT_IN_PUBLIC_INDEX", entry.isEmpty()
+                ? "the public index does not list " + claim.pkg()
+                : "the public index lists " + claim.pkg() + " " + entry.get().version() + ", not " + claim.version()
+                        + " (an archived version has no published checksum; source-archived is off)");
     }
 
     /** The index lags the lock: time resolves it, a retry does not. */

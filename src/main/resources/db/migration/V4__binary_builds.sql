@@ -67,6 +67,10 @@ CREATE TABLE skald.binary_build (
     -- The tarball as first verified: forge's SHA-256 and the public index's MD5sum.
     source_sha256      text,
     source_md5         text,
+    -- How the source was verified (user, 2026-10-11): 'index' -- listed in the public index,
+    -- its MD5 matched; 'archive' -- an archived version the index no longer lists, fetched
+    -- from the proxy's Archive path with no published checksum, trusted on its first fetch.
+    source_kind        text,
     -- UPLOADED: the digest Skald uploaded. PRESENT_FOREIGN: the digest forge holds.
     binary_sha256      text,
     provenance         jsonb,
@@ -116,6 +120,7 @@ CREATE TABLE skald.binary_build (
         (source_sha256 IS NULL OR source_sha256 ~ '^[0-9a-f]{64}$')
         AND (source_md5 IS NULL OR source_md5 ~ '^[0-9a-f]{32}$')
         AND (binary_sha256 IS NULL OR binary_sha256 ~ '^[0-9a-f]{64}$')),
+    CONSTRAINT binary_build_source_kind_known CHECK (source_kind IS NULL OR source_kind IN ('index', 'archive')),
     CONSTRAINT binary_build_attempts_nonnegative CHECK (attempts >= 0 AND deferrals >= 0),
     CONSTRAINT binary_build_deferral_recorded CHECK ((deferrals = 0) = (deferred_since IS NULL))
 );
@@ -133,7 +138,8 @@ BEGIN
             USING ERRCODE = 'check_violation';
     END IF;
     IF (OLD.source_sha256 IS NOT NULL AND NEW.source_sha256 IS DISTINCT FROM OLD.source_sha256)
-            OR (OLD.source_md5 IS NOT NULL AND NEW.source_md5 IS DISTINCT FROM OLD.source_md5) THEN
+            OR (OLD.source_md5 IS NOT NULL AND NEW.source_md5 IS DISTINCT FROM OLD.source_md5)
+            OR (OLD.source_kind IS NOT NULL AND NEW.source_kind IS DISTINCT FROM OLD.source_kind) THEN
         RAISE EXCEPTION 'binary_build_source_immutable: the source digests recorded at first fetch never change'
             USING ERRCODE = 'check_violation';
     END IF;

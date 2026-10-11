@@ -2331,7 +2331,16 @@ below are marked passed by this planning document.
       forge has no stable API for a version's SHA-256 (only its UI's JSON), so the trusted
       side computes it over the bytes it read, cross-checked against the index's MD5sum,
       and V4 keeps it from then on; forge checks the source again at upload.
-      **Open, needs the user: archived versions.** CRAN's index lists only each package's
+      **Archived versions (decided by the user 2026-10-11: option 2; the paragraph below is
+      the question as it was put).** With `skald.builds.binaries.source-archived=true` (off by
+      default), a version the index does not list -- gone from it, or older than the current
+      release -- is fetched from the proxy member's `src/contrib/Archive/<pkg>/`, its first
+      fetch's SHA-256 and MD5 recorded and never changed (SOURCE_CHANGED for any later
+      different fetch) and `source_kind` 'archive' (V4) in place of 'index'; an index older
+      than the lock is still deferred, never taken as archived. forge serves Archive paths
+      and checks an upload against them too (linux.go:195), though from its sourceRepo, which
+      its docs set to the group: forge-issues/005. The question as it was put:
+      **Archived versions.** CRAN's index lists only each package's
       CURRENT version; an archived version (any lock older than the package's last
       release) has no published checksum, so under point 2's rule it is refused
       (NOT_IN_PUBLIC_INDEX, the detail says "archived") and its apps restore it from

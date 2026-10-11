@@ -93,6 +93,14 @@ public final class BinaryBuildQueue {
         FOREIGN
     }
 
+    /** How a source was verified (V4 source_kind). */
+    public enum SourceKind {
+        /** Listed in the public index; its tarball's MD5 matched the index's. */
+        INDEX,
+        /** An archived version: no published checksum; trusted on its first fetch (user, 2026-10-11). */
+        ARCHIVE
+    }
+
     /** What {@link #recordSource} did. */
     public enum Recorded {
         /** QUEUED, its edges recorded; missing dependencies were enqueued. */
@@ -224,6 +232,12 @@ public final class BinaryBuildQueue {
      */
     public Recorded recordSource(BinaryLease lease, String sourceSha256, String sourceMd5,
                                  List<Dependency> dependencies) {
+        return recordSource(lease, sourceSha256, sourceMd5, SourceKind.INDEX, dependencies);
+    }
+
+    /** As above, recording how the source was verified. */
+    public Recorded recordSource(BinaryLease lease, String sourceSha256, String sourceMd5, SourceKind kind,
+                                 List<Dependency> dependencies) {
         if (sourceSha256 == null || !SHA256.matcher(sourceSha256).matches()
                 || sourceMd5 == null || !MD5.matcher(sourceMd5).matches()) {
             throw new IllegalArgumentException("source digests are lower-case hex SHA-256 and MD5");
@@ -252,7 +266,10 @@ public final class BinaryBuildQueue {
                     + "   JOIN reach r ON d.binary_build_id = r.id)"
                     + " SELECT EXISTS (SELECT 1 FROM reach WHERE id = ?)", Boolean.class,
                     deps.stream().map(UUID::toString).toArray(String[]::new), lease.rowId()));
-            String digests = "source_sha256 = ?, source_md5 = ?";
+            // The first fetch's kind stands (V4 keeps it): a re-opened row verified against the index
+            // stays 'index' when its version has since been archived.
+            String digests = "source_sha256 = ?, source_md5 = ?, source_kind = COALESCE(source_kind, '"
+                    + kind.name().toLowerCase(java.util.Locale.ROOT) + "')";
             if (cycle) {
                 int changed = jdbc.update("UPDATE skald.binary_build SET " + digests + ", state = 'REFUSED',"
                         + " refusal_code = 'DEPENDENCY_CYCLE', refusal_detail = ?," + release() + FENCE,
@@ -271,6 +288,7 @@ public final class BinaryBuildQueue {
                     sourceSha256, sourceMd5, lease.rowId(), lease.generation(), lease.owner());
             requireOne(changed, lease, "recording its source");
             audit(lease.owner(), "binary.queued", lease.rowId(), Map.of("source_sha256", sourceSha256,
+                    "source_kind", kind.name().toLowerCase(java.util.Locale.ROOT),
                     "dependencies", String.valueOf(deps.size())));
             return Recorded.QUEUED;
         });

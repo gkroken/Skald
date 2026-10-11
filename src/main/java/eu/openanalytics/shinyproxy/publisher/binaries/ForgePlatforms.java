@@ -75,7 +75,7 @@ public final class ForgePlatforms {
         // be34ce0 N2: plain http carries the write token unencrypted. Fine on loopback or an
         // isolated dev network; said once, loudly, anywhere else. Only the safe part is named.
         String host = settings.url().getHost();
-        if ("http".equals(settings.url().getScheme()) && !(host.equals("localhost") || host.equals("::1")
+        if ("http".equals(settings.url().getScheme()) && !(host.equals("localhost") || host.equals("[::1]")
                 || host.startsWith("127."))) {
             LoggerFactory.getLogger(ForgePlatforms.class).warn("forge-url {} is plain http: the forge token crosses"
                     + " the network unencrypted; use https outside an isolated network", SafeUrls.safe(settings.url()));
