@@ -2379,7 +2379,28 @@ below are marked passed by this planning document.
       its probe rows (a two-level chain among them).
       Fixed in review (0fd04e4-F1): the claim hands in the dependency closure, not only the
       first level (A -> B -> C failed without C: "lazy loading failed"); the recipe refuses
-      two versions of one package in a closure.
+      two versions of one package in a closure. (Superseded in part 2: two versions are resolved to the one
+      the claimed row's lock fixes, ba5dd88 N1.)
+      **Step 2c, part 2, done (this commit's part): the sandbox run.** `PackageBuildDriver`
+      hands in (the source and every closure member's binary, fetched by a `HandIn` the
+      trusted side implements over forge in 2d), resolves a closure's two versions of one
+      package to the one the claimed row's lock fixes (else a failed attempt,
+      DEPENDENCY_CONFLICT; ba5dd88 N1), renders PackageRecipe, launches a T5 worker whose
+      gateway allows the base's registry and nothing else (its Config refuses mirrors and
+      private repositories), stages the context, runs a local-output client (buildctl
+      `--output type=local` into the attempt's own output volume; the registry credential the
+      client's alone, as for a push; no proxy build arguments, no attestation), collects the
+      exported file through the Docker API from the stopped client (exactly `/out/binary.tar.gz`,
+      bounded; anything else exported is refused), and checks it with BinaryArchive. Outcomes:
+      Built (bytes + checked), Refused (HANDIN_DIGEST, OUTPUT, the archive's codes), Failed
+      (HANDIN_FETCH, WORKER_LAUNCH, STAGE, BUILD_FAILED with the last line, WORKER_DIED,
+      DEPENDENCY_CONFLICT), Stopped (the lease's signal; worker killed, everything disposed).
+      Package attempts are named "p" + 32 hex, never an app build's 32 hex, so T7's attempt
+      sweeper never disposes of a running sandbox. **Carried to 2e:** sweeping a dead
+      sandbox's leftovers against the queue's leases; the sandbox's full log to object
+      storage (today the failure's last line); the version-conflict rate measured on two
+      fixture locks weeks apart (ba5dd88 N1); the probe rows on a real R base (a two-level
+      chain, no network from inside the install, no sandbox touching another's output).
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

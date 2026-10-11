@@ -180,7 +180,7 @@ public final class DockerWorkerLauncher {
     /** One launched worker, by the names of everything it owns. Opaque to callers. */
     public record Handle(String attemptId, String network, String gateway, String worker,
                          String socketVolume, String configVolume, String workspaceVolume,
-                         String quotaImage, String client, String contextVolume) {
+                         String quotaImage, String client, String contextVolume, String outputVolume) {
     }
 
     private final DockerClient docker;
@@ -196,7 +196,7 @@ public final class DockerWorkerLauncher {
     static Handle handle(String attemptId) {
         String p = "skald-b-" + attemptId;
         return new Handle(attemptId, p + "-net", p + "-gw", p + "-worker", p + "-sock",
-                p + "-conf", p + "-ws", "skald-quota-" + attemptId + ".img", p + "-client", p + "-ctx");
+                p + "-conf", p + "-ws", "skald-quota-" + attemptId + ".img", p + "-client", p + "-ctx", p + "-out");
     }
 
     /**
@@ -390,6 +390,26 @@ public final class DockerWorkerLauncher {
                 List.of("chown", WORKER_UID + ":" + WORKER_UID, "/w"), labels);
     }
 
+    /**
+     * Creates the attempt's output volume, labelled like every volume of the attempt and
+     * owned by the worker's uid, for a client that exports a build's files to it rather than
+     * pushing an image (T7b: a package's binary). Refuses a volume that already exists: a
+     * stale one would carry an earlier output.
+     */
+    public void prepareOutput(Handle h) throws DockerException, InterruptedException {
+        try {
+            docker.inspectVolume(h.outputVolume());
+            throw new IllegalStateException("volume " + h.outputVolume() + " is already taken, refusing to adopt it");
+        } catch (org.mandas.docker.client.exceptions.NotFoundException
+                 | org.mandas.docker.client.exceptions.VolumeNotFoundException e) {
+            // free
+        }
+        Map<String, String> labels = Map.of(ATTEMPT_LABEL, h.attemptId());
+        createOwnedVolume(h.outputVolume(), labels, null);
+        runHelper("outchown-" + h.attemptId(), images.helper(), false, List.of(h.outputVolume() + ":/o"), List.of(),
+                List.of("chown", WORKER_UID + ":" + WORKER_UID, "/o"), labels);
+    }
+
     /** The attempt's egress gateway as a forward proxy, by name: the daemon's, for pulls. */
     static String proxy(Handle h) {
         return "http://" + h.gateway() + ":" + GatewayConfig.PORT;
@@ -541,7 +561,8 @@ public final class DockerWorkerLauncher {
         for (String c : List.of(h.worker(), h.client(), BuildKitClient.stageHelper(h), h.gateway(),
                 "skald-helper-cleanup-" + h.attemptId(), "skald-helper-check-" + h.attemptId(),
                 "skald-helper-conf-" + h.attemptId(),
-                "skald-helper-quota-" + h.attemptId(), "skald-helper-chown-" + h.attemptId())) {
+                "skald-helper-quota-" + h.attemptId(), "skald-helper-chown-" + h.attemptId(),
+                "skald-helper-outchown-" + h.attemptId())) {
             quietly(errors, () -> {
                 if (ours(docker.inspectContainer(c).config().labels(), h)) {
                     retrying(() -> docker.removeContainer(c, RemoveContainerParam.forceKill(),
@@ -622,7 +643,7 @@ public final class DockerWorkerLauncher {
     }
 
     private static List<String> volumeNames(Handle h) {
-        return List.of(h.contextVolume(), h.workspaceVolume(), h.socketVolume(), h.configVolume());
+        return List.of(h.contextVolume(), h.workspaceVolume(), h.socketVolume(), h.configVolume(), h.outputVolume());
     }
 
     /**

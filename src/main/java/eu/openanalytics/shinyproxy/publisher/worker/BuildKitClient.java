@@ -423,10 +423,117 @@ public final class BuildKitClient {
     }
 
     static String dockerConfig(Push push) {
-        String auth = Base64.getEncoder().encodeToString((push.credential().username() + ":"
-                + push.credential().password()).getBytes(StandardCharsets.UTF_8));
-        return JSON.createObjectNode().set("auths", JSON.createObjectNode().set(push.registryAddress(),
+        return dockerConfig(push.registryAddress(), push.credential());
+    }
+
+    static String dockerConfig(String registryAddress, Credential credential) {
+        String auth = Base64.getEncoder().encodeToString((credential.username() + ":"
+                + credential.password()).getBytes(StandardCharsets.UTF_8));
+        return JSON.createObjectNode().set("auths", JSON.createObjectNode().set(registryAddress,
                 JSON.createObjectNode().put("auth", auth))).toString();
+    }
+
+    // ------------------------------------------------------------------ local output (T7b)
+
+    /** Where a local-output client writes the build's exported files: the attempt's output volume. */
+    static final String OUTPUT_MOUNT = "/out";
+
+    /**
+     * The local-output client's entrypoint: the credential written as for a push (the worker
+     * pulls the base with it), then buildctl; no metadata is printed, since nothing is pushed.
+     */
+    static final List<String> LOCAL_ENTRYPOINT = List.of("sh", "-c",
+            "umask 077 && mkdir /tmp/cfg && printf %s \"$SKALD_DOCKER_CONFIG\" > /tmp/cfg/config.json"
+                    + " && unset SKALD_DOCKER_CONFIG && DOCKER_CONFIG=/tmp/cfg \"$@\"",
+            "sh");
+
+    /**
+     * buildctl for a build whose result is FILES, not an image (a package's binary): the
+     * final stage's files exported to {@link #OUTPUT_MOUNT}. No proxy build arguments (the
+     * recipe's RUN steps have no network; the daemon pulls the base through the gateway
+     * itself), no attestation (no image), no cache.
+     */
+    static List<String> buildctlLocal() {
+        return List.of("buildctl", "--addr", DockerWorkerLauncher.SOCKET_ADDRESS,
+                "build", "--progress", "plain", "--frontend", "dockerfile.v0",
+                "--local", "context=" + CONTEXT_MOUNT + "/ctx", "--local", "dockerfile=" + CONTEXT_MOUNT + "/df",
+                "--output", "type=local,dest=" + OUTPUT_MOUNT);
+    }
+
+    /**
+     * Creates the attempt's output volume and starts a local-output client; returns at once.
+     * The context must be staged. {@code registry} is the host the gateway allows; the
+     * credential lets the worker pull the base from it and is the client's alone, as for a
+     * push.
+     */
+    public void startLocal(Handle h, String registry, Credential credential) throws DockerException, InterruptedException {
+        if (!REGISTRY.matcher(registry).matches() || credential == null) {
+            throw new IllegalArgumentException("a local build needs the registry host and its credential");
+        }
+        launcher.prepareOutput(h);
+        Map<String, String> labels = Map.of(DockerWorkerLauncher.ATTEMPT_LABEL, h.attemptId());
+        HostConfig hc = HostConfig.builder()
+                .networkMode("none")
+                .binds(h.socketVolume() + ":" + DockerWorkerLauncher.SOCKET_MOUNT,
+                        h.contextVolume() + ":" + CONTEXT_MOUNT + ":ro",
+                        h.outputVolume() + ":" + OUTPUT_MOUNT)
+                .readonlyRootfs(true)
+                .tmpfs(Map.of("/tmp", "rw,noexec,nosuid,nodev,size=1m,mode=1777"))
+                .capDrop("ALL")
+                .securityOpt("no-new-privileges")
+                .memory(CLIENT_MEMORY)
+                .memorySwap(CLIENT_MEMORY)
+                .pidsLimit(64)
+                .nanoCpus(1_000_000_000L)
+                .privileged(false)
+                .logConfig(LogConfig.create("json-file", Map.of("max-size", "16m", "max-file", "2")))
+                .build();
+        docker.createContainer(ContainerConfig.builder().image(images.worker())
+                .user(DockerWorkerLauncher.WORKER_UID + ":" + DockerWorkerLauncher.WORKER_UID)
+                .entrypoint(LOCAL_ENTRYPOINT)
+                .cmd(buildctlLocal())
+                .env("SKALD_DOCKER_CONFIG=" + dockerConfig(registry + ":5000", credential))
+                .labels(labels).hostConfig(hc).build(), h.client());
+        docker.startContainer(h.client());
+    }
+
+    /**
+     * After a successful exit: the one file the build exported, {@code /out/<file>}. The
+     * output volume is read through the Docker API from the stopped client, never a host
+     * path, as a tar the trusted side bounds: exactly the output directory and that one
+     * regular file, at most {@code maxBytes}. Anything else the build exported is a refusal:
+     * a package's sandbox exports one file, and nothing else leaves it.
+     */
+    public byte[] collect(Handle h, String file, long maxBytes) throws DockerException, InterruptedException, IOException {
+        if (!RECIPE_FILE.matcher("skald/" + file).matches()) {
+            throw new IllegalArgumentException("not an output file name: " + file);
+        }
+        byte[] found = null;
+        try (var in = docker.archiveContainer(h.client(), OUTPUT_MOUNT + "/");
+             var tar = new org.apache.commons.compress.archivers.tar.TarArchiveInputStream(in)) {
+            TarArchiveEntry e;
+            while ((e = tar.getNextEntry()) != null) {
+                String name = e.getName();
+                if (e.isDirectory() && (name.equals("out/") || name.equals("out"))) {
+                    continue;
+                }
+                if (!name.equals("out/" + file) || !e.isFile() || found != null) {
+                    throw new IllegalStateException("the build exported more than " + file + ": "
+                            + BuildKitDriver.detail(name));
+                }
+                if (e.getSize() > maxBytes) {
+                    throw new IllegalStateException(file + " is " + e.getSize() + " bytes, over " + maxBytes);
+                }
+                found = tar.readNBytes((int) e.getSize());
+                if (found.length != e.getSize()) {
+                    throw new IOException(file + " ended early");
+                }
+            }
+        }
+        if (found == null) {
+            throw new IllegalStateException("the build exported no " + file);
+        }
+        return found;
     }
 
     /** Creates and starts the client; returns at once. The context must be staged. */
