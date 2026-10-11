@@ -406,6 +406,23 @@ public class BinaryUploaderTest {
     }
 
     @Test
+    public void aSourceArchivedSinceItsFirstFetchIsStillHandedIn() throws Exception {
+        // 0b37c7c-F1: kind 'index' (the first fetch's, kept), the version archived since.
+        try (ForgeHandIn h = handIn(queue())) {
+            stored.put("/repository/cran-proxy/src/contrib/Archive/aaa/aaa_1.0.tar.gz", "old".getBytes(StandardCharsets.UTF_8));
+            assertEquals("old", new String(h.source(claim(BinaryBuildQueue.SourceKind.INDEX, null)),
+                StandardCharsets.UTF_8));
+            stored.clear();
+            stored.put("/repository/cran-proxy/src/contrib/aaa_1.0.tar.gz", "current".getBytes(StandardCharsets.UTF_8));
+            assertEquals("current", new String(h.source(claim(BinaryBuildQueue.SourceKind.ARCHIVE, null)),
+                StandardCharsets.UTF_8), "and the other way, should an archived version be current again");
+            stored.clear();
+            assertThrows(IOException.class, () -> h.source(claim(BinaryBuildQueue.SourceKind.INDEX, null)),
+                "on neither path: a failed fetch");
+        }
+    }
+
+    @Test
     public void aDependencyComesFromSkaldsBinaryTreeWithTheToken() throws Exception {
         byte[] dep = binary("bbb", "2.0", null);
         stored.put(TREE + "bbb_2.0.tar.gz", dep);

@@ -871,6 +871,20 @@ public class BinaryBuildQueueTest {
     }
 
     @Test
+    public void aReVerifyThatReadsFewerDependenciesReplacesTheEdges() {
+        // 0b37c7c N1: say the base now carries bbb, so the re-verify no longer names it.
+        BinaryBuildQueue q = queue(new BinaryQueueSettings(Duration.ofSeconds(60), Duration.ofSeconds(20),
+            Duration.ofMinutes(60), 1, 1), CoordinatorSettings.DEFAULTS);
+        UUID a = verified(q, "aaa", "bbb", "ccc");
+        jdbc.update("UPDATE skald.binary_build SET state = 'FAILED', finished_at = now(), error_code = 'X'"
+            + " WHERE id = ?", a);
+        q.reopen(a, "operator", false);
+        q.recordSource(claimSourceOf(q, a).lease(), SHA, MD5, List.of(new Dependency("ccc", "1.0")));
+        assertEquals(List.of("ccc"), jdbc.queryForList("SELECT x.package FROM skald.binary_build_dep d JOIN"
+            + " skald.binary_build x ON x.id = d.dependency_id WHERE d.binary_build_id = ?", String.class, a));
+    }
+
+    @Test
     public void aRowRefusedBeforeItsSourceWasRecordedGoesBackToVerification() {
         BinaryBuildQueue q = queue();
         UUID a = q.enqueue(KEY, "aaa", "1.0", null);

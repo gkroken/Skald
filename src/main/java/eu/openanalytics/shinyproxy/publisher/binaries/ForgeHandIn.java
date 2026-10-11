@@ -76,14 +76,32 @@ public final class ForgeHandIn implements PackageHandIn, AutoCloseable {
         });
     }
 
+    /**
+     * The source from the path its kind names first, and from the other one if that answers
+     * 404 (0b37c7c-F1): a version verified while current is archived by CRAN later -- a row
+     * waiting behind a slow dependency, or re-opened weeks on -- and its kind, the FIRST
+     * fetch's, stays 'index'. Integrity does not depend on the path: PackageRecipe checks the
+     * bytes against the digests the first fetch recorded either way.
+     */
     @Override
     public byte[] source(BuildClaim claim) throws IOException {
         String file = claim.pkg() + "_" + claim.version() + ".tar.gz";
-        URI uri = sourceSettings.repository().resolve(claim.sourceKind() == BinaryBuildQueue.SourceKind.ARCHIVE
-                ? "src/contrib/Archive/" + claim.pkg() + "/" + file : "src/contrib/" + file);
+        String current = "src/contrib/" + file;
+        String archived = "src/contrib/Archive/" + claim.pkg() + "/" + file;
+        boolean isArchive = claim.sourceKind() == BinaryBuildQueue.SourceKind.ARCHIVE;
+        try {
+            return fetchSource(sourceSettings.repository().resolve(isArchive ? archived : current));
+        } catch (SourceFetcher.NotFound first) {
+            return fetchSource(sourceSettings.repository().resolve(isArchive ? current : archived));
+        }
+    }
+
+    private byte[] fetchSource(URI uri) throws IOException {
         try (TransferGuard guard = guard()) {
             try (InputStream in = guard.watch(sources.open(uri))) {
                 return bounded(in, sourceSettings.maxSourceBytes(), uri);
+            } catch (SourceFetcher.NotFound e) {
+                throw e;
             } catch (IOException e) {
                 throw guard.failure(e);
             }

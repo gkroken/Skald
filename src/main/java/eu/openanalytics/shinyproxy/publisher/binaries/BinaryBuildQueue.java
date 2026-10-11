@@ -287,8 +287,12 @@ public final class BinaryBuildQueue {
                 audit(lease.owner(), "binary.refused", lease.rowId(), Map.of("code", "DEPENDENCY_CYCLE"));
                 return Recorded.REFUSED_CYCLE;
             }
+            // The edges are what THIS verification read (0b37c7c N1): a re-verified row's old
+            // edges are replaced, so one no longer read (say, a dependency the base now carries)
+            // does not keep it waiting or refuse it.
+            jdbc.update("DELETE FROM skald.binary_build_dep WHERE binary_build_id = ?", lease.rowId());
             for (UUID dep : deps) {
-                // Idempotent: a re-opened row re-verifies and records the same edges again.
+                // Idempotent: the same dependency named twice in one DESCRIPTION is one edge.
                 jdbc.update("INSERT INTO skald.binary_build_dep (binary_build_id, dependency_id,"
                         + " platform_key) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", lease.rowId(), dep, key);
             }
