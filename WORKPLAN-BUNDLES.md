@@ -2250,8 +2250,9 @@ below are marked passed by this planning document.
          change: V4, planned here, reviewed with the code.
       4. *The sandbox.* One package per worker, the T5 profile, no secrets, and NO
          network: everything it installs is handed in by the trusted side (c365d95-F1).
-         Its context holds the verified source tarball and, for each dependency, the
-         binary the trusted side fetched from Skald's own binary tree for this key and
+         Its context holds the verified source tarball and, for every dependency in its
+         CLOSURE (everything reachable over its edges: R loads the whole Depends/Imports
+         tree; 0fd04e4-F1), the binary the trusted side fetched from Skald's own binary tree for this key and
          checked against that dependency's recorded upload digest; never the group's
          URL, which also serves the operator's hosted packages and falls back to source,
          and never an app's lock (604d63b N2). A row waits while its dependencies can
@@ -2375,7 +2376,10 @@ below are marked passed by this planning document.
       the pinned rocker upstream: rlang 1.3.0 (compiled) built in 12 s with no network and
       passed the check; ellipsis 0.3.3 built against rlang's handed-in binary. Part 2: the
       run in a Skald worker (local output collected by the trusted side), the driver, and
-      its probe rows.
+      its probe rows (a two-level chain among them).
+      Fixed in review (0fd04e4-F1): the claim hands in the dependency closure, not only the
+      first level (A -> B -> C failed without C: "lazy loading failed"); the recipe refuses
+      two versions of one package in a closure.
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

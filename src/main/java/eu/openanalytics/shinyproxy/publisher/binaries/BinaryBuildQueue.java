@@ -46,8 +46,9 @@ import java.util.regex.Pattern;
  * <p>Two leased phases. The trusted side claims a PENDING_SOURCE row to fetch and verify its
  * source ({@link #claimSource}), and records the digests and the dependency edges it read from
  * the verified tarball ({@link #recordSource}); a compile claims a QUEUED row whose every
- * dependency a Skald attempt UPLOADED ({@link #claimBuild}), and is handed exactly those
- * dependencies' recorded digests (89a33dc N1: nothing else enters its sandbox); it records
+ * dependency a Skald attempt UPLOADED ({@link #claimBuild}), and is handed exactly the
+ * recorded digests of every dependency in its closure (89a33dc N1: nothing else enters its
+ * sandbox; 0fd04e4-F1: R loads the whole Depends/Imports tree, not only the first level); it records
  * what it is about to upload before uploading it ({@link #intendUpload}), so a 409 meeting
  * its own earlier upload is told from a foreign binary (1fba61d-F1). A dependency
  * that ends any other way -- refused, failed, or a binary Skald did not produce -- refuses its
@@ -79,7 +80,7 @@ public final class BinaryBuildQueue {
     /** A dependency handed into a sandbox: its Skald-uploaded binary, by recorded digest. */
     public record BuiltDependency(String pkg, String version, String binarySha256) { }
 
-    /** A row to compile: its verified source and its dependencies' Skald-built binaries. */
+    /** A row to compile: its verified source and the Skald-built binaries of its dependency closure. */
     public record BuildClaim(UUID rowId, String platformKey, String pkg, String version,
                              String sourceSha256, String sourceMd5, List<BuiltDependency> dependencies,
                              BinaryLease lease) { }
@@ -280,8 +281,14 @@ public final class BinaryBuildQueue {
     /**
      * Claims the oldest QUEUED row whose every dependency a Skald attempt UPLOADED, if the app
      * builds leave room (the class comment): QUEUED -> RUNNING with a fresh lease. First, rows
-     * a dependency can no longer satisfy are refused. The claim carries each dependency's
-     * recorded binary digest, the only thing the sandbox may be handed for it.
+     * a dependency can no longer satisfy are refused. The claim carries the recorded binary
+     * digest of every row in the claimed row's dependency CLOSURE (every row reachable over
+     * its edges), the only thing the sandbox may be handed for each: installing a package
+     * loads its dependencies' namespaces, and each of those loads its own (0fd04e4-F1: A ->
+     * B -> C fails without C). Every member is UPLOADED, by induction: a row is claimable
+     * only once its direct dependencies are, UPLOADED is final, and its digest never changes
+     * (V4's trigger). A base-library package is never a row (the source check skips it), so
+     * the sandbox finds it in the base.
      */
     public Optional<BuildClaim> claimBuild(String owner) {
         return tx.execute(status -> {
@@ -312,11 +319,13 @@ public final class BinaryBuildQueue {
             }
             Map<String, Object> row = rows.get(0);
             BinaryLease lease = lease(row, owner);
-            // Every edge's row is UPLOADED: the claim's own WHERE chose this row for that, in this
-            // transaction, and UPLOADED is final with a digest that never changes (V4's trigger).
-            List<BuiltDependency> deps = jdbc.query("SELECT x.package, x.version, x.binary_sha256"
-                    + " FROM skald.binary_build_dep d JOIN skald.binary_build x ON x.id = d.dependency_id"
-                    + " WHERE d.binary_build_id = ? ORDER BY x.package",
+            // The closure, as the cycle check walks it; UNION, so a member reached twice is one.
+            List<BuiltDependency> deps = jdbc.query("WITH RECURSIVE closure(id) AS ("
+                    + "   SELECT dependency_id FROM skald.binary_build_dep WHERE binary_build_id = ?"
+                    + "   UNION SELECT d.dependency_id FROM skald.binary_build_dep d"
+                    + "   JOIN closure c ON d.binary_build_id = c.id)"
+                    + " SELECT x.package, x.version, x.binary_sha256 FROM closure c"
+                    + " JOIN skald.binary_build x ON x.id = c.id ORDER BY x.package, x.version",
                     (rs, i) -> new BuiltDependency(rs.getString(1), rs.getString(2), rs.getString(3)),
                     lease.rowId());
             audit(owner, "binary.claimed", lease.rowId(), Map.of("generation", String.valueOf(lease.generation())));

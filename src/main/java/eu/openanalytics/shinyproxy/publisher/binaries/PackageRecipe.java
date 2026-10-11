@@ -51,6 +51,10 @@ import java.util.regex.Pattern;
  *   <li>The export is a {@code FROM scratch} stage holding only {@code /binary.tar.gz}: no
  *       other file of the sandbox leaves it. The trusted side checks it (BinaryArchive)
  *       before anything is uploaded.</li>
+ *   <li>The dependencies are the claimed row's whole closure (0fd04e4-F1), each package
+ *       once: two versions of one package (two rows resolved against different locks) would
+ *       unpack into one directory and the last would win, so they are refused rather than
+ *       ordered.</li>
  *   <li>No build argument, secret or credential appears: there is none to give.</li>
  * </ul>
  */
@@ -91,8 +95,12 @@ public final class PackageRecipe {
         Map<String, byte[]> files = new LinkedHashMap<>();
         files.put("skald/source.tar.gz", source.bytes());
         int n = 0;
+        java.util.Set<String> seen = new java.util.HashSet<>();
         for (HandedIn d : dependencies) {
             requireForm(d);
+            if (!seen.add(d.pkg())) {
+                throw new IllegalArgumentException("two versions of " + d.pkg() + " in one dependency closure");
+            }
             if (d.pkg().equals(source.pkg())) {
                 throw new IllegalArgumentException(d.pkg() + " is handed in as its own dependency");
             }

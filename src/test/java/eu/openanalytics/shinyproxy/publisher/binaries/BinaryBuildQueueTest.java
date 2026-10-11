@@ -46,6 +46,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
@@ -346,6 +347,31 @@ public class BinaryBuildQueueTest {
         assertEquals(shiny, s.rowId());
         assertEquals(List.of(new BinaryBuildQueue.BuiltDependency("httpuv", "1.0", "2".repeat(64)),
             new BinaryBuildQueue.BuiltDependency("later", "1.0", "1".repeat(64))), s.dependencies());
+    }
+
+    @Test
+    public void aClaimCarriesTheWholeDependencyClosure() {
+        // 0fd04e4-F1: aaa -> bbb -> ccc, and aaa -> ddd -> ccc (a diamond): installing aaa loads
+        // bbb's and ddd's namespaces, which load ccc's; the sandbox needs all three, ccc once.
+        BinaryBuildQueue q = queue();
+        UUID aaa = verified(q, "aaa", "bbb", "ddd");
+        UUID bbb = verified(q, "bbb", "ccc");
+        UUID ddd = verified(q, "ddd", "ccc");
+        UUID ccc = verified(q, "ccc");
+        uploaded(q, ccc, "c".repeat(64));
+        BuildClaim second = q.claimBuild("b").orElseThrow();
+        assertEquals(List.of(new BinaryBuildQueue.BuiltDependency("ccc", "1.0", "c".repeat(64))),
+            second.dependencies());
+        upload(q, second.lease(), second.rowId().equals(bbb) ? "b".repeat(64) : "d".repeat(64));
+        BuildClaim third = q.claimBuild("b").orElseThrow();
+        upload(q, third.lease(), third.rowId().equals(bbb) ? "b".repeat(64) : "d".repeat(64));
+        BuildClaim top = q.claimBuild("b").orElseThrow();
+        assertEquals(aaa, top.rowId());
+        assertEquals(List.of(new BinaryBuildQueue.BuiltDependency("bbb", "1.0", "b".repeat(64)),
+            new BinaryBuildQueue.BuiltDependency("ccc", "1.0", "c".repeat(64)),
+            new BinaryBuildQueue.BuiltDependency("ddd", "1.0", "d".repeat(64))), top.dependencies(),
+            "the direct dependencies and ccc, once");
+        assertTrue(Set.of(bbb, ddd).contains(second.rowId()) && Set.of(bbb, ddd).contains(third.rowId()));
     }
 
     @Test

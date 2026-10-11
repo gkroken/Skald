@@ -121,6 +121,15 @@ public class PackageSandboxTest {
             "python", "3.13.16", "10001", "10001", "trixie"), handed("foo", "1.0", src), List.of()));
     }
 
+    @Test
+    public void aClosureWithTwoVersionsOfOnePackageIsRefused() {
+        byte[] src = TarBuilder.source("foo", TarBuilder.description("foo", "1.0", ""));
+        byte[] one = installed("bar", "1.0", BUILT).tgz();
+        byte[] two = installed("bar", "2.0", BUILT).tgz();
+        assertThrows(IllegalArgumentException.class, () -> PackageRecipe.render(BASE, handed("foo", "1.0", src),
+            List.of(handed("bar", "1.0", one), handed("bar", "2.0", two))));
+    }
+
     // ------------------------------------------------------------------ the archive check
 
     @Test
