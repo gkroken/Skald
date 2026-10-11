@@ -45,11 +45,13 @@ import java.util.concurrent.ScheduledExecutorService;
  * <p>In order, each refusal final for the row (its apps keep restoring it from source):
  * <ol>
  *   <li>NO_LOCK: the row has no recorded lock to resolve its dependencies against;</li>
- *   <li>NOT_IN_PUBLIC_INDEX: the public repository's index does not list this package at this
- *       version. CRAN's index lists only each package's CURRENT version, so an archived version
- *       has no published checksum. With {@code source-archived} (user, 2026-10-11; off by
- *       default) it is fetched from the proxy's src/contrib/Archive/&lt;pkg&gt;/ instead, its
- *       first fetch trusted and recorded as source_kind 'archive'; without it, refused;</li>
+ *   <li>NOT_IN_PUBLIC_INDEX: the public repository's index lists the package at another,
+ *       NEWER version, or more than once. CRAN's index lists only each package's CURRENT
+ *       version, so an archived version has no published checksum. With
+ *       {@code source-archived} (user, 2026-10-11; off by default) an unlisted version is
+ *       fetched from the proxy's src/contrib/Archive/&lt;pkg&gt;/ instead, its first fetch trusted
+ *       and recorded as source_kind 'archive'; without it, refused. An index that does not
+ *       list the package at all, or lists an OLDER version, is behind the lock: deferred;</li>
  *   <li>the tarball, from the same repository: NOT_IN_PUBLIC_SOURCE if absent; its MD5 must be
  *       the index's (MD5_MISMATCH); SOURCE_CHANGED if the row recorded other digests at a
  *       first fetch (a re-opened row);</li>
@@ -169,10 +171,13 @@ public final class SourceVerifier implements AutoCloseable {
                 "NO_LOCK", "no recorded lock resolves this package's dependencies"));
         Optional<List<String>> recorded = queue.recordedSource(claim.rowId());
         CranIndex.Entry entry;
+        boolean absent;
         SourceTarball.Read read;
         try (TransferGuard guard = new TransferGuard(beats, deadlines, settings.transferDeadline(), queueSettings.renewEvery(),
                 () -> queue.renew(claim.lease()))) {
-            entry = indexEntry(claim, guard);
+            Listing listing = indexEntry(claim, guard);
+            entry = listing.entry();
+            absent = listing.absent();
             String file = claim.pkg() + "_" + claim.version() + ".tar.gz";
             URI tarball = settings.repository().resolve(entry != null ? "src/contrib/" + file
                     : "src/contrib/Archive/" + claim.pkg() + "/" + file);
@@ -180,6 +185,12 @@ public final class SourceVerifier implements AutoCloseable {
                 read = SourceTarball.read(in, claim.pkg(), new SourceTarball.Limits(settings.maxSourceBytes(),
                         settings.maxExpandedBytes()));
             } catch (SourceFetcher.NotFound ex) {
+                if (absent) {
+                    // Neither the index nor the Archive has it: a first release forge's cached
+                    // index does not list yet (7980b8e-F1). Deferred, and refused at the bound.
+                    throw new IndexBehind("neither the public index nor its Archive has " + claim.pkg() + " "
+                            + claim.version() + " yet");
+                }
                 throw new SourceRefusal("NOT_IN_PUBLIC_SOURCE", "the public repository has no " + tarball.getPath());
             } catch (IOException ex) {
                 throw guard.failure(ex);
@@ -206,31 +217,53 @@ public final class SourceVerifier implements AutoCloseable {
                 entry != null ? BinaryBuildQueue.SourceKind.INDEX : BinaryBuildQueue.SourceKind.ARCHIVE);
     }
 
-    /** The index's entry for exactly the claimed version, refetched once if the index is behind. */
-    /** The index's entry for exactly the claimed version, or null for an archived version when those are on. */
-    private CranIndex.Entry indexEntry(BinaryBuildQueue.SourceClaim claim, TransferGuard guard)
+    /**
+     * What the index says of the claimed version: its entry (checked against its MD5), or no
+     * entry -- an archived version, fetched from the Archive path when source-archived is on.
+     * {@code absent}: the index does not list the package at all, so the Archive may have
+     * nothing either (a package's first release), and a miss there is a wait, not a refusal.
+     */
+    private record Listing(CranIndex.Entry entry, boolean absent) { }
+
+    /**
+     * The index's answer for the claimed version. An index that lists an OLDER version, or does
+     * not list the package at all, is fetched once more ignoring the TTL; still older, or still
+     * absent with source-archived off, it is behind the lock (a release newer than forge's
+     * cached index, 9262bd8-F1; a package's first release, 7980b8e-F1) and the row is
+     * deferred. A package listed twice is ambiguous and refused. An index that lists a NEWER
+     * version means the claimed one is archived.
+     */
+    private Listing indexEntry(BinaryBuildQueue.SourceClaim claim, TransferGuard guard)
             throws IOException, SourceRefusal, IndexBehind {
         Optional<CranIndex.Entry> entry = index.lookup(claim.pkg(), false, guard);
-        if (entry.isPresent() && behind(entry.get(), claim.version())) {
+        if (entry.isEmpty() || behind(entry.get(), claim.version())) {
             entry = index.lookup(claim.pkg(), true, guard);
-            if (entry.isPresent() && behind(entry.get(), claim.version())) {
-                throw new IndexBehind("the public index lists " + claim.pkg() + " " + entry.get().version()
-                        + ", older than the locked " + claim.version());
-            }
+        }
+        if (index.ambiguous(claim.pkg())) {
+            throw new SourceRefusal("NOT_IN_PUBLIC_INDEX", "the public index lists " + claim.pkg() + " more than once");
+        }
+        if (entry.isPresent() && behind(entry.get(), claim.version())) {
+            throw new IndexBehind("the public index lists " + claim.pkg() + " " + entry.get().version()
+                    + ", older than the locked " + claim.version());
         }
         if (entry.isPresent() && entry.get().version().equals(claim.version())) {
-            return entry.get();
+            return new Listing(entry.get(), false);
         }
-        // Not listed at this version: the package is gone from the index, or the index lists a
-        // NEWER release (an older one would have been deferred above). That is an archived
-        // version, with no published checksum.
+        if (entry.isEmpty()) {
+            if (!settings.archived()) {
+                throw new IndexBehind("the public index does not list " + claim.pkg() + " (a first release is listed"
+                        + " once forge's cached index catches up)");
+            }
+            return new Listing(null, true);
+        }
+        // The index lists a NEWER release: the claimed version is archived, with no published
+        // checksum.
         if (settings.archived()) {
-            return null;
+            return new Listing(null, false);
         }
-        throw new SourceRefusal("NOT_IN_PUBLIC_INDEX", entry.isEmpty()
-                ? "the public index does not list " + claim.pkg()
-                : "the public index lists " + claim.pkg() + " " + entry.get().version() + ", not " + claim.version()
-                        + " (an archived version has no published checksum; source-archived is off)");
+        throw new SourceRefusal("NOT_IN_PUBLIC_INDEX", "the public index lists " + claim.pkg() + " "
+                + entry.get().version() + ", not " + claim.version()
+                + " (an archived version has no published checksum; source-archived is off)");
     }
 
     /** The index lags the lock: time resolves it, a retry does not. */

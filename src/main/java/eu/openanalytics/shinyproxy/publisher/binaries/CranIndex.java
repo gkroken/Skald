@@ -58,6 +58,7 @@ final class CranIndex {
     private final long ttlNanos;
     private final LongSupplier nanoTime;
     private Map<String, Entry> entries;
+    private java.util.Set<String> ambiguous = java.util.Set.of();
     private long fetchedAt;
 
     CranIndex(SourceFetcher fetcher, URI repository, long maxBytes, long ttlNanos, LongSupplier nanoTime) {
@@ -81,16 +82,23 @@ final class CranIndex {
         }
         if (current == null) {
             long at = nanoTime.getAsLong();
-            current = fetch(guard);
+            java.util.Set<String> twice = new java.util.HashSet<>();
+            current = fetch(guard, twice);
             synchronized (this) {
                 entries = current;
+                ambiguous = java.util.Set.copyOf(twice);
                 fetchedAt = at;
             }
         }
         return Optional.ofNullable(current.get(pkg));
     }
 
-    private Map<String, Entry> fetch(TransferGuard guard) throws IOException, SourceRefusal {
+    /** True if the last fetched index listed {@code pkg} more than once (answered as absent). */
+    synchronized boolean ambiguous(String pkg) {
+        return ambiguous.contains(pkg);
+    }
+
+    private Map<String, Entry> fetch(TransferGuard guard, java.util.Set<String> twice) throws IOException, SourceRefusal {
         byte[] body;
         try (InputStream in = guard.watch(fetcher.open(uri))) {
             body = in.readNBytes((int) Math.min(Integer.MAX_VALUE - 8, maxBytes + 1));
@@ -121,6 +129,7 @@ final class CranIndex {
             }
             if (seen.merge(pkg, 1, Integer::sum) > 1) {
                 out.remove(pkg);
+                twice.add(pkg);
                 continue;
             }
             out.put(pkg, new Entry(version, md5));

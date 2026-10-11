@@ -283,13 +283,13 @@ public final class BinaryBuildQueue {
                 jdbc.update("INSERT INTO skald.binary_build_dep (binary_build_id, dependency_id,"
                         + " platform_key) VALUES (?, ?, ?)", lease.rowId(), dep, key);
             }
-            int changed = jdbc.update("UPDATE skald.binary_build SET " + digests + ", state = 'QUEUED',"
-                    + " attempts = 0, deadline_at = NULL," + idle() + FENCE,
-                    sourceSha256, sourceMd5, lease.rowId(), lease.generation(), lease.owner());
-            requireOne(changed, lease, "recording its source");
+            List<String> stored = jdbc.queryForList("UPDATE skald.binary_build SET " + digests + ", state = 'QUEUED',"
+                    + " attempts = 0, deadline_at = NULL," + idle() + FENCE + " RETURNING source_kind",
+                    String.class, sourceSha256, sourceMd5, lease.rowId(), lease.generation(), lease.owner());
+            requireOne(stored.size(), lease, "recording its source");
+            // The kind the row KEEPS (7980b8e N2: the first fetch's, which may differ from this call's).
             audit(lease.owner(), "binary.queued", lease.rowId(), Map.of("source_sha256", sourceSha256,
-                    "source_kind", kind.name().toLowerCase(java.util.Locale.ROOT),
-                    "dependencies", String.valueOf(deps.size())));
+                    "source_kind", stored.get(0), "dependencies", String.valueOf(deps.size())));
             return Recorded.QUEUED;
         });
     }

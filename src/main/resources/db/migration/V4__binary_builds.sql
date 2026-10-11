@@ -64,7 +64,9 @@ CREATE TABLE skald.binary_build (
     not_before         timestamptz,
     deferrals          integer     NOT NULL DEFAULT 0,
     deferred_since     timestamptz,
-    -- The tarball as first verified: forge's SHA-256 and the public index's MD5sum.
+    -- The tarball as first verified: its SHA-256 and MD5 computed over the bytes fetched; for
+    -- source_kind 'index' the MD5 also matched the public index's MD5sum, for 'archive' there
+    -- was none to match.
     source_sha256      text,
     source_md5         text,
     -- How the source was verified (user, 2026-10-11): 'index' -- listed in the public index,

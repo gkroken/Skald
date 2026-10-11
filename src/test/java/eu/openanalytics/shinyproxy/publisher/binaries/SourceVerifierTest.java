@@ -240,11 +240,41 @@ public class SourceVerifierTest {
     }
 
     @Test
-    public void aPackageTheIndexDoesNotListIsRefused() {
+    public void aPackageTheIndexDoesNotListYetIsDeferredWithEitherSwitch() {
+        // 7980b8e-F1: a package's first release, locked within forge's cached index's TTL: the
+        // tarball is served at src/contrib, the index does not list it. Neither a refusal (off)
+        // nor an Archive miss (on) may end it; the row waits for the index.
+        for (boolean archivedOn : new boolean[] {false, true}) {
+            clean();
+            BinaryBuildQueue q = queue();
+            publish("other", "1.0", "");
+            byte[] tgz = TarBuilder.source("aaa", TarBuilder.description("aaa", "1.0", ""));
+            served.put("src/contrib/aaa_1.0.tar.gz", tgz);
+            UUID id = enqueue(q, "aaa", "1.0", Map.of());
+            SourceVerifier v = verifier(q, deadline(Duration.ofMinutes(1)).withArchived(archivedOn),
+                BinaryQueueSettings.DEFAULTS);
+            assertEquals("DEFERRED", v.verifyNext("v").orElseThrow().outcome(), "archived=" + archivedOn);
+            Map<String, Object> r = row(id);
+            assertEquals("PENDING_SOURCE", r.get("state"));
+            assertEquals(1, r.get("deferrals"));
+            assertEquals(0, r.get("attempts"));
+            index("aaa", "1.0", TarBuilder.digest("MD5", tgz));
+            jdbc.update("UPDATE skald.binary_build SET not_before = now() - interval '1 second' WHERE id = ?", id);
+            assertEquals("QUEUED", v.verifyNext("v").orElseThrow().outcome(), "once listed, archived=" + archivedOn);
+            assertEquals("index", jdbc.queryForObject("SELECT source_kind FROM skald.binary_build WHERE id = ?",
+                String.class, id), "held to the index's MD5, never taken without one");
+        }
+    }
+
+    @Test
+    public void aPackageStillUnlistedAtTheBoundIsRefused() {
         BinaryBuildQueue q = queue();
         publish("other", "1.0", "");
         UUID id = enqueue(q, "aaa", "1.0", Map.of());
-        refusedWith("NOT_IN_PUBLIC_INDEX", q, id);
+        assertEquals("DEFERRED", outcome(q));
+        jdbc.update("UPDATE skald.binary_build SET not_before = NULL, deferred_since = now() - interval '49 hours'"
+            + " WHERE id = ?", id);
+        assertEquals("REFUSED:INDEX_BEHIND", outcome(q));
     }
 
     @Test
@@ -285,6 +315,15 @@ public class SourceVerifierTest {
         assertEquals(TarBuilder.digest("SHA-256", old), r.get("source_sha256"));
         assertEquals(TarBuilder.digest("MD5", old), r.get("source_md5"), "computed: no published one to match");
         assertEquals("archive", kind(id));
+    }
+
+    @Test
+    public void anUnlistedPackageTheArchiveLacksIsDeferredNotRefused() {
+        BinaryBuildQueue q = queue();
+        publish("other", "1.0", "");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        assertEquals("DEFERRED", archived(q).verifyNext("v").orElseThrow().outcome());
+        assertTrue(String.valueOf(row(id).get("error_detail")).contains("Archive"), String.valueOf(row(id).get("error_detail")));
     }
 
     @Test
@@ -353,6 +392,9 @@ public class SourceVerifierTest {
             + " WHERE id = ?", TarBuilder.digest("SHA-256", old), TarBuilder.digest("MD5", old), id);
         assertEquals("QUEUED", archived(q).verifyNext("v").orElseThrow().outcome());
         assertEquals("index", kind(id), "verified against the index when current; archived since");
+        assertEquals("index", jdbc.queryForObject("SELECT detail_json ->> 'source_kind' FROM skald.audit_event"
+            + " WHERE action = 'binary.queued' AND subject_id = ?", String.class, id.toString()),
+            "the audit records the kind the row keeps (7980b8e N2)");
     }
 
     @Test
