@@ -37,6 +37,8 @@ import java.util.Optional;
 import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
+import org.slf4j.LoggerFactory;
+
 /**
  * forge's platform registrations, read with Skald's own token (forge issue 004, fixed in forge
  * 8545709: GET /api/v1/cran/platforms/{key} with any valid token; 404 for an unknown key; 401
@@ -70,6 +72,14 @@ public final class ForgePlatforms {
         }
         this.settings = settings;
         this.nanoTime = nanoTime;
+        // be34ce0 N2: plain http carries the write token unencrypted. Fine on loopback or an
+        // isolated dev network; said once, loudly, anywhere else. Only the safe part is named.
+        String host = settings.url().getHost();
+        if ("http".equals(settings.url().getScheme()) && !(host.equals("localhost") || host.equals("::1")
+                || host.startsWith("127."))) {
+            LoggerFactory.getLogger(ForgePlatforms.class).warn("forge-url {} is plain http: the forge token crosses"
+                    + " the network unencrypted; use https outside an isolated network", SafeUrls.safe(settings.url()));
+        }
         this.http = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.NEVER)
                 .connectTimeout(settings.timeout()).build();
     }

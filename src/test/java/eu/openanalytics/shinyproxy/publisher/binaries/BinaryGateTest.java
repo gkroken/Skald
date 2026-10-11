@@ -227,6 +227,30 @@ public class BinaryGateTest {
     }
 
     @Test
+    public void aRefusedUrlNeverRepeatsWhatItCarries() {
+        // be34ce0-F1: a URL is refused exactly when it carries userinfo, a query or a fragment,
+        // where secrets go; the refusal (which Spring logs at startup) must not repeat them.
+        for (String setting : List.of("forge-url", "source-repository")) {
+            for (String bad : List.of("https://skald:s3cretPW@forge.example/", "https://forge.example/?token=s3cretQ",
+                    "https://forge.example/a b?t=s3cretS", "https://forge.example/x#s3cretF")) {
+                IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> {
+                    if (setting.equals("forge-url")) {
+                        ForgeSettings.fromOverrides(Map.of("forge-url", bad, "forge-token", TOKEN));
+                    } else {
+                        SourceSettings.fromOverrides(Map.of("source-repository", bad));
+                    }
+                }, bad);
+                assertFalse(e.getMessage().contains("s3cret"), setting + ": " + e.getMessage());
+                assertTrue(e.getMessage().contains(setting), e.getMessage());
+            }
+        }
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> ForgeSettings.fromOverrides(
+            Map.of("forge-url", "https://u:p@forge.example:8443/", "forge-token", TOKEN)));
+        assertTrue(e.getMessage().contains("credentials (user information)") && e.getMessage()
+            .contains("https://forge.example:8443"), "says what is wrong and the safe part: " + e.getMessage());
+    }
+
+    @Test
     public void theApplicationSplitsForgeKeysFromTheOthers() {
         new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(ConfigurationPropertiesAutoConfiguration.class))

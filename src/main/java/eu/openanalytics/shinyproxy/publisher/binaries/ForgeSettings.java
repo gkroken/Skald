@@ -52,13 +52,7 @@ public record ForgeSettings(URI url, String binaryRepository, String token, Dura
 
     public ForgeSettings {
         if (url != null) {
-            String scheme = url.getScheme();
-            if (scheme == null || !(scheme.equals("http") || scheme.equals("https")) || url.getHost() == null
-                    || url.getRawUserInfo() != null || url.getRawQuery() != null || url.getRawFragment() != null
-                    || url.getRawPath() == null || !url.getRawPath().endsWith("/")) {
-                throw new IllegalArgumentException("forge-url must be an http(s) URL ending in '/', without"
-                        + " credentials, query or fragment: " + url);
-            }
+            SafeUrls.requireBase("forge-url", url);
             if (token == null || token.isBlank() || token.chars().anyMatch(c -> c < 0x21 || c > 0x7e)) {
                 throw new IllegalArgumentException("forge-token is required with forge-url, as printable ASCII");
             }
@@ -85,7 +79,7 @@ public record ForgeSettings(URI url, String binaryRepository, String token, Dura
         for (Map.Entry<String, ?> e : overrides.entrySet()) {
             String value = String.valueOf(e.getValue()).trim();
             switch (normal(e.getKey())) {
-                case "forge_url" -> url = value.isEmpty() ? null : URI.create(value);
+                case "forge_url" -> url = value.isEmpty() ? null : SafeUrls.parse("forge-url", value);
                 case "forge_binary_repository" -> repo = value;
                 case "forge_token" -> token = value.isEmpty() ? null : value;
                 case "forge_registration_ttl_seconds" -> ttl = Duration.ofSeconds(integer(e.getKey(), value));

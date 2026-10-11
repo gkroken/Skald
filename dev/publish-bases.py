@@ -37,6 +37,22 @@ _spec.loader.exec_module(bases)
 REGISTRY = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*(?::[0-9]{1,5})?")
 
 
+def config_digest(ref, architecture):
+    """The config digest of ref's image for linux/<architecture>, from the registry; None if unreadable."""
+    raw = bases.docker(["buildx", "imagetools", "inspect", "--raw", ref], timeout=300)
+    if raw.returncode != 0:
+        return None
+    manifest = json.loads(raw.stdout)
+    if "manifests" in manifest:
+        mine = [m for m in manifest["manifests"] if m.get("platform", {}).get("os") == "linux"
+                and m.get("platform", {}).get("architecture") == architecture]
+        if len(mine) != 1:
+            return None
+        return config_digest(ref.split("@", 1)[0] + "@" + mine[0]["digest"], architecture)
+    digest = manifest.get("config", {}).get("digest", "")
+    return digest if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) else None
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--push-to", required=True)
@@ -90,12 +106,14 @@ def main(argv):
                 print("  FAIL  pushed: %s  no digest for %s in %s" % (e["id"], repo, digests))
                 return 1
             published[e["id"]] = "%s/skald/base/%s@%s" % (a.registry, e["id"], digest)
-            # The image ID (its config digest), which forge's platform registration names
-            # (T7b): fixed by the manifest just pushed, recorded here so Skald never has to
-            # pull the base or ask the registry for it.
-            image_id = bases.docker(["inspect", "--format", "{{.Id}}", pushed]).stdout.strip()
-            if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
-                print("  FAIL  pushed: %s  no image id: %r" % (e["id"], image_id))
+            # The image ID, which forge's platform registration names (T7b): the CONFIG digest
+            # of the manifest just pushed, read from the registry (be34ce0 N1: `docker inspect
+            # .Id` is the config digest on the classic image store but the manifest/index digest
+            # on the containerd store, so it would depend on this host). Recorded here so Skald
+            # never pulls the base or asks the registry for it.
+            image_id = config_digest("%s@%s" % (repo, digest), e["architecture"])
+            if not image_id:
+                print("  FAIL  pushed: %s  no config digest for %s@%s" % (e["id"], repo, digest))
                 return 1
             image_ids[e["id"]] = image_id
             print("  ok    pushed: %s  %s" % (e["id"], published[e["id"]]))

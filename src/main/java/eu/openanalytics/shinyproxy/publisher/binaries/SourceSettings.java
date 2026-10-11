@@ -71,14 +71,7 @@ public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceB
             throw new IllegalArgumentException("source settings must be positive");
         }
         if (repository != null) {
-            String scheme = repository.getScheme();
-            if (scheme == null || !(scheme.equals("http") || scheme.equals("https")) || repository.getHost() == null
-                    || repository.getRawUserInfo() != null || repository.getRawQuery() != null
-                    || repository.getRawFragment() != null || repository.getRawPath() == null
-                    || !repository.getRawPath().endsWith("/")) {
-                throw new IllegalArgumentException("source-repository must be an http(s) URL ending in '/',"
-                        + " without credentials, query or fragment: " + repository);
-            }
+            SafeUrls.requireBase("source-repository", repository);
         }
     }
 
@@ -103,7 +96,7 @@ public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceB
             String key = normal(e.getKey());
             String value = String.valueOf(e.getValue()).trim();
             if (key.equals("source_repository")) {
-                repository = value.isEmpty() ? null : URI.create(value);
+                repository = value.isEmpty() ? null : SafeUrls.parse("source-repository", value);
                 continue;
             }
             long n;
