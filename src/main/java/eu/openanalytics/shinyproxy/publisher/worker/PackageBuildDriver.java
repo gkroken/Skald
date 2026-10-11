@@ -76,8 +76,12 @@ public final class PackageBuildDriver {
     /** How a sandbox ended. */
     public sealed interface Result permits Built, Refused, Failed, Stopped { }
 
-    /** A checked binary, ready for the upload (step 2d). */
-    public record Built(byte[] binary, BinaryArchive.Checked checked) implements Result { }
+    /**
+     * A checked binary, ready for the upload, with the closure actually handed in (after
+     * PackageClosure), which the upload's provenance and LinkingTo name (9159de6 N4).
+     */
+    public record Built(byte[] binary, BinaryArchive.Checked checked, List<BuiltDependency> handedIn)
+            implements Result { }
 
     /** Final for this row: retrying would hand in and produce the same thing. */
     public record Refused(String code, String detail) implements Result { }
@@ -204,8 +208,9 @@ public final class PackageBuildDriver {
     /** The work thread: the hand-in, then every Docker call. */
     private Result attempt(BuildClaim claim, Handle h, AtomicBoolean aborted) throws Exception {
         Recipe recipe;
+        List<BuiltDependency> closure;
         try {
-            List<BuiltDependency> closure = PackageClosure.resolve(claim.dependencies(), handIn.lock(claim));
+            closure = PackageClosure.resolve(claim.dependencies(), handIn.lock(claim));
             HandedIn source = new HandedIn(claim.pkg(), claim.version(), handIn.source(claim), claim.sourceSha256());
             List<HandedIn> deps = new ArrayList<>();
             for (BuiltDependency d : closure) {
@@ -256,7 +261,7 @@ public final class PackageBuildDriver {
                     }
                     try {
                         return new Built(binary, BinaryArchive.check(binary, claim.pkg(), claim.version(),
-                                config.rVersion(), config.rPlatform(), config.archiveLimits()));
+                                config.rVersion(), config.rPlatform(), config.archiveLimits()), closure);
                     } catch (BinaryArchive.Refused r) {
                         return new Refused(r.code(), BuildKitDriver.detail(r.getMessage()));
                     }

@@ -687,8 +687,17 @@ public class BuildKitDriverTest {
     @Test
     public void aBuiltImageCarriesItsProvenanceRecordAndAnSlsaAttestation(@TempDir Path dir) throws Exception {
         Claimed c = claimed();
-        Outcome outcome = driver(Settings.defaults(), source(dir, "", new AtomicInteger())).run(c, () -> false);
+        ContextSource plain = source(dir, "", new AtomicInteger());
+        AtomicInteger onBuilt = new AtomicInteger();
+        // T7b: a successful build calls its context's onBuilt (the binaries' queue), once.
+        ContextSource counted = build -> {
+            Prepared p = plain.prepare(build);
+            return new Prepared(p.payload(), p.recipe(), p.repository(), p.release(), p.cacheKey(), p.inputs(),
+                    onBuilt::incrementAndGet);
+        };
+        Outcome outcome = driver(Settings.defaults(), counted).run(c, () -> false);
         assertInstanceOf(Built.class, outcome, outcome.toString());
+        assertEquals(1, onBuilt.get(), "onBuilt ran once, for the built image");
         assertNothingLeft(c);
         Built built = (Built) outcome;
         JsonNode doc = new ObjectMapper().valueToTree(built.provenance());

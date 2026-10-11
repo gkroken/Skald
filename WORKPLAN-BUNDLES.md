@@ -2451,6 +2451,19 @@ below are marked passed by this planning document.
       hand-in's; an upload has its own deadline (`forge-upload-deadline-seconds`, 600 s).
       **For 2e (ae287bf N2):** the claim's lease must be renewed by the binary loop across
       the whole attempt -- hand-in, sandbox and upload -- since only the sandbox phase polls.
+      **Step 2e, part 1a, done (this commit's part): where app builds meet the binaries.**
+      `BinaryHook` (binaries) is consulted by `BundleContextSource` for every R build when
+      cran-linux-binaries is on: the gate decides for that build (c365d95 N1), the restore
+      uses forge's __linux__ URL only when it says this very base is registered, otherwise
+      the plain mirror, and the build's provenance records the decision and its reason (the
+      cache key follows the mirrors actually used). The prepared context carries an
+      `onBuilt` callback the driver runs once the image is built (never the build's
+      failure); for an R build with binaries on it hands the rendered lock to
+      `BinaryEnqueuer`, which records the lock (dependencies resolve against it) and queues
+      every package version on the base's key except those the base carries at the locked
+      version, each independently. `PackageBuildDriver.Built` carries the closure actually
+      handed in, for the upload. Part 1b: the binary loop, the reaper, the package-attempt
+      sweep and the wiring (off by default).
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

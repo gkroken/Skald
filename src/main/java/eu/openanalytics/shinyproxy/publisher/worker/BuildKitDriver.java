@@ -91,10 +91,17 @@ public final class BuildKitDriver implements BuildDriver {
      * for the provenance record (BundleContextSource#inputs), never null.
      */
     public record Prepared(Path payload, Recipe recipe, String repository, Runnable release, String cacheKey,
-                           Map<String, Object> inputs) {
+                           Map<String, Object> inputs, Runnable onBuilt) {
 
         public Prepared {
             inputs = Collections.unmodifiableMap(new LinkedHashMap<>(inputs));
+            onBuilt = onBuilt == null ? () -> { } : onBuilt;
+        }
+
+        /** Nothing to do once the build succeeds. */
+        public Prepared(Path payload, Recipe recipe, String repository, Runnable release, String cacheKey,
+                        Map<String, Object> inputs) {
+            this(payload, recipe, repository, release, cacheKey, inputs, null);
         }
 
         public Prepared(Path payload, Recipe recipe, String repository, Runnable release) {
@@ -383,11 +390,19 @@ public final class BuildKitDriver implements BuildDriver {
                 }
                 // A push that completed is the outcome, whatever happens to the worker after.
                 if (exit.isPresent() && exit.get() == 0) {
+                    Built built;
                     try {
-                        return new Built(client.pushed(h, push), record(build, prepared, worker, true));
+                        built = new Built(client.pushed(h, push), record(build, prepared, worker, true));
                     } catch (IllegalStateException e) {
                         return new Failed("BUILD_RESULT", detail(e.getMessage()));
                     }
+                    // T7b: the build's lock queues shared binaries. Never the build's failure.
+                    try {
+                        prepared.onBuilt().run();
+                    } catch (RuntimeException e) {
+                        log.warn("attempt {}: after the build, {}", h.attemptId(), e.toString());
+                    }
+                    return built;
                 }
                 // The one death check, before a failed exit is read as the build's: a client
                 // whose worker died fails too, and the cause is the worker. It also ends an

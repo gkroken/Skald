@@ -72,6 +72,8 @@ public class BundleContextSourceTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String PY_ID = "python-shiny-3.13.16-amd64-r1";
     private static final String PY_REF = "skald-registry:5000/skald/base/" + PY_ID + "@sha256:" + "b".repeat(64);
+    private static final String R_ID = "r-shiny-4.6.1-amd64-r1";
+    private static final String R_REF = "skald-registry:5000/skald/base/" + R_ID + "@sha256:" + "c".repeat(64);
     private static final Mirrors MIRRORS = new Mirrors(URI.create("http://forge:8080/repository/cran-public/"),
             URI.create("http://forge:8080/repository/pypi-public/simple/"));
     private static TestObjectStore objects;
@@ -88,7 +90,7 @@ public class BundleContextSourceTest {
         }
         ObjectNode published = JSON.createObjectNode().put("layout_version", 1)
                 .put("catalog_sha256", sha256(catalogBytes)).put("registry", "skald-registry:5000");
-        published.putObject("bases").put(PY_ID, PY_REF);
+        published.putObject("bases").put(PY_ID, PY_REF).put(R_ID, R_REF);
         catalog = BaseCatalog.load(new ByteArrayInputStream(published.toString().getBytes(StandardCharsets.UTF_8)));
     }
 
@@ -285,5 +287,109 @@ public class BundleContextSourceTest {
         byte[] lm = manifest(app, "3.13.16");
         assertThrows(BundleRejection.class, () -> s.prepare(store(lm, archive(lm, lying), null)));
         assertEquals(List.of(), left(workspace));
+    }
+
+    // ------------------------------------------------------------------ T7b: the binary hook
+
+    private static final Mirrors BINARIES = new Mirrors(MIRRORS.cran(), MIRRORS.pypiIndex(), true);
+
+    private static Map<String, byte[]> rApp() throws Exception {
+        Map<String, byte[]> payload = new LinkedHashMap<>();
+        payload.put("app.R", Files.readAllBytes(Path.of("dev/fixtures/apps/r-shiny/app.R")));
+        payload.put("renv.lock", Files.readAllBytes(Path.of("dev/fixtures/apps/r-shiny/renv.lock")));
+        return payload;
+    }
+
+    private static byte[] rManifest(Map<String, byte[]> payload) throws Exception {
+        ObjectNode doc = JSON.createObjectNode();
+        doc.put("schema_version", 1).put("type", "shiny");
+        doc.putObject("runtime").put("language", "r").put("version", "4.6.1");
+        doc.put("entrypoint", ".");
+        doc.putObject("dependencies").put("format", "renv").put("path", "renv.lock");
+        ArrayNode files = doc.putArray("files");
+        for (Map.Entry<String, byte[]> f : payload.entrySet()) {
+            files.addObject().put("path", f.getKey()).put("size", f.getValue().length).put("sha256", sha256(f.getValue()));
+        }
+        return JSON.writeValueAsBytes(doc);
+    }
+
+    /** A hook that answers {@code on} and records what it was asked. */
+    private static final class Hook implements eu.openanalytics.shinyproxy.publisher.binaries.BinaryHook {
+        final boolean on;
+        final List<String> asked = new java.util.ArrayList<>();
+        final List<Map<String, String>> built = new java.util.ArrayList<>();
+        UUID builtFor;
+
+        Hook(boolean on) {
+            this.on = on;
+        }
+
+        @Override
+        public eu.openanalytics.shinyproxy.publisher.binaries.BinaryGate.Decision binariesFor(BaseCatalog.Resolved base) {
+            asked.add(base.entry().id());
+            return new eu.openanalytics.shinyproxy.publisher.binaries.BinaryGate.Decision(on, on ? "registered" : "not ours");
+        }
+
+        @Override
+        public void built(UUID buildId, BaseCatalog.Resolved base, Map<String, String> lock) {
+            builtFor = buildId;
+            built.add(lock);
+        }
+    }
+
+    private static BundleContextSource source(Path workspace, Mirrors mirrors, Hook hook) {
+        return new BundleContextSource(bundles, objects.store, objects.bucket, ExtractionLimits.defaults(), workspace,
+                catalog, mirrors, "amd64").withBinaryHook(hook);
+    }
+
+    @Test
+    public void anRBuildAsksForBinariesOnlyWhenTheGateSaysThisBaseIsRegistered(@TempDir Path workspace) throws Exception {
+        Map<String, byte[]> app = rApp();
+        byte[] manifest = rManifest(app);
+        Hook off = new Hook(false);
+        Prepared p = source(workspace, BINARIES, off).prepare(store(manifest, archive(manifest, app), null));
+        try {
+            assertEquals(List.of(R_ID), off.asked);
+            assertFalse(p.recipe().dockerfile().contains("__linux__"), "the plain mirror: " + p.recipe().dockerfile());
+            JsonNode deps = JSON.valueToTree(p.inputs()).path("dependencies");
+            assertFalse(deps.path("mirrors").path("cran_linux_binaries").asBoolean(true));
+            assertEquals("not ours", deps.path("cran_linux_binaries_reason").asText());
+            p.onBuilt().run();
+            assertTrue(off.built.isEmpty(), "nothing queued for a base without binaries");
+        } finally {
+            p.release().run();
+        }
+        Hook on = new Hook(true);
+        Claimed c = store(manifest, archive(manifest, app), null);
+        Prepared q = source(workspace, BINARIES, on).prepare(c);
+        try {
+            assertTrue(q.recipe().dockerfile().contains("__linux__/noble/latest"), q.recipe().dockerfile());
+            assertTrue(JSON.valueToTree(q.inputs()).path("dependencies").path("mirrors").path("cran_linux_binaries")
+                    .asBoolean(false));
+            assertTrue(on.built.isEmpty(), "queued only once the build succeeds");
+            q.onBuilt().run();
+            assertEquals(c.buildId(), on.builtFor);
+            assertEquals(46, on.built.get(0).size(), "the rendered lock's packages and versions");
+            assertTrue(on.built.get(0).containsKey("shiny"));
+        } finally {
+            q.release().run();
+        }
+    }
+
+    @Test
+    public void theGateIsNotAskedWhenTheSwitchIsOffOrForPython(@TempDir Path workspace) throws Exception {
+        Map<String, byte[]> app = rApp();
+        byte[] manifest = rManifest(app);
+        Hook hook = new Hook(true);
+        Prepared p = source(workspace, MIRRORS, hook).prepare(store(manifest, archive(manifest, app), null));
+        p.onBuilt().run();
+        p.release().run();
+        Map<String, byte[]> py = pythonApp();
+        byte[] pyManifest = manifest(py, "3.13.16");
+        Prepared q = source(workspace, BINARIES, hook).prepare(store(pyManifest, archive(pyManifest, py), null));
+        q.onBuilt().run();
+        q.release().run();
+        assertTrue(hook.asked.isEmpty(), "switch off, or not R: the gate is not consulted");
+        assertTrue(hook.built.isEmpty());
     }
 }

@@ -98,6 +98,17 @@ public final class BundleContextSource implements ContextSource {
         this.architecture = architecture;
     }
 
+    private eu.openanalytics.shinyproxy.publisher.binaries.BinaryHook hook;
+
+    /**
+     * T7b: the shared binaries' gate and queue (null: none, and cran-linux-binaries applies as
+     * configured, as before T7b step 2e).
+     */
+    public BundleContextSource withBinaryHook(eu.openanalytics.shinyproxy.publisher.binaries.BinaryHook hook) {
+        this.hook = hook;
+        return this;
+    }
+
     @Override
     public Prepared prepare(Claimed build) throws Exception {
         BundleReceipt receipt = bundles.readReceipt(build.contentId(), build.bundleId())
@@ -127,11 +138,36 @@ public final class BundleContextSource implements ContextSource {
                         + " is not in the payload");
             }
             byte[] uploadedLock = Files.readAllBytes(lock);
-            Recipe recipe = RecipeGenerator.generate(base, mirrors, manifest, uploadedLock);
-            String cacheKey = DependencyCacheKey.of(resolved.entry(), base, mirrors, recipe);
+            // T7b: forge's Linux binaries for THIS build only if the operator turned them on and
+            // forge registers this very base (the gate, read per build: c365d95 N1); otherwise the
+            // plain mirror, with the reason in the provenance.
+            Mirrors forBuild = mirrors;
+            String binariesReason = null;
+            boolean isR = "r".equals(manifest.language());
+            if (isR && mirrors.cranLinuxBinaries() && hook != null) {
+                eu.openanalytics.shinyproxy.publisher.binaries.BinaryGate.Decision d = hook.binariesFor(resolved);
+                binariesReason = d.reason();
+                if (!d.binaries()) {
+                    forBuild = new Mirrors(mirrors.cran(), mirrors.pypiIndex(), false);
+                }
+            }
+            Recipe recipe = RecipeGenerator.generate(base, forBuild, manifest, uploadedLock);
+            String cacheKey = DependencyCacheKey.of(resolved.entry(), base, forBuild, recipe);
+            Runnable onBuilt = () -> { };
+            if (isR && hook != null && forBuild.cranLinuxBinaries()) {
+                java.util.SortedMap<String, String> versions =
+                        eu.openanalytics.shinyproxy.publisher.recipe.RenvLockPolicy.check(uploadedLock,
+                                manifest.runtimeVersion()).packages();
+                onBuilt = () -> hook.built(build.buildId(), resolved, versions);
+            }
+            Map<String, Object> inputs = inputs(receipt, manifest, resolved, recipe, uploadedLock, cacheKey, forBuild);
+            if (binariesReason != null) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> deps = (Map<String, Object>) inputs.get("dependencies");
+                deps.put("cran_linux_binaries_reason", binariesReason);
+            }
             return new Prepared(extracted.root().path(), recipe, "content/" + build.contentId(),
-                    () -> deleteQuietly(extracted), cacheKey,
-                    inputs(receipt, manifest, resolved, recipe, uploadedLock, cacheKey));
+                    () -> deleteQuietly(extracted), cacheKey, inputs, onBuilt);
         } catch (Exception e) {
             deleteQuietly(extracted);
             throw e;
@@ -145,6 +181,12 @@ public final class BundleContextSource implements ContextSource {
      */
     Map<String, Object> inputs(BundleReceipt receipt, Manifest manifest, BaseCatalog.Resolved resolved,
                                Recipe recipe, byte[] uploadedLock, String cacheKey) {
+        return inputs(receipt, manifest, resolved, recipe, uploadedLock, cacheKey, mirrors);
+    }
+
+    /** As above, with the mirrors this build actually used (binaries may be off for it). */
+    Map<String, Object> inputs(BundleReceipt receipt, Manifest manifest, BaseCatalog.Resolved resolved,
+                               Recipe recipe, byte[] uploadedLock, String cacheKey, Mirrors mirrors) {
         Map<String, Object> bundle = new LinkedHashMap<>();
         bundle.put("archive_sha256", receipt.archiveSha256());
         bundle.put("archive_bytes", receipt.archiveBytes());
