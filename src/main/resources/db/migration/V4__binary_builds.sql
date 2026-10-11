@@ -163,14 +163,16 @@ CREATE TABLE skald.binary_build_upload (
             AND jsonb_typeof(provenance -> 'schema') = 'string', false))
 );
 
-CREATE FUNCTION skald.binary_build_upload_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+-- Append-only, for each table that uses it; the refusal names the table
+-- (<table>_append_only).
+CREATE FUNCTION skald.binary_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    RAISE EXCEPTION 'binary_build_upload_append_only: an upload intent is never changed or removed'
+    RAISE EXCEPTION '%_append_only: a % row is never changed or removed', TG_TABLE_NAME, TG_TABLE_NAME
         USING ERRCODE = 'check_violation';
 END
 $$;
 CREATE TRIGGER binary_build_upload_append_only BEFORE UPDATE OR DELETE ON skald.binary_build_upload
-    FOR EACH ROW EXECUTE FUNCTION skald.binary_build_upload_append_only();
+    FOR EACH ROW EXECUTE FUNCTION skald.binary_append_only();
 
 -- An UPLOADED row's digest is one of its intents; on INSERT none can exist yet, so a row is
 -- never born UPLOADED.
@@ -186,6 +188,20 @@ END
 $$;
 CREATE TRIGGER binary_build_uploaded_was_intended BEFORE INSERT OR UPDATE ON skald.binary_build
     FOR EACH ROW EXECUTE FUNCTION skald.binary_build_uploaded_was_intended();
+
+-- The rendered lock of an app build that queued binaries: package -> exact version. A
+-- package's dependencies are resolved to the versions THIS lock fixed (the DESCRIPTION gives
+-- only constraints), so a row's dependencies are what its first asker's app installs. Written
+-- once per build, never changed; keyed by the build id as a plain value, like
+-- requested_by_build, so it outlives the content item.
+CREATE TABLE skald.binary_lock (
+    build_id   uuid        PRIMARY KEY,
+    versions   jsonb       NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT binary_lock_is_a_map CHECK (jsonb_typeof(versions) = 'object')
+);
+CREATE TRIGGER binary_lock_append_only BEFORE UPDATE OR DELETE ON skald.binary_lock
+    FOR EACH ROW EXECUTE FUNCTION skald.binary_append_only();
 
 -- "binary_build needs dependency": read from the verified tarball's DESCRIPTION (Depends,
 -- Imports, LinkingTo; base packages excluded) on the trusted side. Same platform key, held

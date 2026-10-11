@@ -2311,6 +2311,31 @@ below are marked passed by this planning document.
       and the rows refused because of it, which go back to waiting. V4 allows exactly that
       transition and nothing else: a foreign digest may be cleared only as its row returns
       to waiting; an UPLOADED digest and the source digests never change.
+      **Step 2b, done (this commit's part): the source check.** `SourceVerifier` claims a
+      PENDING_SOURCE row and reads, from `skald.builds.binaries.source-repository` (forge's
+      CRAN PROXY member, never the group; unset by default), the index
+      `src/contrib/PACKAGES` (cached per TTL) and the tarball, in one streaming pass that
+      digests every byte received (SHA-256 and MD5) and reads only `<pkg>/DESCRIPTION`
+      (`SourceTarball`: one top directory named for the package, no '.'/'..' segments,
+      DESCRIPTION one regular file, one name source per member, checksummed headers, bounded
+      bytes, expansion and wall time, the lease renewed while it streams). Refused, with the
+      code: NO_LOCK, NO_PUBLIC_INDEX, NOT_IN_PUBLIC_INDEX, NOT_IN_PUBLIC_SOURCE, MD5_MISMATCH
+      (against the index), SOURCE_CHANGED (against a first fetch), DESCRIPTION_MISMATCH /
+      _UNREADABLE, NOT_IN_LOCK, CONSTRAINT_UNMET, TOO_LARGE, and the tarball's own
+      (TARBALL_UNREADABLE, NOT_ONE_TOP_DIRECTORY); a transfer or repository error is a failed
+      attempt. Dependencies (Depends, Imports, LinkingTo; R and the 14 base packages
+      excluded; recommended packages queued like any CRAN package) resolve to the versions
+      of the triggering build's rendered lock, which 2e records once per build
+      (`skald.binary_lock`, append-only; a planned V4 addition). Which digest is trusted:
+      forge has no stable API for a version's SHA-256 (only its UI's JSON), so the trusted
+      side computes it over the bytes it read, cross-checked against the index's MD5sum,
+      and V4 keeps it from then on; forge checks the source again at upload.
+      **Open, needs the user: archived versions.** CRAN's index lists only each package's
+      CURRENT version; an archived version (any lock older than the package's last
+      release) has no published checksum, so under point 2's rule it is refused
+      (NOT_IN_PUBLIC_INDEX, the detail says "archived") and its apps restore it from
+      source, as today. Building it anyway would trust the proxy's first fetch alone
+      (no cross-check); that relaxes point 2's rule and is the user's call.
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

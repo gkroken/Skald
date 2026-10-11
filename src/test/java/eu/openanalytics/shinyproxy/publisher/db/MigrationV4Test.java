@@ -356,6 +356,17 @@ public class MigrationV4Test {
             + " state = 'QUEUED', finished_at = NULL, provenance = NULL, binary_sha256 = NULL WHERE id = ?", ours));
     }
 
+    @Test
+    public void aLockIsAMapAndAppendOnly() {
+        UUID build = UUID.randomUUID();
+        jdbc.update("INSERT INTO skald.binary_lock (build_id, versions) VALUES (?, '{\"a\": \"1.0\"}')", build);
+        refusedBy("binary_lock_append_only", () -> jdbc.update(
+            "UPDATE skald.binary_lock SET versions = '{}' WHERE build_id = ?", build));
+        refusedBy("binary_lock_append_only", () -> jdbc.update("DELETE FROM skald.binary_lock WHERE build_id = ?", build));
+        refusedBy("binary_lock_is_a_map", () -> jdbc.update("INSERT INTO skald.binary_lock (build_id, versions)"
+            + " VALUES (?, '[1]')", UUID.randomUUID()));
+    }
+
     // ------------------------------------------------------------------ edges
 
     @Test

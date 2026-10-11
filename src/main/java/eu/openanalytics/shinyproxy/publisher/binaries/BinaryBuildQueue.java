@@ -66,8 +66,12 @@ import java.util.regex.Pattern;
  */
 public final class BinaryBuildQueue {
 
-    /** A row the trusted side must fetch and verify the source of. */
-    public record SourceClaim(UUID rowId, String platformKey, String pkg, String version, BinaryLease lease) { }
+    /**
+     * A row the trusted side must fetch and verify the source of; {@code requestedBy} is the
+     * app build whose lock resolves its dependencies (null: none, and then it cannot be built).
+     */
+    public record SourceClaim(UUID rowId, String platformKey, String pkg, String version, UUID requestedBy,
+                              BinaryLease lease) { }
 
     /** A dependency as the trusted side read it from the verified DESCRIPTION. */
     public record Dependency(String pkg, String version) { }
@@ -142,6 +146,49 @@ public final class BinaryBuildQueue {
                 + " AND package = ? AND version = ?", UUID.class, platformKey, pkg, version);
     }
 
+    /**
+     * Records an app build's rendered lock (package -> exact version), once; the versions its
+     * rows' dependencies resolve to. Idempotent: a build's lock never changes, and the first
+     * record stands (V4 keeps it append-only).
+     */
+    public void recordLock(UUID buildId, Map<String, String> versions) {
+        String body;
+        try {
+            body = json.writeValueAsString(new TreeMap<>(versions));
+        } catch (JsonProcessingException ex) {
+            throw new IllegalArgumentException("a lock is a map of package names to versions", ex);
+        }
+        jdbc.update("INSERT INTO skald.binary_lock (build_id, versions) VALUES (?, ?::jsonb)"
+                + " ON CONFLICT (build_id) DO NOTHING", buildId, body);
+    }
+
+    /** The lock {@code buildId} recorded, or empty if none was. */
+    public Optional<Map<String, String>> lockOf(UUID buildId) {
+        if (buildId == null) {
+            return Optional.empty();
+        }
+        List<String> rows = jdbc.queryForList("SELECT versions::text FROM skald.binary_lock WHERE build_id = ?",
+                String.class, buildId);
+        if (rows.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            Map<String, String> versions = json.readValue(rows.get(0),
+                    new com.fasterxml.jackson.core.type.TypeReference<TreeMap<String, String>>() { });
+            return Optional.of(java.util.Collections.unmodifiableMap(versions));
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("unreadable lock of build " + buildId, ex);
+        }
+    }
+
+    /** The source digests the row recorded at its first fetch, [sha256, md5], if it has. */
+    public Optional<List<String>> recordedSource(UUID rowId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("SELECT source_sha256, source_md5 FROM"
+                + " skald.binary_build WHERE id = ? AND source_sha256 IS NOT NULL", rowId);
+        return rows.isEmpty() ? Optional.empty() : Optional.of(List.of((String) rows.get(0).get("source_sha256"),
+                (String) rows.get(0).get("source_md5")));
+    }
+
     // ------------------------------------------------------------------ source phase
 
     /** Claims the oldest PENDING_SOURCE row: PENDING_SOURCE -> VERIFYING with a fresh lease. */
@@ -150,7 +197,7 @@ public final class BinaryBuildQueue {
                 + " state = 'VERIFYING'," + leaseSet() + ", attempts = attempts + 1"
                 + " WHERE id = (SELECT id FROM skald.binary_build WHERE state = 'PENDING_SOURCE'"
                 + "   ORDER BY created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED)"
-                + " RETURNING id, platform_key, package, version, lease_generation",
+                + " RETURNING id, platform_key, package, version, requested_by_build, lease_generation",
                 owner, settings.lease().toSeconds(), settings.deadline().toSeconds());
         if (rows.isEmpty()) {
             return Optional.empty();
@@ -159,7 +206,8 @@ public final class BinaryBuildQueue {
         BinaryLease lease = lease(row, owner);
         audit(owner, "binary.verifying", lease.rowId(), Map.of("generation", String.valueOf(lease.generation())));
         return Optional.of(new SourceClaim(lease.rowId(), (String) row.get("platform_key"),
-                (String) row.get("package"), (String) row.get("version"), lease));
+                (String) row.get("package"), (String) row.get("version"),
+                (UUID) row.get("requested_by_build"), lease));
     }
 
     /**

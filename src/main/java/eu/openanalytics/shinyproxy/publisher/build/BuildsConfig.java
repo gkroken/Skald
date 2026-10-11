@@ -23,6 +23,7 @@
 package eu.openanalytics.shinyproxy.publisher.build;
 
 import eu.openanalytics.shinyproxy.publisher.binaries.BinaryQueueSettings;
+import eu.openanalytics.shinyproxy.publisher.binaries.SourceSettings;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -88,7 +89,23 @@ public class BuildsConfig {
     /** Validated at startup; the queue itself is wired with the builder (T7b step 2e). */
     @Bean
     public BinaryQueueSettings binaryQueueSettings() {
-        return BinaryQueueSettings.fromOverrides(binaries);
+        return BinaryQueueSettings.fromOverrides(partition(false));
+    }
+
+    /** The {@code skald.builds.binaries.source-*} keys; validated at startup, wired in 2e. */
+    @Bean
+    public SourceSettings binarySourceSettings() {
+        return SourceSettings.fromOverrides(partition(true));
+    }
+
+    private Map<String, String> partition(boolean source) {
+        Map<String, String> out = new LinkedHashMap<>();
+        binaries.forEach((k, v) -> {
+            if (SourceSettings.owns(k) == source) {
+                out.put(k, v);
+            }
+        });
+        return out;
     }
 
     /** The database-backed half, present only when a database is configured. */

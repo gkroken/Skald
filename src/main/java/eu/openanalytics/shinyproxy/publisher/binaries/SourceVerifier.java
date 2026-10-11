@@ -1,0 +1,209 @@
+/*
+ * Skald
+ *
+ * Copyright (C) 2026 Gard Kroken
+ *
+ * Built on ShinyProxy, Copyright (C) 2016-2026 Open Analytics NV.
+ *
+ * ===========================================================================
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the Apache License as published by
+ * The Apache Software Foundation, either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * Apache License for more details.
+ *
+ * You should have received a copy of the Apache License
+ * along with this program.  If not, see <http://www.apache.org/licenses/>
+ */
+package eu.openanalytics.shinyproxy.publisher.binaries;
+
+import eu.openanalytics.shinyproxy.publisher.build.Fenced;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+/**
+ * The trusted side's source check (WORKPLAN-BUNDLES T7b step 2, point 2; step 2b): claims a
+ * PENDING_SOURCE row and decides whether its package version is a public CRAN source that may
+ * be compiled for the shared tree, and what it depends on.
+ *
+ * <p>In order, each refusal final for the row (its apps keep restoring it from source):
+ * <ol>
+ *   <li>NO_LOCK: the row has no recorded lock to resolve its dependencies against;</li>
+ *   <li>NOT_IN_PUBLIC_INDEX: the public repository's index does not list this package at this
+ *       version. CRAN's index lists only each package's CURRENT version, so an archived version
+ *       is refused here: no checksum is published for it, and the plan's rule is a source
+ *       verified against the public index's checksum;</li>
+ *   <li>the tarball, from the same repository: NOT_IN_PUBLIC_SOURCE if absent; its MD5 must be
+ *       the index's (MD5_MISMATCH); SOURCE_CHANGED if the row recorded other digests at a
+ *       first fetch (a re-opened row);</li>
+ *   <li>its DESCRIPTION names this package and version (DESCRIPTION_MISMATCH), and reads
+ *       (DESCRIPTION_UNREADABLE; the tarball's own layout: SourceTarball);</li>
+ *   <li>each Depends, Imports and LinkingTo package, R and the base packages excluded, is in the
+ *       lock (NOT_IN_LOCK) at a version its constraint accepts (CONSTRAINT_UNMET).</li>
+ * </ol>
+ * Then the SHA-256 computed here over the bytes received, the MD5, and the dependencies at
+ * their locked versions are recorded ({@link BinaryBuildQueue#recordSource}). A transfer that
+ * fails or a repository that errs is a failed attempt, not a refusal. The lease is renewed
+ * while the tarball streams; a lost lease stops the read and nothing is written.
+ */
+public final class SourceVerifier {
+
+    private static final Logger log = LoggerFactory.getLogger(SourceVerifier.class);
+
+    /** What one call did: the row, and how it ended (QUEUED, REFUSED:<code>, FAILED, FENCED). */
+    public record Result(java.util.UUID rowId, String outcome) { }
+
+    private final BinaryBuildQueue queue;
+    private final SourceFetcher fetcher;
+    private final SourceSettings settings;
+    private final BinaryQueueSettings queueSettings;
+    private final CranIndex index;
+
+    public SourceVerifier(BinaryBuildQueue queue, SourceFetcher fetcher, SourceSettings settings,
+                          BinaryQueueSettings queueSettings) {
+        if (settings.repository() == null) {
+            throw new IllegalArgumentException("no source-repository is configured");
+        }
+        this.queue = queue;
+        this.fetcher = fetcher;
+        this.settings = settings;
+        this.queueSettings = queueSettings;
+        this.index = new CranIndex(fetcher, settings.repository(), settings.maxIndexBytes(),
+                settings.indexTtl().toNanos(), System::nanoTime);
+    }
+
+    /** Verifies the next PENDING_SOURCE row, if there is one. */
+    public Optional<Result> verifyNext(String owner) {
+        Optional<BinaryBuildQueue.SourceClaim> claimed = queue.claimSource(owner);
+        if (claimed.isEmpty()) {
+            return Optional.empty();
+        }
+        BinaryBuildQueue.SourceClaim claim = claimed.get();
+        String what = claim.pkg() + " " + claim.version() + " (" + claim.platformKey() + ")";
+        try {
+            Checked checked = check(claim);
+            BinaryBuildQueue.Recorded recorded = queue.recordSource(claim.lease(), checked.read().sha256(),
+                    checked.read().md5(), checked.dependencies());
+            log.info("binary source {}: {}", what, recorded);
+            return Optional.of(new Result(claim.rowId(), recorded == BinaryBuildQueue.Recorded.QUEUED
+                    ? "QUEUED" : "REFUSED:DEPENDENCY_CYCLE"));
+        } catch (SourceRefusal refusal) {
+            queue.refuse(claim.lease(), refusal.code(), refusal.getMessage());
+            log.info("binary source {} refused: {} {}", what, refusal.code(), refusal.getMessage());
+            return Optional.of(new Result(claim.rowId(), "REFUSED:" + refusal.code()));
+        } catch (Fenced fenced) {
+            log.warn("binary source {}: the lease was lost; nothing recorded", what);
+            return Optional.of(new Result(claim.rowId(), "FENCED"));
+        } catch (IOException failure) {
+            String detail = RDependencies.printable(failure.getClass().getSimpleName() + ": " + failure.getMessage());
+            try {
+                queue.fail(claim.lease(), "SOURCE_FETCH", detail);
+            } catch (Fenced fenced) {
+                return Optional.of(new Result(claim.rowId(), "FENCED"));
+            }
+            log.warn("binary source {}: {}", what, detail);
+            return Optional.of(new Result(claim.rowId(), "FAILED"));
+        }
+    }
+
+    private record Checked(SourceTarball.Read read, List<BinaryBuildQueue.Dependency> dependencies) { }
+
+    private Checked check(BinaryBuildQueue.SourceClaim claim) throws IOException, SourceRefusal {
+        Map<String, String> lock = queue.lockOf(claim.requestedBy()).orElseThrow(() -> new SourceRefusal(
+                "NO_LOCK", "no recorded lock resolves this package's dependencies"));
+        CranIndex.Entry entry = index.lookup(claim.pkg()).orElseThrow(() -> new SourceRefusal(
+                "NOT_IN_PUBLIC_INDEX", "the public index does not list " + claim.pkg()));
+        if (!entry.version().equals(claim.version())) {
+            throw new SourceRefusal("NOT_IN_PUBLIC_INDEX", "the public index lists " + claim.pkg() + " "
+                    + entry.version() + ", not " + claim.version() + " (an archived version has no published checksum)");
+        }
+        URI tarball = settings.repository().resolve("src/contrib/" + claim.pkg() + "_" + claim.version() + ".tar.gz");
+        long deadline = System.nanoTime() + settings.transferDeadline().toNanos();
+        SourceTarball.Read read;
+        try (InputStream in = fetcher.open(tarball)) {
+            read = SourceTarball.read(in, claim.pkg(), new SourceTarball.Limits(settings.maxSourceBytes(),
+                    settings.maxExpandedBytes(), deadline, queueSettings.renewEvery().toNanos(), () -> {
+                        if (!queue.renew(claim.lease())) {
+                            throw new Fenced("binary row " + claim.rowId() + ": lease lost while reading its source");
+                        }
+                    }));
+        } catch (SourceFetcher.NotFound ex) {
+            throw new SourceRefusal("NOT_IN_PUBLIC_SOURCE", "the public repository has no " + tarball.getPath());
+        }
+        Optional<List<String>> recorded = queue.recordedSource(claim.rowId());
+        if (recorded.isPresent() && !recorded.get().equals(List.of(read.sha256(), read.md5()))) {
+            // 604d63b N1: a tarball republished under the same version is refused, never
+            // re-recorded (V4's trigger would refuse the write too).
+            throw new SourceRefusal("SOURCE_CHANGED", "first fetched with sha256 " + recorded.get().get(0)
+                    + "; now " + read.sha256());
+        }
+        if (!read.md5().equals(entry.md5())) {
+            throw new SourceRefusal("MD5_MISMATCH", "the tarball's MD5 is " + read.md5() + "; the public index says "
+                    + entry.md5());
+        }
+        Map<String, String> description = description(read.description());
+        if (!claim.pkg().equals(description.get("Package")) || !claim.version().equals(description.get("Version"))) {
+            throw new SourceRefusal("DESCRIPTION_MISMATCH", "the DESCRIPTION names " + description.get("Package")
+                    + " " + description.get("Version"));
+        }
+        return new Checked(read, dependencies(description, lock));
+    }
+
+    private static Map<String, String> description(String text) throws SourceRefusal {
+        List<Map<String, String>> records;
+        try {
+            records = Dcf.parse(text, 1);
+        } catch (Dcf.Malformed ex) {
+            throw new SourceRefusal("DESCRIPTION_UNREADABLE", ex.getMessage());
+        }
+        if (records.size() != 1) {
+            throw new SourceRefusal("DESCRIPTION_UNREADABLE", "the DESCRIPTION holds " + records.size() + " records");
+        }
+        return records.get(0);
+    }
+
+    /** The non-base dependencies at their locked versions, each checked against every constraint on it. */
+    static List<BinaryBuildQueue.Dependency> dependencies(Map<String, String> description, Map<String, String> lock)
+            throws SourceRefusal {
+        Map<String, List<RDependencies.Requirement>> byPackage = new LinkedHashMap<>();
+        for (String field : RDependencies.FIELDS) {
+            try {
+                for (RDependencies.Requirement r : RDependencies.parse(field, description.get(field))) {
+                    if (!r.pkg().equals("R") && !RDependencies.BASE.contains(r.pkg())) {
+                        byPackage.computeIfAbsent(r.pkg(), k -> new ArrayList<>()).add(r);
+                    }
+                }
+            } catch (RDependencies.Unreadable ex) {
+                throw new SourceRefusal("DESCRIPTION_UNREADABLE", ex.getMessage());
+            }
+        }
+        List<BinaryBuildQueue.Dependency> out = new ArrayList<>();
+        for (Map.Entry<String, List<RDependencies.Requirement>> e : byPackage.entrySet()) {
+            String version = lock.get(e.getKey());
+            if (version == null) {
+                throw new SourceRefusal("NOT_IN_LOCK", "depends on " + e.getKey() + ", which the lock does not fix");
+            }
+            for (RDependencies.Requirement r : e.getValue()) {
+                if (!r.satisfiedBy(version)) {
+                    throw new SourceRefusal("CONSTRAINT_UNMET", "needs " + r + "; the lock fixes " + version);
+                }
+            }
+            out.add(new BinaryBuildQueue.Dependency(e.getKey(), version));
+        }
+        return out;
+    }
+}
