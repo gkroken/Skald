@@ -132,11 +132,14 @@ public final class BaseCatalog {
     private final List<Entry> entries;
     private final Map<String, String> published;
     private final String registry;
+    private final Map<String, String> imageIds;
 
-    private BaseCatalog(List<Entry> entries, Map<String, String> published, String registry) {
+    private BaseCatalog(List<Entry> entries, Map<String, String> published, String registry,
+                        Map<String, String> imageIds) {
         this.entries = List.copyOf(entries);
         this.published = Map.copyOf(published);
         this.registry = registry;
+        this.imageIds = Map.copyOf(imageIds);
     }
 
     /** The registry the published bases name, host[:port] as the build worker reaches it. */
@@ -228,7 +231,7 @@ public final class BaseCatalog {
         }
         for (Iterator<String> it = p.fieldNames(); it.hasNext(); ) {
             String key = it.next();
-            if (!Set.of("layout_version", "catalog_sha256", "registry", "bases").contains(key)) {
+            if (!Set.of("layout_version", "catalog_sha256", "registry", "bases", "image_ids").contains(key)) {
                 throw new IllegalArgumentException("published bases: unknown key " + key);
             }
         }
@@ -262,7 +265,33 @@ public final class BaseCatalog {
             }
             published.put(f.getKey(), ref);
         }
-        return new BaseCatalog(entries, published, registry);
+        // Each published base's image ID (its config digest), which forge's platform
+        // registration names (T7b). Optional: a deployment without shared binaries needs none.
+        Map<String, String> imageIds = new LinkedHashMap<>();
+        if (p.has("image_ids")) {
+            if (!p.path("image_ids").isObject()) {
+                throw new IllegalArgumentException("published bases: image_ids must be an object");
+            }
+            for (Iterator<Map.Entry<String, JsonNode>> it = p.path("image_ids").fields(); it.hasNext(); ) {
+                Map.Entry<String, JsonNode> f = it.next();
+                if (!published.containsKey(f.getKey())) {
+                    throw new IllegalArgumentException("published bases: an image id for " + f.getKey()
+                            + ", which is not published");
+                }
+                String id = f.getValue().isTextual() ? f.getValue().asText() : "";
+                if (!id.startsWith("sha256:") || !HEX64.matcher(id.substring(7)).matches()) {
+                    throw new IllegalArgumentException("published bases: " + f.getKey()
+                            + "'s image id must be sha256:<64 hex>, not " + id);
+                }
+                imageIds.put(f.getKey(), id);
+            }
+        }
+        return new BaseCatalog(entries, published, registry, imageIds);
+    }
+
+    /** A published base's image ID (sha256:...), if the published bases record it. */
+    public Optional<String> imageId(String id) {
+        return Optional.ofNullable(imageIds.get(id));
     }
 
     /**

@@ -2404,6 +2404,24 @@ below are marked passed by this planning document.
       storage (today the failure's last line); the version-conflict rate measured on two
       fixture locks weeks apart (ba5dd88 N1); the probe rows on a real R base (a two-level
       chain, no network from inside the install, no sandbox touching another's output).
+      **Step 2d, part 1, done (this commit's part): forge's registration and the gate.**
+      forge is pinned to 8545709 (CI's image, sha256:55579712...; forge-issues/004 fixed:
+      a registration is readable with any valid token). `skald.builds.binaries.forge-*`:
+      forge's URL, the binary repository (cran-linux), the write token -- a secret given by
+      the deployment's configuration like the registry password: never in the database,
+      never logged (toString masks it), only ever sent by the trusted side's HTTP client --
+      the registration TTL (60 s) and a timeout. `ForgePlatforms` reads
+      `/api/v1/cran/platforms/<key>` with that token, requires the answer to be that key's
+      registration with a sha256 builder digest, caches it for the TTL (c365d95 N1) and never
+      caches a failure. The published bases record each base's image ID (`image_ids`, its
+      config digest, written by dev/publish-bases.py from the image it pushed; optional and
+      checked by BaseCatalog), since forge's registration names the image ID, not the
+      manifest digest. `BinaryGate` turns binaries on for a base only if forge registers its
+      key for that very image ID and R platform; anything else -- no key, no image ID on
+      record, an unreadable registration, none, another builder or platform -- is off, with
+      the reason in words. Wired before each R build and each upload in 2e/2d part 2.
+      Published bases must be published again (the catalog changed in 2c, and the image IDs
+      are new).
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

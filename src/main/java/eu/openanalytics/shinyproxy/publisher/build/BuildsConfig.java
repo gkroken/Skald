@@ -23,6 +23,7 @@
 package eu.openanalytics.shinyproxy.publisher.build;
 
 import eu.openanalytics.shinyproxy.publisher.binaries.BinaryQueueSettings;
+import eu.openanalytics.shinyproxy.publisher.binaries.ForgeSettings;
 import eu.openanalytics.shinyproxy.publisher.binaries.SourceSettings;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -89,19 +90,25 @@ public class BuildsConfig {
     /** Validated at startup; the queue itself is wired with the builder (T7b step 2e). */
     @Bean
     public BinaryQueueSettings binaryQueueSettings() {
-        return BinaryQueueSettings.fromOverrides(partition(false));
+        return BinaryQueueSettings.fromOverrides(partition(k -> !SourceSettings.owns(k) && !ForgeSettings.owns(k)));
+    }
+
+    /** The {@code skald.builds.binaries.forge-*} keys; the token is a secret, never logged. */
+    @Bean
+    public ForgeSettings binaryForgeSettings() {
+        return ForgeSettings.fromOverrides(partition(ForgeSettings::owns));
     }
 
     /** The {@code skald.builds.binaries.source-*} keys; validated at startup, wired in 2e. */
     @Bean
     public SourceSettings binarySourceSettings() {
-        return SourceSettings.fromOverrides(partition(true));
+        return SourceSettings.fromOverrides(partition(SourceSettings::owns));
     }
 
-    private Map<String, String> partition(boolean source) {
+    private Map<String, String> partition(java.util.function.Predicate<String> owns) {
         Map<String, String> out = new LinkedHashMap<>();
         binaries.forEach((k, v) -> {
-            if (SourceSettings.owns(k) == source) {
+            if (owns.test(k)) {
                 out.put(k, v);
             }
         });

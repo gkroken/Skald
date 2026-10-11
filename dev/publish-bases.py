@@ -61,7 +61,7 @@ def main(argv):
         print("  %s  static: %s  %s" % ("ok  " if ok else "FAIL", e["id"], detail))
         if not ok:
             return 1
-    published, local = {}, []
+    published, image_ids, local = {}, {}, []
     try:
         bases.start_forge()
         for e in entries:
@@ -90,12 +90,21 @@ def main(argv):
                 print("  FAIL  pushed: %s  no digest for %s in %s" % (e["id"], repo, digests))
                 return 1
             published[e["id"]] = "%s/skald/base/%s@%s" % (a.registry, e["id"], digest)
+            # The image ID (its config digest), which forge's platform registration names
+            # (T7b): fixed by the manifest just pushed, recorded here so Skald never has to
+            # pull the base or ask the registry for it.
+            image_id = bases.docker(["inspect", "--format", "{{.Id}}", pushed]).stdout.strip()
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", image_id):
+                print("  FAIL  pushed: %s  no image id: %r" % (e["id"], image_id))
+                return 1
+            image_ids[e["id"]] = image_id
             print("  ok    pushed: %s  %s" % (e["id"], published[e["id"]]))
     finally:
         bases.docker(["rm", "-f", "-v", bases.FORGE])
         for t in local:
             bases.docker(["rmi", "-f", t])
-    out = {"layout_version": 1, "catalog_sha256": catalog_sha, "registry": a.registry, "bases": published}
+    out = {"layout_version": 1, "catalog_sha256": catalog_sha, "registry": a.registry, "bases": published,
+           "image_ids": image_ids}
     pathlib.Path(a.out).write_text(json.dumps(out, indent=2) + "\n")
     print("\nwrote %s" % a.out)
     return 0

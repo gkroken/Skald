@@ -39,10 +39,12 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 CATALOG = REPO / "images/catalog.json"
 # forge, pinned. Its eval mode (no flags) seeds cran-public (hosted + a proxy of CRAN) and
 # pypi-public (hosted + a proxy of PyPI), which is all a base build needs.
-# Built from forge ce4f71a (2026-10-10), which serves Linux binaries for CRAN packages
-# (T7b; code_review/forge-issues/003).
+# Built by forge's CI from forge 8545709 (2026-10-11; image label
+# org.opencontainers.image.revision 85457097b119...), which serves Linux binaries for CRAN
+# packages (T7b; forge-issues/003) and lets any authenticated caller read a platform
+# registration (forge-issues/004), which Skald's binary gate reads with its own token.
 FORGE_IMAGE = ("ghcr.io/gkroken/forge@sha256:"
-               "8987d7c21b77d62d2da62220df6503497fb5cee7221ae27c8a4c50220cf4142d")
+               "55579712abc5808892140f20446abc46772a241d4b717b28ac985fadc8cf0d93")
 FORGE, FORGE_PORT = "skald-bases-forge", 18081
 MIRROR = "http://localhost:%d/repository/cran-public/" % FORGE_PORT
 
