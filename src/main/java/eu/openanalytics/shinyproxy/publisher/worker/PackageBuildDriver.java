@@ -137,8 +137,13 @@ public final class PackageBuildDriver {
      * queue's leases is step 2e's.
      */
     static String attemptId(BuildClaim claim) {
-        String row = claim.rowId().toString().replace("-", "");
-        return "p" + row.substring(0, 24) + String.format("%08x", claim.lease().generation() & 0xffffffffL);
+        return attemptId(claim.rowId(), claim.lease().generation());
+    }
+
+    /** As above, for a row id and lease generation (the package-attempt sweep's inventory). */
+    static String attemptId(java.util.UUID rowId, long generation) {
+        String row = rowId.toString().replace("-", "");
+        return "p" + row.substring(0, 24) + String.format("%08x", generation & 0xffffffffL);
     }
 
     public Result run(BuildClaim claim, BooleanSupplier stop) throws InterruptedException {

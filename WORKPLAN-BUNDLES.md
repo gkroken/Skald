@@ -2471,6 +2471,20 @@ below are marked passed by this planning document.
       installed from forge's HOSTED member (a private package) is queued too, then deferred
       for 48 h at the proxy and refused INDEX_BEHIND: measure it, and consider a cheap
       "absent at the proxy" check at enqueue time.
+      **Step 2e, part 1b, done (this commit's part): the loop and the wiring, off by default.**
+      `BinariesConfig` exists only with `skald.builds.binaries-enabled=true` beside an
+      enabled worker, and refuses to start half-configured (a database, forge-url/token,
+      source-repository, the worker's cran-linux-binaries switch), every problem at once;
+      forge's clients are created once. It hands the build loop's context source the
+      BinaryHook, and runs `PackageBuildLoop`: one thread verifying sources, `max-running`
+      threads compiling. A compile asks the gate for its key BEFORE any sandbox (ef929f5 N1:
+      none registered -> a failed attempt, REGISTRATION), renews the lease on a timer across
+      hand-in, sandbox and upload (ae287bf N2) with a failed renewal as the sandbox's stop
+      signal, and maps the outcome (Built -> the upload; Refused -> refuse; Failed -> fail;
+      Stopped -> nothing; every write fenced, so a lost lease writes nothing). One driver per
+      published R base, the base's registry its only egress. `BinaryHousekeeping` reaps on the
+      renewal cadence and sweeps, on the worker's sweep period, every "p" attempt on the host
+      that no RUNNING row owns at that generation (never an app build's).
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

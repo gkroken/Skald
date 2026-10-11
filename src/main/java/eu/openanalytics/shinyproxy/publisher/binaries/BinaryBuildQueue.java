@@ -538,6 +538,14 @@ public final class BinaryBuildQueue {
         audit(lease.owner(), "binary.failed", lease.rowId(), Map.of("code", code));
     }
 
+    /** The leases of every RUNNING row (row id -> generation): whose sandboxes may exist now. */
+    public Map<UUID, Long> runningLeases() {
+        Map<UUID, Long> out = new java.util.HashMap<>();
+        jdbc.query("SELECT id, lease_generation FROM skald.binary_build WHERE state = 'RUNNING'",
+                (org.springframework.jdbc.core.RowCallbackHandler) rs -> out.put(rs.getObject(1, UUID.class), rs.getLong(2)));
+        return out;
+    }
+
     // ------------------------------------------------------------------ reap
 
     /**

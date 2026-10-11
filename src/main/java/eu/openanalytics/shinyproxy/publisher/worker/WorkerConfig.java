@@ -148,7 +148,9 @@ public class WorkerConfig {
     @org.springframework.context.annotation.DependsOn("skaldWorkspaceLock")
     public BuildLoop skaldBuildLoop(DockerClient skaldWorkerDocker, ObjectProvider<BuildCoordinator> coordinator,
                                     CoordinatorSettings settings, ObjectProvider<ObjectStore> store,
-                                    ExtractionLimits limits) throws Exception {
+                                    ExtractionLimits limits,
+                                    ObjectProvider<eu.openanalytics.shinyproxy.publisher.binaries.BinaryHook> binaryHook)
+            throws Exception {
         List<String> problems = problems(settings);
         if (coordinator.getIfAvailable() == null) {
             problems.add("a database (spring.datasource.url): builds are leased there");
@@ -186,7 +188,9 @@ public class WorkerConfig {
         ObjectStore objects = store.getObject();
         Mirrors mirrors = new Mirrors(URI.create(cranMirror), URI.create(pypiMirror), cranLinuxBinaries);
         BundleContextSource source = new BundleContextSource(new BundleWriter(objects, bundleBucket), objects,
-                bundleBucket, limits, Path.of(workspace), catalog, mirrors, architecture);
+                bundleBucket, limits, Path.of(workspace), catalog, mirrors, architecture)
+                // T7b: present only with skald.builds.binaries-enabled (BinariesConfig).
+                .withBinaryHook(binaryHook.getIfAvailable());
         BuildLogWriter logWriter = new BuildLogWriter(objects, logBucket);
         BuildKitDriver driver = new BuildKitDriver(skaldWorkerDocker, launcher, client, source,
                 logWriter,
@@ -385,5 +389,58 @@ public class WorkerConfig {
 
     public void setLogBucket(String logBucket) {
         this.logBucket = logBucket;
+    }
+
+    // The settings BinariesConfig (T7b) shares with the app builds' worker.
+    String registry() {
+        return registry;
+    }
+
+    Credential credential() {
+        return new Credential(registryUsername, registryPassword);
+    }
+
+    List<String> outerNetworks() {
+        return outerNetworks;
+    }
+
+    String workerImage() {
+        return workerImage;
+    }
+
+    String gatewayImage() {
+        return gatewayImage;
+    }
+
+    String publishedBases() {
+        return publishedBases;
+    }
+
+    boolean cranLinuxBinaries() {
+        return cranLinuxBinaries;
+    }
+
+    int quotaMegabytes() {
+        return quotaMegabytes;
+    }
+
+    Duration poll() {
+        return poll;
+    }
+
+    Duration settle() {
+        return settle;
+    }
+
+    Duration idlePause() {
+        return idlePause;
+    }
+
+    Duration sweepPeriod() {
+        return sweepPeriod;
+    }
+
+    String owner() {
+        return owner;
     }
 }
