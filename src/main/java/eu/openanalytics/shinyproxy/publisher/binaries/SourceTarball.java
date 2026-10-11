@@ -114,16 +114,16 @@ final class SourceTarball {
         long expanded = 0;
         byte[] header = new byte[BLOCK];
         while (true) {
-            if (!readBlock(tar, header)) {
+            if (!TarFormat.readBlock(tar, header)) {
                 throw new SourceRefusal("TARBALL_UNREADABLE", "the archive ends without its end-of-archive blocks");
             }
             expanded += BLOCK;
-            if (allZero(header)) {
+            if (TarFormat.allZero(header)) {
                 return requireDescription(description, descriptionPath);
             }
-            checksum(header);
+            TarFormat.checksum(header);
             char type = (char) (header[156] & 0xff);
-            long size = size(header);
+            long size = TarFormat.size(header);
             long padded = (size + BLOCK - 1) / BLOCK * BLOCK;
             expanded += padded;
             if (expanded > maxExpanded) {
@@ -137,20 +137,21 @@ final class SourceTarball {
                     if (size > MAX_METADATA) {
                         throw new SourceRefusal("TARBALL_UNREADABLE", "a metadata header of " + size + " bytes");
                     }
-                    byte[] content = readContent(tar, size, padded);
+                    byte[] content = TarFormat.readContent(tar, size, padded);
                     // A PAX header without a path says nothing about the name: null, as before.
-                    pendingName = type == 'L' ? cString(content, 0, content.length) : paxPath(content);
+                    pendingName = type == 'L' ? TarFormat.cString(content, 0, content.length)
+                            : TarFormat.paxPath(content);
                 }
                 case 'g' -> {
                     if (size > MAX_METADATA) {
                         throw new SourceRefusal("TARBALL_UNREADABLE", "a global header of " + size + " bytes");
                     }
-                    if (paxPath(readContent(tar, size, padded)) != null) {
+                    if (TarFormat.paxPath(TarFormat.readContent(tar, size, padded)) != null) {
                         throw new SourceRefusal("TARBALL_UNREADABLE", "a global header names a path");
                     }
                 }
                 case '0', '\0', '7', '5', '1', '2' -> {
-                    String name = pendingName != null ? pendingName : headerName(header);
+                    String name = pendingName != null ? pendingName : TarFormat.headerName(header);
                     pendingName = null;
                     requireUnderTop(name, top, pkg);
                     if (name.equals(descriptionPath) || name.equals(descriptionPath + "/")) {
@@ -163,9 +164,9 @@ final class SourceTarball {
                         if (size > MAX_DESCRIPTION) {
                             throw new SourceRefusal("DESCRIPTION_UNREADABLE", "DESCRIPTION is " + size + " bytes");
                         }
-                        description = new String(readContent(tar, size, padded), StandardCharsets.UTF_8);
+                        description = new String(TarFormat.readContent(tar, size, padded), StandardCharsets.UTF_8);
                     } else if (type == '0' || type == '\0' || type == '7') {
-                        skip(tar, padded);
+                        TarFormat.skip(tar, padded);
                     } else if (size != 0) {
                         throw new SourceRefusal("TARBALL_UNREADABLE", "a link or directory with content: " + name);
                     }
@@ -192,129 +193,6 @@ final class SourceTarball {
                 throw new SourceRefusal("NOT_ONE_TOP_DIRECTORY", "member with a '" + segment + "' segment: " + name);
             }
         }
-    }
-
-    private static String headerName(byte[] h) {
-        String name = cString(h, 0, 100);
-        // POSIX ustar only ("ustar\0" "00"): old GNU headers ("ustar  \0") keep times where
-        // the prefix would be (e149183 N2).
-        boolean ustar = h[257] == 'u' && h[258] == 's' && h[259] == 't' && h[260] == 'a' && h[261] == 'r'
-                && h[262] == 0 && h[263] == '0' && h[264] == '0';
-        String prefix = ustar ? cString(h, 345, 155) : "";
-        return prefix.isEmpty() ? name : prefix + "/" + name;
-    }
-
-    /** A PAX header's "path" record, or null; refused if malformed. */
-    private static String paxPath(byte[] content) throws SourceRefusal {
-        String path = null;
-        int i = 0;
-        while (i < content.length) {
-            int space = i;
-            while (space < content.length && content[space] != ' ') {
-                space++;
-            }
-            int length;
-            try {
-                length = Integer.parseInt(new String(content, i, space - i, StandardCharsets.US_ASCII));
-            } catch (NumberFormatException ex) {
-                throw new SourceRefusal("TARBALL_UNREADABLE", "a PAX record without a length");
-            }
-            if (length <= space - i + 1 || i + length > content.length || content[i + length - 1] != '\n') {
-                throw new SourceRefusal("TARBALL_UNREADABLE", "a PAX record whose length does not hold");
-            }
-            String record = new String(content, space + 1, i + length - space - 2, StandardCharsets.UTF_8);
-            int eq = record.indexOf('=');
-            if (eq < 0) {
-                throw new SourceRefusal("TARBALL_UNREADABLE", "a PAX record without '='");
-            }
-            String key = record.substring(0, eq);
-            if (key.equals("size") || key.startsWith("GNU.sparse")) {
-                throw new SourceRefusal("TARBALL_UNREADABLE", "a PAX '" + key + "' record changes a member's framing");
-            }
-            if (key.equals("path")) {
-                if (path != null) {
-                    throw new SourceRefusal("TARBALL_UNREADABLE", "a PAX header names two paths");
-                }
-                path = record.substring(eq + 1);
-            }
-            i += length;
-        }
-        return path;
-    }
-
-    private static void checksum(byte[] h) throws SourceRefusal {
-        long sum = 0;
-        for (int i = 0; i < BLOCK; i++) {
-            sum += (i >= 148 && i < 156) ? ' ' : (h[i] & 0xff);
-        }
-        long stored = octal(h, 148, 8, "checksum");
-        if (stored != sum) {
-            throw new SourceRefusal("TARBALL_UNREADABLE", "a header checksum does not hold");
-        }
-    }
-
-    /** A base-256 size (high bit set) is refused by the octal reader like any non-octal byte. */
-    private static long size(byte[] h) throws SourceRefusal {
-        return octal(h, 124, 12, "size");
-    }
-
-    private static long octal(byte[] h, int off, int len, String what) throws SourceRefusal {
-        long v = 0;
-        boolean digits = false;
-        for (int i = off; i < off + len; i++) {
-            int c = h[i] & 0xff;
-            if (c == 0 || c == ' ') {
-                if (digits) {
-                    break;
-                }
-                continue;
-            }
-            if (c < '0' || c > '7') {
-                throw new SourceRefusal("TARBALL_UNREADABLE", "a header " + what + " that is not octal");
-            }
-            digits = true;
-            v = v * 8 + (c - '0');
-        }
-        return v;
-    }
-
-    private static String cString(byte[] b, int off, int len) {
-        int end = off;
-        while (end < off + len && b[end] != 0) {
-            end++;
-        }
-        return new String(b, off, end - off, StandardCharsets.UTF_8);
-    }
-
-    private static boolean allZero(byte[] b) {
-        for (byte x : b) {
-            if (x != 0) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * False when the decompressed stream ends cleanly before a whole block. A transfer cut
-     * short ends the gzip stream mid-member, which GZIPInputStream reports as an EOFException:
-     * an IOException, so retried, never a refusal.
-     */
-    private static boolean readBlock(InputStream in, byte[] block) throws IOException {
-        return in.readNBytes(block, 0, BLOCK) == BLOCK;
-    }
-
-    private static byte[] readContent(InputStream in, long size, long padded) throws IOException {
-        byte[] content = in.readNBytes((int) size);
-        if (content.length != size) {
-            throw new EOFException("a member ends early");
-        }
-        in.skipNBytes(padded - size);
-        return content;
-    }
-
-    private static void skip(InputStream in, long n) throws IOException {
-        in.skipNBytes(n);
     }
 
     /** Counts and bounds the raw bytes. */

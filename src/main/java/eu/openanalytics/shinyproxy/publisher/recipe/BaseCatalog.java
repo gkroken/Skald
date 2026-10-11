@@ -72,10 +72,33 @@ public final class BaseCatalog {
     /** One catalog entry, as far as a build needs it. */
     public record Entry(String id, String type, String language, String version, String architecture,
                         int recipeRevision, String uid, String gid, Map<String, String> packageManager,
-                        String osCodename) {
+                        String osCodename, String rPlatform, Map<String, String> rRecommended) {
 
         public Entry {
             packageManager = Map.copyOf(packageManager);
+            rRecommended = Map.copyOf(rRecommended);
+        }
+
+        /** An entry without R's facts (a base whose recipe needs none, or before T7b). */
+        public Entry(String id, String type, String language, String version, String architecture,
+                     int recipeRevision, String uid, String gid, Map<String, String> packageManager,
+                     String osCodename) {
+            this(id, type, language, version, architecture, recipeRevision, uid, gid, packageManager, osCodename,
+                    null, Map.of());
+        }
+
+        /**
+         * forge's platform key for an R base, {@code <codename>-<arch>/<R minor>} (T7b): the
+         * tree its shared binaries live in. Empty for a base that is not R or lacks a fact.
+         */
+        public java.util.Optional<String> platformKey() {
+            String arch = ARCHES.get(architecture);
+            if (!"r".equals(language) || osCodename == null || arch == null) {
+                return java.util.Optional.empty();
+            }
+            var m = R_VERSION.matcher(version);
+            return m.matches() ? java.util.Optional.of(osCodename + "-" + arch + "/" + m.group(1))
+                    : java.util.Optional.empty();
         }
 
         /** An entry with no OS codename (a base whose recipe needs none). */
@@ -100,6 +123,11 @@ public final class BaseCatalog {
     private static final Pattern USER = Pattern.compile("([1-9][0-9]{0,8}):([1-9][0-9]{0,8})");
     /** A distribution release's codename, as /etc/os-release spells it (noble, trixie). */
     private static final Pattern CODENAME = Pattern.compile("[a-z][a-z0-9]{1,31}");
+    /** The catalog's architectures as forge's platform keys and R's platform strings name them. */
+    private static final Map<String, String> ARCHES = Map.of("amd64", "x86_64", "arm64", "aarch64");
+    private static final Pattern R_VERSION = Pattern.compile("([0-9]+\\.[0-9]+)\\.[0-9]+");
+    private static final Pattern R_PACKAGE = Pattern.compile("[A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]");
+    private static final Pattern R_PACKAGE_VERSION = Pattern.compile("[0-9]+([.-][0-9]+)+");
 
     private final List<Entry> entries;
     private final Map<String, String> published;
@@ -154,9 +182,38 @@ public final class BaseCatalog {
                 throw new IllegalArgumentException("catalog: base " + b.path("id").asText()
                         + " has no valid os_codename: '" + codename + "'");
             }
+            // R's facts (T7b): required for an R base, refused on any other. r_platform must be
+            // the architecture's R.version$platform; r_recommended is R's system library of
+            // recommended packages, by exact version (a dependency the base already carries at
+            // the locked version is not queued for a shared binary).
+            String rPlatform = null;
+            Map<String, String> recommended = new java.util.TreeMap<>();
+            if ("r".equals(b.path("language").asText())) {
+                String arch = ARCHES.get(b.path("architecture").asText());
+                rPlatform = b.path("r_platform").asText("");
+                if (arch == null || !rPlatform.equals(arch + "-pc-linux-gnu")) {
+                    throw new IllegalArgumentException("catalog: R base " + b.path("id").asText()
+                            + " has no r_platform matching its architecture: '" + rPlatform + "'");
+                }
+                if (!b.path("r_recommended").isObject() || b.path("r_recommended").isEmpty()) {
+                    throw new IllegalArgumentException("catalog: R base " + b.path("id").asText()
+                            + " has no r_recommended");
+                }
+                b.path("r_recommended").fields().forEachRemaining(f -> {
+                    if (!R_PACKAGE.matcher(f.getKey()).matches() || !f.getValue().isTextual()
+                            || !R_PACKAGE_VERSION.matcher(f.getValue().asText()).matches()) {
+                        throw new IllegalArgumentException("catalog: R base " + b.path("id").asText()
+                                + " has a malformed r_recommended entry: " + f.getKey());
+                    }
+                    recommended.put(f.getKey(), f.getValue().asText());
+                });
+            } else if (b.has("r_platform") || b.has("r_recommended")) {
+                throw new IllegalArgumentException("catalog: base " + b.path("id").asText()
+                        + " is not R but records R's facts");
+            }
             entries.add(new Entry(text(b, "id"), text(b, "type"), text(b, "language"), text(b, "version"),
                     text(b, "architecture"), b.path("recipe_revision").asInt(0), user.group(1), user.group(2),
-                    packageManager, codename));
+                    packageManager, codename, rPlatform, recommended));
         }
         Set<String> ids = new java.util.HashSet<>();
         for (Entry e : entries) {

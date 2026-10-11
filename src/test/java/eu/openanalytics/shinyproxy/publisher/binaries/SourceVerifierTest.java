@@ -348,6 +348,23 @@ public class SourceVerifierTest {
     }
 
     @Test
+    public void aDependencyTheBaseCarriesAtTheLockedVersionIsNotQueued() {
+        // e149183 N4: R's recommended packages ship in the base at R's own version.
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.0", "Imports: Matrix, MASS, bbb\n");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of("Matrix", "1.7-5", "MASS", "7.3-66", "bbb", "1.0"));
+        SourceVerifier v = new SourceVerifier(q, new HttpSourceFetcher(Duration.ofSeconds(5)), deadline(
+            Duration.ofMinutes(1)), BinaryQueueSettings.DEFAULTS,
+            key -> key.equals(KEY) ? Map.of("Matrix", "1.7-5", "MASS", "7.3-65") : Map.of());
+        assertEquals("QUEUED", v.verifyNext("v").orElseThrow().outcome());
+        Set<String> deps = new HashSet<>(jdbc.queryForList("SELECT x.package || ' ' || x.version FROM"
+            + " skald.binary_build_dep d JOIN skald.binary_build x ON x.id = d.dependency_id WHERE d.binary_build_id = ?",
+            String.class, id));
+        assertEquals(Set.of("MASS 7.3-66", "bbb 1.0"), deps,
+            "Matrix is the base's at the locked version; MASS is locked at another, so queued");
+    }
+
+    @Test
     public void everyConstraintOnAPackageIsChecked() {
         BinaryBuildQueue q = queue();
         publish("aaa", "1.0", "Imports: bbb\nLinkingTo: bbb (< 1.5)\n");

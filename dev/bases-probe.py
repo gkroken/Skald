@@ -175,6 +175,15 @@ def judge_live(entry, facts, upstream_facts=None):
         # which rocker sets, prefixes "R/<version> ".
         if facts.get("agent", "").startswith("R/"):
             problems.append("R sends PPM's binary-selecting user agent: %s" % facts.get("agent"))
+        # A dependency the base carries at the locked version is not queued for a shared
+        # binary (T7b), so the catalog's library must be exactly the image's.
+        if facts.get("r_platform") != entry.get("r_platform"):
+            problems.append("R platform %s, catalog %s" % (facts.get("r_platform"), entry.get("r_platform")))
+        have_rec = dict(tok.split("=", 1) for tok in facts.get("r_recommended", "").split() if "=" in tok)
+        if have_rec != entry.get("r_recommended"):
+            problems.append("R's recommended packages differ from the catalog: image %s, catalog %s"
+                            % (sorted(set(have_rec.items()) - set(entry.get("r_recommended", {}).items())),
+                               sorted(set(entry.get("r_recommended", {}).items()) - set(have_rec.items()))))
     if problems:
         return False, "; ".join(problems)
     added = sorted(set(have) - set(installed_packages(upstream_facts or {"dpkg": ""}))) \
@@ -195,7 +204,13 @@ FACTS = {
     "r": ("R --version | head -1 | awk '{print \"version=\"$3}';"
           " Rscript --vanilla -e 'cat(\"renv=\", as.character(packageVersion(\"renv\")), \"\\n\", sep=\"\")';"
           " R --quiet --no-echo -e 'cat(\"repos=\", paste(getOption(\"repos\"), collapse=\",\"), \"\\n\", sep=\"\");"
-          " cat(\"agent=\", getOption(\"HTTPUserAgent\"), \"\\n\", sep=\"\")';"),
+          " cat(\"agent=\", getOption(\"HTTPUserAgent\"), \"\\n\", sep=\"\")';"
+          # R's facts for shared binaries (T7b): its platform, and its system library's
+          # recommended packages by exact version, as name=version tokens.
+          " Rscript --vanilla -e 'cat(\"r_platform=\", R.version$platform, \"\\n\", sep=\"\");"
+          " ip <- installed.packages(lib.loc = .Library); x <- ip[!is.na(ip[, \"Priority\"]) &"
+          " ip[, \"Priority\"] == \"recommended\", \"Version\"];"
+          " cat(\"r_recommended=\", paste(names(x), x, sep = \"=\", collapse = \" \"), \"\\n\", sep=\"\")';"),
     "python": ("python -c 'import platform; print(\"version=\" + platform.python_version())';"
                " pip --version | awk '{print \"pip=\"$2}';"),
 }
@@ -289,6 +304,8 @@ def self_test():
     r = next(e for e in catalog()["bases"] if e["language"] == "r")
     good = {"version": r["version"], "renv": "1.3.0", "os": "Ubuntu 24.04", "os_codename": "noble", "uid": "10001",
             "repos": "@CRAN@", "agent": "R (4.6.1 x86_64-pc-linux-gnu x86_64 linux-gnu)",
+            "r_platform": "x86_64-pc-linux-gnu",
+            "r_recommended": " ".join("%s=%s" % kv for kv in r["r_recommended"].items()),
             "dpkg": "base-files=13 libuv1-dev=1 pkg-config=1 zlib1g-dev=1 libpkgconf3=1"
                     " libuv1t64=1 pkgconf=1 pkgconf-bin=1"}
     upstream = {"dpkg": "base-files=13"}
@@ -309,6 +326,12 @@ def self_test():
     expect("a wrong renv is caught", judge_live(r, dict(clean, renv="1.2.0")), False)
     expect("a wrong R is caught", judge_live(r, dict(clean, version="4.6.0")), False)
     expect("a wrong OS codename is caught", judge_live(r, dict(clean, os_codename="jammy")), False)
+    expect("a wrong R platform is caught", judge_live(r, dict(clean, r_platform="aarch64-unknown-linux-gnu")),
+           False)
+    expect("a recommended package at another version is caught", judge_live(r, dict(clean,
+           r_recommended=clean["r_recommended"].replace("Matrix=1.7-5", "Matrix=1.7-6"))), False)
+    expect("a recommended package the catalog lacks is caught", judge_live(r, dict(clean,
+           r_recommended=clean["r_recommended"] + " extra=1.0")), False)
     expect("a root or missing user is caught", judge_live(r, dict(clean, uid="")), False)
     expect("a missing system package is caught", judge_live(r, dict(clean, dpkg=
            clean["dpkg"].replace(" zlib1g-dev=1", "")), upstream), False)

@@ -249,4 +249,61 @@ public class BaseCatalogTest {
         ((ObjectNode) p.get("bases")).remove(PY);
         assertThrows(IllegalArgumentException.class, () -> BaseCatalog.load(c2, bytes(p)));
     }
+
+    private static BaseCatalog.Entry entry(BaseCatalog cat, String id) {
+        return cat.entries().stream().filter(e -> e.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    @Test
+    public void anRBaseCarriesItsPlatformItsLibraryAndItsForgeKey() throws Exception {
+        byte[] c = catalog();
+        BaseCatalog cat = BaseCatalog.load(c, bytes(published(c)));
+        BaseCatalog.Entry r = entry(cat, R);
+        assertEquals("x86_64-pc-linux-gnu", r.rPlatform());
+        assertEquals("1.7-5", r.rRecommended().get("Matrix"));
+        assertEquals(15, r.rRecommended().size());
+        assertEquals(Optional.of("noble-x86_64/4.6"), r.platformKey());
+        BaseCatalog.Entry py = entry(cat, PY);
+        assertEquals(Optional.empty(), py.platformKey(), "only an R base has a forge key");
+        assertTrue(py.rRecommended().isEmpty());
+    }
+
+    @Test
+    public void anRBasesFactsAreRequiredAndWellFormedAndOnlyAnRBaseHasThem() throws Exception {
+        // T7b: a dependency the base carries at the locked version is not queued, so a wrong
+        // library would hand a sandbox something it lacks; the platform is checked against
+        // what an archive's Built field says.
+        for (var bad : List.<java.util.function.Consumer<ObjectNode>>of(
+                b -> b.remove("r_platform"), b -> b.put("r_platform", "aarch64-pc-linux-gnu"),
+                b -> b.put("r_platform", "x86_64-apple-darwin"), b -> b.remove("r_recommended"),
+                b -> b.putObject("r_recommended"), b -> ((ObjectNode) b.get("r_recommended")).put("Matrix", 1),
+                b -> ((ObjectNode) b.get("r_recommended")).put("Matrix", "1"),
+                b -> ((ObjectNode) b.get("r_recommended")).put("Matrix", "../1.0"),
+                b -> ((ObjectNode) b.get("r_recommended")).put("../x", "1.0"))) {
+            ObjectNode cat = (ObjectNode) JSON.readTree(catalog());
+            ObjectNode rBase = (ObjectNode) cat.get("bases").get(0);
+            bad.accept(rBase);
+            byte[] c = bytes(cat);
+            assertThrows(IllegalArgumentException.class, () -> BaseCatalog.load(c, bytes(published(c))),
+                rBase.toString().substring(0, 80));
+        }
+        ObjectNode cat = (ObjectNode) JSON.readTree(catalog());
+        ((ObjectNode) cat.get("bases").get(1)).put("r_platform", "x86_64-pc-linux-gnu");
+        byte[] c = bytes(cat);
+        assertThrows(IllegalArgumentException.class, () -> BaseCatalog.load(c, bytes(published(c))),
+            "a Python base with R's facts");
+    }
+
+    @Test
+    public void aPlatformKeyNeedsEveryPart() {
+        BaseCatalog.Entry e = new BaseCatalog.Entry("x", "shiny", "r", "4.6.1", "arm64", 1, "1", "1", Map.of(),
+            "trixie", "aarch64-pc-linux-gnu", Map.of());
+        assertEquals(Optional.of("trixie-aarch64/4.6"), e.platformKey());
+        assertEquals(Optional.empty(), new BaseCatalog.Entry("x", "shiny", "r", "4.6", "amd64", 1, "1", "1",
+            Map.of(), "noble").platformKey(), "a version without a patch level");
+        assertEquals(Optional.empty(), new BaseCatalog.Entry("x", "shiny", "r", "4.6.1", "s390x", 1, "1", "1",
+            Map.of(), "noble").platformKey(), "an architecture forge has no key for");
+        assertEquals(Optional.empty(), new BaseCatalog.Entry("x", "shiny", "r", "4.6.1", "amd64", 1, "1", "1",
+            Map.of(), null).platformKey(), "no codename");
+    }
 }

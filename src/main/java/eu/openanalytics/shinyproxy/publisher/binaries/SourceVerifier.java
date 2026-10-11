@@ -55,7 +55,11 @@ import java.util.concurrent.ScheduledExecutorService;
  *   <li>its DESCRIPTION names this package and version (DESCRIPTION_MISMATCH), and reads
  *       (DESCRIPTION_UNREADABLE; the tarball's own layout: SourceTarball);</li>
  *   <li>each Depends, Imports and LinkingTo package, R and the base packages excluded, is in the
- *       lock (NOT_IN_LOCK) at a version its constraint accepts (CONSTRAINT_UNMET).</li>
+ *       lock (NOT_IN_LOCK) at a version its constraint accepts (CONSTRAINT_UNMET). One the base
+ *       image already carries in R's system library AT the locked version (a recommended
+ *       package: Matrix, MASS, ...) is not a dependency to queue: the sandbox has it from the
+ *       trusted base, whose digest is the platform registration (e149183 N4). The base's
+ *       versions come from the catalog, never from inside a sandbox (9262bd8 N2).</li>
  * </ol>
  * Then the SHA-256 computed here over the bytes received, the MD5, and the dependencies at
  * their locked versions are recorded ({@link BinaryBuildQueue#recordSource}). A transfer that
@@ -86,12 +90,25 @@ public final class SourceVerifier implements AutoCloseable {
     private final SourceSettings settings;
     private final BinaryQueueSettings queueSettings;
     private final CranIndex index;
+    private final java.util.function.Function<String, Map<String, String>> baseLibrary;
     // Two timers: renewals (JDBC) on one, deadlines alone on the other (9262bd8 N1).
     private final ScheduledExecutorService beats = timer("skald-source-renew");
     private final ScheduledExecutorService deadlines = timer("skald-source-deadline");
 
+    /** A verifier for platforms whose bases carry no R library to account for. */
     public SourceVerifier(BinaryBuildQueue queue, SourceFetcher fetcher, SourceSettings settings,
                           BinaryQueueSettings queueSettings) {
+        this(queue, fetcher, settings, queueSettings, key -> Map.of());
+    }
+
+    /**
+     * @param baseLibrary per platform key, the base's R system library (package -> version):
+     *                    BaseCatalog.Entry#rRecommended of the base registered for that key
+     */
+    public SourceVerifier(BinaryBuildQueue queue, SourceFetcher fetcher, SourceSettings settings,
+                          BinaryQueueSettings queueSettings,
+                          java.util.function.Function<String, Map<String, String>> baseLibrary) {
+        this.baseLibrary = baseLibrary;
         if (settings.repository() == null) {
             throw new IllegalArgumentException("no source-repository is configured");
         }
@@ -179,7 +196,7 @@ public final class SourceVerifier implements AutoCloseable {
             throw new SourceRefusal("DESCRIPTION_MISMATCH", "the DESCRIPTION names " + description.get("Package")
                     + " " + description.get("Version"));
         }
-        return new Checked(read, dependencies(description, lock));
+        return new Checked(read, dependencies(description, lock, baseLibrary.apply(claim.platformKey())));
     }
 
     /** The index's entry for exactly the claimed version, refetched once if the index is behind. */
@@ -240,9 +257,13 @@ public final class SourceVerifier implements AutoCloseable {
         return records.get(0);
     }
 
-    /** The non-base dependencies at their locked versions, each checked against every constraint on it. */
-    static List<BinaryBuildQueue.Dependency> dependencies(Map<String, String> description, Map<String, String> lock)
-            throws SourceRefusal {
+    /**
+     * The dependencies to queue at their locked versions, each checked against every
+     * constraint on it; R, the base packages and what the base's library holds at the locked
+     * version are not queued.
+     */
+    static List<BinaryBuildQueue.Dependency> dependencies(Map<String, String> description, Map<String, String> lock,
+                                                          Map<String, String> baseLibrary) throws SourceRefusal {
         Map<String, List<RDependencies.Requirement>> byPackage = new LinkedHashMap<>();
         for (String field : RDependencies.FIELDS) {
             try {
@@ -266,7 +287,9 @@ public final class SourceVerifier implements AutoCloseable {
                     throw new SourceRefusal("CONSTRAINT_UNMET", "needs " + r + "; the lock fixes " + version);
                 }
             }
-            out.add(new BinaryBuildQueue.Dependency(e.getKey(), version));
+            if (!version.equals(baseLibrary.get(e.getKey()))) {
+                out.add(new BinaryBuildQueue.Dependency(e.getKey(), version));
+            }
         }
         return out;
     }

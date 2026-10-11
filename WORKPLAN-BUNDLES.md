@@ -2355,6 +2355,27 @@ below are marked passed by this planning document.
       5 min doubling to 6 h, and refused INDEX_BEHIND only 48 h after its first deferral
       (`source-behind-*`). Renewals and deadlines run on separate timers, so a renewal
       blocked in the database cannot delay a deadline (9262bd8 N1).
+      **Step 2c, part 1, done (this commit's part): the sandbox's recipe and the check of
+      its output, no Docker yet.** The catalog's R base records `r_platform` and
+      `r_recommended` (R's system library of recommended packages by exact version, the 15
+      R 4.6.1 ships), checked against the built image by dev/bases-probe.py; BaseCatalog
+      requires them for an R base and refuses them on any other, and derives forge's key
+      (`noble-x86_64/4.6`). The source check no longer queues a dependency the base carries
+      at the locked version (e149183 N4). `PackageRecipe` renders one package's sandbox:
+      `FROM <base by digest> AS build`, the base's non-root user, the source and each
+      dependency's binary COPYed in after their digests are checked one last time against
+      the queue's record (89a33dc N1), one `RUN --network=none` (89a33dc N2) that unpacks
+      the dependencies into a library of their own, `R CMD INSTALL`s the package into an
+      empty one, requires it to hold exactly that package, and packs it; and a `FROM
+      scratch` stage exporting only `/binary.tar.gz`. `BinaryArchive` checks that file on
+      the trusted side before any upload: one top directory named for the package, regular
+      files and directories only, no unsafe segment, DESCRIPTION once naming this package
+      and version, `Built:` this R, this platform or none, unix, `Meta/package.rds`
+      present, bytes / expansion / entries bounded. Smoke-run by hand with docker buildx on
+      the pinned rocker upstream: rlang 1.3.0 (compiled) built in 12 s with no network and
+      passed the check; ellipsis 0.3.3 built against rlang's handed-in binary. Part 2: the
+      run in a Skald worker (local output collected by the trusted side), the driver, and
+      its probe rows.
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another
