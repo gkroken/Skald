@@ -317,6 +317,27 @@ public class PackageBuildLoopTest {
     }
 
     @Test
+    public void aSandboxClaimedAndLaunchedWhileTheInventoryRunsIsKept() {
+        // fca2f81-F1, the reviewer's probe: the row is claimed and its sandbox launched during the
+        // inventory, so it is on the host and was not live before the inventory began.
+        String fresh = "p" + "3".repeat(24) + "00000001";
+        Set<String> leases = new java.util.HashSet<>();
+        List<String> order = new ArrayList<>();
+        List<String> disposed = new ArrayList<>();
+        BinaryHousekeeping h = new BinaryHousekeeping(() -> { }, () -> {
+            order.add("present");
+            leases.add(fresh);
+            return Set.of(fresh);
+        }, () -> {
+            order.add("live");
+            return Set.copyOf(leases);
+        }, disposed::add, Duration.ofMinutes(1), Duration.ofMinutes(10));
+        assertEquals(List.of(), h.sweep(), "a live sandbox is never disposed of");
+        assertEquals(List.of("present", "live"), order);
+        assertTrue(disposed.isEmpty());
+    }
+
+    @Test
     public void housekeepingNeverThrows() {
         BinaryHousekeeping h = new BinaryHousekeeping(() -> {
             throw new IllegalStateException("db down");

@@ -115,9 +115,14 @@ public final class BinaryHousekeeping {
 
     /** The package attempts disposed of. */
     List<String> sweep() {
+        // The host's inventory FIRST, the live leases SECOND, as AttemptSweeper does (fca2f81-F1):
+        // a sandbox's objects exist only after its row is claimed, so anything in the inventory is
+        // either live in the fresher lease read or dead. The other order disposed of a sandbox
+        // claimed and launched while the (slow, helper-container) inventory ran.
+        Set<String> onHost = present.get();
         Set<String> running = live.get();
         List<String> disposed = new ArrayList<>();
-        for (String id : present.get()) {
+        for (String id : onHost) {
             if (id.length() == 33 && id.charAt(0) == 'p' && !running.contains(id)) {
                 dispose.accept(id);
                 disposed.add(id);
