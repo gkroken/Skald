@@ -38,8 +38,10 @@ public interface BinaryHook {
     BinaryGate.Decision binariesFor(BaseCatalog.Resolved base);
 
     /**
-     * An app build on {@code base} succeeded with {@code lock} (package -> exact version). Never
-     * throws for the build's sake: queueing is the binaries' business, not the app's.
+     * An app build on {@code base} succeeded with {@code lock} (package -> exact version). Called
+     * only for a build whose {@link #binariesFor} said on at its preparation (a16cf2a N2: the
+     * upload rechecks the registration before anything leaves), after its outcome is settled,
+     * off the build's thread (a16cf2a-F1). Never throws for the build's sake.
      */
     void built(UUID buildId, BaseCatalog.Resolved base, Map<String, String> lock);
 }

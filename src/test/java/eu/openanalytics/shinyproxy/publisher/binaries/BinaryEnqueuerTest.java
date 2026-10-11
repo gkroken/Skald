@@ -136,12 +136,14 @@ public class BinaryEnqueuerTest {
     }
 
     @Test
-    public void nothingIsQueuedForABaseForgeDoesNotRegister() {
+    public void builtDoesNotAskForgeAgain() {
+        // a16cf2a N2: built() runs only for a build whose prepare-time decision was on; the
+        // uploader rechecks the registration before anything leaves. A registration gone since
+        // does not stop the queue (nothing would be uploaded for it).
         registration = null;
         enqueuer().built(UUID.randomUUID(), rBase(), Map.of("shiny", "1.9.1"));
-        assertTrue(queued().isEmpty());
-        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM skald.binary_lock", Integer.class));
-        assertFalse(enqueuer().binariesFor(rBase()).binaries());
+        assertEquals(List.of("shiny 1.9.1"), queued());
+        assertFalse(enqueuer().binariesFor(rBase()).binaries(), "the decision itself is the gate's");
     }
 
     @Test

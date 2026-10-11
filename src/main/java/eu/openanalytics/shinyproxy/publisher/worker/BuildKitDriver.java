@@ -130,6 +130,13 @@ public final class BuildKitDriver implements BuildDriver {
     /** How long the decision waits for the rest of an exited client's output. */
     static final long FOLLOW_SETTLE_MILLIS = 30_000;
     private static final Logger log = LoggerFactory.getLogger(BuildKitDriver.class);
+    /** Where a built attempt's onBuilt runs: one daemon thread, outside every attempt's stop window. */
+    private static final java.util.concurrent.ExecutorService AFTER_BUILT =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "skald-after-built");
+                t.setDaemon(true);
+                return t;
+            });
 
     private final DockerClient docker;
     private final DockerWorkerLauncher launcher;
@@ -164,9 +171,10 @@ public final class BuildKitDriver implements BuildDriver {
         AtomicReference<Outcome> result = new AtomicReference<>();
         AtomicReference<Throwable> crashed = new AtomicReference<>();
         AtomicReference<Map<String, Object>> record = new AtomicReference<>();
+        AtomicReference<Runnable> afterBuilt = new AtomicReference<>();
         Thread work = new Thread(() -> {
             try {
-                result.set(attempt(build, h, aborted, buildLog, record));
+                result.set(attempt(build, h, aborted, buildLog, record, afterBuilt));
             } catch (Throwable t) {
                 crashed.set(t);
             } finally {
@@ -215,7 +223,21 @@ public final class BuildKitDriver implements BuildDriver {
         Outcome outcome = crashed.get() != null
                 ? new Failed("DRIVER_ERROR", detail(crashed.get().getClass().getSimpleName()))
                 : result.get();
-        return withRecord(withLog(buildLog, outcome), record.get());
+        Outcome done = withRecord(withLog(buildLog, outcome), record.get());
+        // T7b, a16cf2a-F1: the binaries' bookkeeping (a lock, a queue of packages) runs only for
+        // a build whose outcome IS Built, after it is settled, on its own thread: nothing about
+        // it -- its length, a stop, an exception -- can turn a pushed image into another outcome.
+        Runnable after = afterBuilt.get();
+        if (done instanceof Built && after != null) {
+            AFTER_BUILT.execute(() -> {
+                try {
+                    after.run();
+                } catch (RuntimeException e) {
+                    log.warn("attempt {}: after the build, {}", h.attemptId(), e.toString());
+                }
+            });
+        }
+        return done;
     }
 
     /**
@@ -327,6 +349,12 @@ public final class BuildKitDriver implements BuildDriver {
     /** The work thread: every Docker call of the attempt. */
     private Outcome attempt(Claimed build, Handle h, AtomicBoolean aborted, HeadTailLog buildLog,
                             AtomicReference<Map<String, Object>> record) throws Exception {
+        return attempt(build, h, aborted, buildLog, record, new AtomicReference<>());
+    }
+
+    private Outcome attempt(Claimed build, Handle h, AtomicBoolean aborted, HeadTailLog buildLog,
+                            AtomicReference<Map<String, Object>> record, AtomicReference<Runnable> afterBuilt)
+            throws Exception {
         buildLog.line("[skald] attempt " + h.attemptId() + ": preparing the build context", false);
         Prepared prepared;
         try {
@@ -396,12 +424,9 @@ public final class BuildKitDriver implements BuildDriver {
                     } catch (IllegalStateException e) {
                         return new Failed("BUILD_RESULT", detail(e.getMessage()));
                     }
-                    // T7b: the build's lock queues shared binaries. Never the build's failure.
-                    try {
-                        prepared.onBuilt().run();
-                    } catch (RuntimeException e) {
-                        log.warn("attempt {}: after the build, {}", h.attemptId(), e.toString());
-                    }
+                    // T7b: the build's lock queues shared binaries -- but only once the outcome is
+                    // settled, off this thread (a16cf2a-F1): run() hands it on after the work ends.
+                    afterBuilt.set(prepared.onBuilt());
                     return built;
                 }
                 // The one death check, before a failed exit is read as the build's: a client

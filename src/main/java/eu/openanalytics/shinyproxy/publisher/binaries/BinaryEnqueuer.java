@@ -34,8 +34,9 @@ import java.util.UUID;
  * The hook over the queue and forge's registration (T7b step 2e):
  * <ul>
  *   <li>{@link #binariesFor}: BinaryGate for the base and its published image ID;</li>
- *   <li>{@link #built}: only for a base the gate turns binaries on for, the build's lock is
- *       recorded (its dependencies resolve against it, e149183) and every package in it is
+ *   <li>{@link #built}: called only for a build the gate turned binaries on for at its
+ *       preparation (forge is not asked again here; the uploader rechecks before any upload,
+ *       a16cf2a N2), the build's lock is recorded (its dependencies resolve against it, e149183) and every package in it is
  *       queued for the base's key, except one the base's library carries at the locked version
  *       (e149183 N4). Queueing is idempotent: a version already queued, built, refused or
  *       failed is left as it is. Every failure is logged, never thrown into the build.</li>
@@ -68,7 +69,7 @@ public final class BinaryEnqueuer implements BinaryHook {
     public void built(UUID buildId, BaseCatalog.Resolved base, Map<String, String> lock) {
         try {
             Optional<String> key = base.entry().platformKey();
-            if (key.isEmpty() || !binariesFor(base).binaries()) {
+            if (key.isEmpty()) {
                 return;
             }
             queue.recordLock(buildId, lock);

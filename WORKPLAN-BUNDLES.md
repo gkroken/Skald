@@ -2464,6 +2464,13 @@ below are marked passed by this planning document.
       version, each independently. `PackageBuildDriver.Built` carries the closure actually
       handed in, for the upload. Part 1b: the binary loop, the reaper, the package-attempt
       sweep and the wiring (off by default).
+      Fixed in review (a16cf2a-F1): onBuilt runs only once the attempt's outcome is settled as
+      Built, on its own daemon thread, so neither its length nor a stop can undo a pushed
+      image; the enqueuer no longer asks forge again (N2: the prepare-time decision, and the
+      uploader's recheck before any upload). **For 2e (a16cf2a N1):** a lock entry the build
+      installed from forge's HOSTED member (a private package) is queued too, then deferred
+      for 48 h at the proxy and refused INDEX_BEHIND: measure it, and consider a cheap
+      "absent at the proxy" check at enqueue time.
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

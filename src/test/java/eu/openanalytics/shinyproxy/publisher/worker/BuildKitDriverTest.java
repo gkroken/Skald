@@ -68,6 +68,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -697,6 +698,10 @@ public class BuildKitDriverTest {
         };
         Outcome outcome = driver(Settings.defaults(), counted).run(c, () -> false);
         assertInstanceOf(Built.class, outcome, outcome.toString());
+        // onBuilt runs after the outcome, on its own thread (a16cf2a-F1): wait for it, bounded.
+        for (int i = 0; i < 300 && onBuilt.get() == 0; i++) {
+            Thread.sleep(100);
+        }
         assertEquals(1, onBuilt.get(), "onBuilt ran once, for the built image");
         assertNothingLeft(c);
         Built built = (Built) outcome;
@@ -925,10 +930,18 @@ public class BuildKitDriverTest {
                 });
         logWriter = new BuildLogWriter(noFinal, logStore.bucket);
         Claimed c = claimed();
-        Outcome outcome = driver(Settings.defaults(), source(dir, "RUN [\"true\"]\n", new AtomicInteger()))
-                .run(c, () -> false);
+        ContextSource plain = source(dir, "RUN [\"true\"]\n", new AtomicInteger());
+        AtomicInteger onBuilt = new AtomicInteger();
+        ContextSource counted = build -> {
+            Prepared p = plain.prepare(build);
+            return new Prepared(p.payload(), p.recipe(), p.repository(), p.release(), p.cacheKey(), p.inputs(),
+                    onBuilt::incrementAndGet);
+        };
+        Outcome outcome = driver(Settings.defaults(), counted).run(c, () -> false);
         assertInstanceOf(Failed.class, outcome, outcome.toString());
         assertEquals("LOG_STORAGE", ((Failed) outcome).code(), outcome.toString());
+        Thread.sleep(3000);
+        assertEquals(0, onBuilt.get(), "a build whose outcome is not Built queues no binaries (a16cf2a-F1)");
         assertTrue(((Failed) outcome).detail().contains("simulated outage at the end"), outcome.toString());
         assertNothingLeft(c);
     }
@@ -981,5 +994,38 @@ public class BuildKitDriverTest {
         assertEquals("a?b??c", BuildKitDriver.detail("a" + (char) 0xe9 + "b\n" + (char) 0x1b + "c"));
         assertEquals(BuildKitDriver.DETAIL_MAX, BuildKitDriver.detail("x".repeat(500)).length());
         assertEquals("", BuildKitDriver.detail(null));
+    }
+
+    @Test
+    public void aStopWhileTheBinariesAreQueuedNeverUndoesABuiltImage(@TempDir Path dir) throws Exception {
+        // a16cf2a-F1: onBuilt (the binaries' queue) can take a while; a stop that lands while it
+        // runs must not turn the pushed image into STOPPED. onBuilt blocks until released, and
+        // the stop signal turns true the moment it starts.
+        Claimed c = claimed();
+        ContextSource plain = source(dir, "", new AtomicInteger());
+        java.util.concurrent.CountDownLatch started = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        AtomicReference<String> ranOn = new AtomicReference<>();
+        ContextSource slow = build -> {
+            Prepared p = plain.prepare(build);
+            return new Prepared(p.payload(), p.recipe(), p.repository(), p.release(), p.cacheKey(), p.inputs(), () -> {
+                ranOn.set(Thread.currentThread().getName());
+                started.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+        };
+        try {
+            Outcome outcome = driver(Settings.defaults(), slow).run(c, () -> started.getCount() == 0);
+            assertInstanceOf(Built.class, outcome, outcome.toString());
+            assertTrue(started.await(60, java.util.concurrent.TimeUnit.SECONDS), "onBuilt ran");
+            assertEquals("skald-after-built", ranOn.get(), "on its own thread, after the outcome");
+        } finally {
+            release.countDown();
+        }
+        assertNothingLeft(c);
     }
 }
