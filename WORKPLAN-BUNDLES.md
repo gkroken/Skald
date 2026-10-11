@@ -2254,18 +2254,25 @@ below are marked passed by this planning document.
          binary the trusted side fetched from Skald's own binary tree for this key and
          checked against that dependency's recorded upload digest; never the group's
          URL, which also serves the operator's hosted packages and falls back to source,
-         and never an app's lock (604d63b N2). A row whose dependencies do not all have
-         Skald-built binaries waits (point 3 queues them first); nothing compiles a
-         dependency inside another package's sandbox. `R CMD INSTALL` builds the package
+         and never an app's lock (604d63b N2). A row waits while its dependencies can
+         still become Skald-built binaries (point 3 queues them first), and is refused,
+         with the reason, once one cannot (refused, failed, or a binary Skald did not
+         produce; 1fba61d N3); nothing compiles a dependency inside another package's
+         sandbox. `R CMD INSTALL` builds the package
          into an empty library, which is packed and exported to the trusted side.
       5. *The upload, outside the sandbox.* The trusted side checks the archive (one top
          directory named for the package; DESCRIPTION Package and Version as queued;
          Built: the base's R and platform), computes LinkingTo versions from what IT
-         handed in, rechecks the registration, and PUTs it with the base's image ID. A 409
-         (uploaded first by another) is not taken as Skald's: the existing binary's digest
-         is fetched and the row records "uploaded by another, digest X", so a binary no
-         Skald attempt produced is visible rather than claimed (c365d95 N2). Provenance per binary: package, version, source SHA-256 and MD5,
-         builder image, LinkingTo versions, worker profile, attempt.
+         handed in, rechecks the registration, and PUTs it with the base's image ID.
+         Before the PUT it records an upload intent (the digest about to be sent and its
+         provenance, fenced, append-only, kept across the reaper; 1fba61d-F1): the PUT and
+         the row's write are not atomic, and a restart or a lost lease between them leaves
+         Skald's binary in forge with a row that says nothing of it. A 409 fetches the
+         existing binary's digest: one of the row's own intents is an earlier attempt's
+         upload and makes the row UPLOADED with that intent's provenance; any other digest
+         is "uploaded by another, digest X", visible rather than claimed (c365d95 N2).
+         Provenance per binary: package, version, source SHA-256 and MD5, builder image,
+         LinkingTo versions, worker profile, attempt.
       6. *The rows that must go red under their mutants:* a second app with the same
          packages installs them as binaries (and the time it saves); a remote package with
          a CRAN name and version is never uploaded and the CRAN binary is unchanged; a
@@ -2295,6 +2302,15 @@ below are marked passed by this planning document.
       claimed only when no app build is QUEUED, fewer than the app limit run, and fewer than
       `skald.builds.binaries.max-running` (default 1) compiles run; app claims never count
       compiles, so the host's worst case is the two limits added. Not wired yet (step 2e).
+      Fixed in review (1fba61d-F1): each attempt records its upload intent before the PUT,
+      and a 409 whose digest is one of the row's intents is Skald's own (point 5).
+      **Re-opening (1fba61d N1, step 2e):** REFUSED, FAILED and PRESENT_FOREIGN are final for
+      the queue itself, so a flaky dependency cannot loop. An operator re-opens them by an
+      audited admin action: a FAILED row (after fixing the cause), a PRESENT_FOREIGN one
+      (after removing that binary from forge; the action checks forge no longer holds it),
+      and the rows refused because of it, which go back to waiting. V4 allows exactly that
+      transition and nothing else: a foreign digest may be cleared only as its row returns
+      to waiting; an UPLOADED digest and the source digests never change.
       Then: the per-package builder and uploader; the pass probe measures a cold R build
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another

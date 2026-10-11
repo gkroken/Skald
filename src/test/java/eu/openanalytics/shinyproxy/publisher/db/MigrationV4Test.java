@@ -203,20 +203,69 @@ public class MigrationV4Test {
             "'QUEUED', '" + SHA + "'"));
     }
 
+    /** A QUEUED row with its source digests, as a compile would find it. */
+    private static UUID queued() {
+        return jdbc.queryForObject("INSERT INTO skald.binary_build (platform_key, package, version, state,"
+            + " source_sha256, source_md5) VALUES (?, ?, '1.0', 'QUEUED', ?, ?) RETURNING id",
+            UUID.class, KEY, pkg(), SHA, MD5);
+    }
+
+    private static void intent(UUID row, String digest, long generation, String provenance) {
+        jdbc.update("INSERT INTO skald.binary_build_upload (binary_build_id, binary_sha256, generation,"
+            + " provenance) VALUES (?, ?, ?, ?::jsonb)", row, digest, generation, provenance);
+    }
+
+    private static void upload(UUID row, String digest, String provenance) {
+        jdbc.update("UPDATE skald.binary_build SET state = 'UPLOADED', finished_at = now(),"
+            + " binary_sha256 = ?, provenance = ?::jsonb WHERE id = ?", digest, provenance, row);
+    }
+
     @Test
     public void anUploadedRowHasItsDigestAndProvenance() {
-        String source = "'" + SHA + "', '" + MD5 + "', now()";
-        insert("state, source_sha256, source_md5, finished_at, binary_sha256, provenance",
-            "'UPLOADED', " + source + ", '" + SHA + "', '{\"schema\": \"s\"}'");
-        refusedBy("binary_build_uploaded_is_recorded", () -> insert(
-            "state, source_sha256, source_md5, finished_at, provenance",
-            "'UPLOADED', " + source + ", '{\"schema\": \"s\"}'"));
-        refusedBy("binary_build_uploaded_is_recorded", () -> insert(
-            "state, source_sha256, source_md5, finished_at, binary_sha256",
-            "'UPLOADED', " + source + ", '" + SHA + "'"));
-        refusedBy("binary_build_uploaded_is_recorded", () -> insert(
+        UUID ok = queued();
+        intent(ok, SHA, 1, "{\"schema\": \"s\"}");
+        upload(ok, SHA, "{\"schema\": \"s\"}");
+        UUID noProvenance = queued();
+        intent(noProvenance, SHA, 1, "{\"schema\": \"s\"}");
+        refusedBy("binary_build_uploaded_is_recorded", () -> upload(noProvenance, SHA, null));
+        refusedBy("binary_build_uploaded_is_recorded", () -> upload(noProvenance, SHA, "{\"x\": 1}"));
+    }
+
+    @Test
+    public void anUploadedDigestIsOneOfTheRowsIntents() {
+        UUID row = queued();
+        intent(row, SHA, 1, "{\"schema\": \"s\"}");
+        refusedBy("binary_build_uploaded_was_intended", () -> upload(row, "c".repeat(64), "{\"schema\": \"s\"}"));
+        refusedBy("binary_build_uploaded_was_intended", () -> upload(row, null, "{\"schema\": \"s\"}"));
+        UUID other = queued();
+        refusedBy("binary_build_uploaded_was_intended", () -> upload(other, SHA, "{\"schema\": \"s\"}"));
+        refusedBy("binary_build_uploaded_was_intended", () -> insert(
             "state, source_sha256, source_md5, finished_at, binary_sha256, provenance",
-            "'UPLOADED', " + source + ", '" + SHA + "', '{\"x\": 1}'"));
+            "'UPLOADED', '" + SHA + "', '" + MD5 + "', now(), '" + SHA + "', '{\"schema\": \"s\"}'"));
+    }
+
+    @Test
+    public void uploadIntentsAreAppendOnly() {
+        UUID row = queued();
+        intent(row, SHA, 1, "{\"schema\": \"s\"}");
+        refusedBy("binary_build_upload_append_only", () -> jdbc.update(
+            "UPDATE skald.binary_build_upload SET binary_sha256 = ? WHERE binary_build_id = ?", "c".repeat(64), row));
+        refusedBy("binary_build_upload_append_only", () -> jdbc.update(
+            "DELETE FROM skald.binary_build_upload WHERE binary_build_id = ?", row));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.binary_build_upload"
+            + " WHERE binary_build_id = ?", Integer.class, row));
+    }
+
+    @Test
+    public void anUploadIntentIsOnePerAttemptWithAHexDigestAndARecord() {
+        UUID row = queued();
+        intent(row, SHA, 1, "{\"schema\": \"s\"}");
+        refusedBy("binary_build_upload_one_per_attempt", () -> intent(row, "c".repeat(64), 1, "{\"schema\": \"s\"}"));
+        refusedBy("binary_build_upload_pkey", () -> intent(row, SHA, 2, "{\"schema\": \"s\"}"));
+        refusedBy("binary_build_upload_digest_hex", () -> intent(row, "C".repeat(64), 3, "{\"schema\": \"s\"}"));
+        refusedBy("binary_build_upload_provenance_is_a_record", () -> intent(row, "d".repeat(64), 4, "{\"x\": 1}"));
+        refusedBy("binary_build_upload_binary_build_id_fkey", () -> intent(UUID.randomUUID(), SHA, 1,
+            "{\"schema\": \"s\"}"));
     }
 
     @Test
@@ -284,6 +333,27 @@ public class MigrationV4Test {
         jdbc.update("UPDATE skald.binary_build SET binary_sha256 = ? WHERE id = ?", SHA, id);
         refusedBy("binary_build_binary_immutable", () -> jdbc.update(
             "UPDATE skald.binary_build SET binary_sha256 = ? WHERE id = ?", "c".repeat(64), id));
+    }
+
+    @Test
+    public void onlyAForeignDigestIsClearedAndOnlyAsItsRowGoesBackToWaiting() {
+        UUID foreign = jdbc.queryForObject("INSERT INTO skald.binary_build (platform_key, package, version,"
+            + " state, finished_at, binary_sha256, source_sha256, source_md5) VALUES (?, ?, '1.0',"
+            + " 'PRESENT_FOREIGN', now(), ?, ?, ?) RETURNING id", UUID.class, KEY, pkg(), SHA, SHA, MD5);
+        refusedBy("binary_build_binary_immutable", () -> jdbc.update("UPDATE skald.binary_build SET"
+            + " binary_sha256 = NULL WHERE id = ?", foreign));
+        refusedBy("binary_build_binary_immutable", () -> jdbc.update("UPDATE skald.binary_build SET"
+            + " state = 'QUEUED', finished_at = NULL, binary_sha256 = ? WHERE id = ?", "c".repeat(64), foreign));
+        jdbc.update("UPDATE skald.binary_build SET state = 'QUEUED', finished_at = NULL, binary_sha256 = NULL"
+            + " WHERE id = ?", foreign);
+        assertEquals(SHA, jdbc.queryForObject("SELECT source_sha256 FROM skald.binary_build WHERE id = ?",
+            String.class, foreign), "its source digests stay");
+
+        UUID ours = queued();
+        intent(ours, SHA, 1, "{\"schema\": \"s\"}");
+        upload(ours, SHA, "{\"schema\": \"s\"}");
+        refusedBy("binary_build_binary_immutable", () -> jdbc.update("UPDATE skald.binary_build SET"
+            + " state = 'QUEUED', finished_at = NULL, provenance = NULL, binary_sha256 = NULL WHERE id = ?", ours));
     }
 
     // ------------------------------------------------------------------ edges

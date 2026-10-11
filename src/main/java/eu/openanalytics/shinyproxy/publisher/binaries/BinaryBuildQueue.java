@@ -47,7 +47,9 @@ import java.util.regex.Pattern;
  * source ({@link #claimSource}), and records the digests and the dependency edges it read from
  * the verified tarball ({@link #recordSource}); a compile claims a QUEUED row whose every
  * dependency a Skald attempt UPLOADED ({@link #claimBuild}), and is handed exactly those
- * dependencies' recorded digests (89a33dc N1: nothing else enters its sandbox). A dependency
+ * dependencies' recorded digests (89a33dc N1: nothing else enters its sandbox); it records
+ * what it is about to upload before uploading it ({@link #intendUpload}), so a 409 meeting
+ * its own earlier upload is told from a foreign binary (1fba61d-F1). A dependency
  * that ends any other way -- refused, failed, or a binary Skald did not produce -- refuses its
  * dependents, with the reason, so they are not left waiting forever.
  *
@@ -77,6 +79,14 @@ public final class BinaryBuildQueue {
     public record BuildClaim(UUID rowId, String platformKey, String pkg, String version,
                              String sourceSha256, String sourceMd5, List<BuiltDependency> dependencies,
                              BinaryLease lease) { }
+
+    /** What {@link #alreadyPresent} found forge's binary to be. */
+    public enum Present {
+        /** One of this row's own upload intents: an earlier attempt's upload whose write was lost. UPLOADED. */
+        OURS,
+        /** No upload intent of this row: PRESENT_FOREIGN, never handed in. */
+        FOREIGN
+    }
 
     /** What {@link #recordSource} did. */
     public enum Recorded {
@@ -276,35 +286,93 @@ public final class BinaryBuildQueue {
     }
 
     /**
-     * RUNNING -> UPLOADED: a Skald attempt uploaded this binary, with this digest (the bytes
-     * it sent) and provenance. From now on its digest is what dependents' sandboxes are handed.
+     * Records, BEFORE the upload, the digest this RUNNING attempt is about to send and the
+     * provenance the row takes if it becomes the binary (1fba61d-F1). The PUT and the row's
+     * write are not atomic: a restart, a lost lease or a passed deadline between them leaves
+     * Skald's binary in forge with a row that says nothing of it, and the next attempt's PUT
+     * then meets a 409. With the intent on record that 409 is recognised as Skald's own
+     * ({@link #alreadyPresent}), rather than called foreign and refusing every dependent.
+     * Intents are append-only (V4) and survive the reaper; one per attempt.
      */
-    public void uploaded(BinaryLease lease, String binarySha256, Map<String, Object> provenance) {
+    public void intendUpload(BinaryLease lease, String binarySha256, Map<String, Object> provenance) {
         requireSha256(binarySha256);
         String record = provenance(provenance);
-        int changed = jdbc.update("UPDATE skald.binary_build SET state = 'UPLOADED', binary_sha256 = ?,"
-                + " provenance = ?::jsonb," + release() + FENCE + " AND state = 'RUNNING'",
-                binarySha256, record, lease.rowId(), lease.generation(), lease.owner());
-        requireOne(changed, lease, "UPLOADED");
-        audit(lease.owner(), "binary.uploaded", lease.rowId(), Map.of("binary_sha256", binarySha256));
+        tx.executeWithoutResult(status -> {
+            heldFor(lease, "'RUNNING'", "an upload intent");
+            jdbc.update("INSERT INTO skald.binary_build_upload (binary_build_id, binary_sha256, generation,"
+                    + " provenance) VALUES (?, ?, ?, ?::jsonb) ON CONFLICT (binary_build_id, binary_sha256)"
+                    + " DO NOTHING", lease.rowId(), binarySha256, lease.generation(), record);
+            audit(lease.owner(), "binary.upload_intended", lease.rowId(), Map.of("binary_sha256", binarySha256));
+        });
     }
 
     /**
-     * VERIFYING or RUNNING -> PRESENT_FOREIGN: forge already holds a binary for this version
-     * that this attempt did not upload (a 409, or found before compiling). Its digest is
-     * recorded so it is visible, and it is never taken as Skald's (c365d95 N2): its dependents
-     * are refused rather than handed it.
+     * RUNNING -> UPLOADED: this attempt's upload of {@code binarySha256} succeeded. The digest
+     * must be one of the row's upload intents, and the row takes that intent's provenance.
+     * From now on it is what dependents' sandboxes are handed.
+     */
+    public void uploaded(BinaryLease lease, String binarySha256) {
+        requireSha256(binarySha256);
+        tx.executeWithoutResult(status -> {
+            heldFor(lease, "'RUNNING'", "UPLOADED");
+            becomeOurs(lease, binarySha256, "UPLOADED");
+            audit(lease.owner(), "binary.uploaded", lease.rowId(), Map.of("binary_sha256", binarySha256));
+        });
+    }
+
+    /**
+     * VERIFYING or RUNNING: forge already holds a binary for this version (a 409, or found
+     * before compiling), with digest {@code binarySha256}. If it is one of this row's upload
+     * intents, an earlier attempt uploaded it and lost its write: UPLOADED, with that
+     * intent's provenance. Otherwise PRESENT_FOREIGN: its digest is recorded so it is visible,
+     * it is never taken as Skald's (c365d95 N2), and its dependents are refused rather than
+     * handed it.
      *
      * @param how how it was found ("409 on upload", "present before compiling"), for the audit
      */
-    public void foreign(BinaryLease lease, String binarySha256, String how) {
+    public Present alreadyPresent(BinaryLease lease, String binarySha256, String how) {
         requireSha256(binarySha256);
-        int changed = jdbc.update("UPDATE skald.binary_build SET state = 'PRESENT_FOREIGN',"
-                + " binary_sha256 = ?," + release() + FENCE + " AND state IN ('VERIFYING', 'RUNNING')",
-                binarySha256, lease.rowId(), lease.generation(), lease.owner());
-        requireOne(changed, lease, "PRESENT_FOREIGN");
-        audit(lease.owner(), "binary.foreign", lease.rowId(), Map.of("binary_sha256", binarySha256,
-                "how", String.valueOf(how)));
+        return tx.execute(status -> {
+            heldFor(lease, "'VERIFYING', 'RUNNING'", "recording a present binary");
+            boolean ours = Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS (SELECT 1 FROM"
+                    + " skald.binary_build_upload WHERE binary_build_id = ? AND binary_sha256 = ?)",
+                    Boolean.class, lease.rowId(), binarySha256));
+            if (ours) {
+                becomeOurs(lease, binarySha256, "UPLOADED (an earlier attempt's upload)");
+                audit(lease.owner(), "binary.uploaded", lease.rowId(), Map.of("binary_sha256", binarySha256,
+                        "how", String.valueOf(how), "earlier_attempt", "true"));
+                return Present.OURS;
+            }
+            int changed = jdbc.update("UPDATE skald.binary_build SET state = 'PRESENT_FOREIGN',"
+                    + " binary_sha256 = ?," + release() + FENCE + " AND state IN ('VERIFYING', 'RUNNING')",
+                    binarySha256, lease.rowId(), lease.generation(), lease.owner());
+            requireOne(changed, lease, "PRESENT_FOREIGN");
+            audit(lease.owner(), "binary.foreign", lease.rowId(), Map.of("binary_sha256", binarySha256,
+                    "how", String.valueOf(how)));
+            return Present.FOREIGN;
+        });
+    }
+
+    /** Locks the row if {@code lease} still holds it in one of {@code states}; Fenced otherwise. */
+    private void heldFor(BinaryLease lease, String states, String what) {
+        if (jdbc.queryForList("SELECT id FROM skald.binary_build" + FENCE + " AND state IN (" + states
+                + ") FOR UPDATE", UUID.class, lease.rowId(), lease.generation(), lease.owner()).isEmpty()) {
+            throw fenced(lease, what);
+        }
+    }
+
+    /** The held row becomes UPLOADED with {@code digest}, which must be one of its intents. */
+    private void becomeOurs(BinaryLease lease, String digest, String what) {
+        List<String> provenance = jdbc.queryForList("SELECT provenance::text FROM skald.binary_build_upload"
+                + " WHERE binary_build_id = ? AND binary_sha256 = ?", String.class, lease.rowId(), digest);
+        if (provenance.isEmpty()) {
+            throw new IllegalStateException("binary row " + lease.rowId() + " never intended to upload "
+                    + digest + "; record the intent before the upload");
+        }
+        int changed = jdbc.update("UPDATE skald.binary_build SET state = 'UPLOADED', binary_sha256 = ?,"
+                + " provenance = ?::jsonb," + release() + FENCE, digest, provenance.get(0),
+                lease.rowId(), lease.generation(), lease.owner());
+        requireOne(changed, lease, what);
     }
 
     /**
@@ -327,6 +395,9 @@ public final class BinaryBuildQueue {
      * for another claim, or FAILED once the phase has used {@code maxAttempts} claims.
      */
     public void fail(BinaryLease lease, String code, String detail) {
+        if (code == null || code.isBlank()) {
+            throw new IllegalArgumentException("a failure names its code");
+        }
         int changed = jdbc.update("UPDATE skald.binary_build SET" + settle() + ", error_code = ?,"
                 + " error_detail = ?" + FENCE + " AND state IN ('VERIFYING', 'RUNNING')",
                 settings.maxAttempts(), settings.maxAttempts(), code, detail,

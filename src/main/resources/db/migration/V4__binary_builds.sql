@@ -11,10 +11,12 @@
 --   QUEUED          the source is verified (its digests recorded) and its dependency edges
 --                   are known; claimable once every dependency is UPLOADED.
 --   RUNNING         leased: compiling in a sandbox, then uploading from outside it.
---   UPLOADED        a Skald attempt uploaded this binary; binary_sha256 is ITS digest.
---   PRESENT_FOREIGN forge already held a binary Skald did not produce (a 409, or found
---                   before compiling): its digest is recorded, never claimed as Skald's
---                   (c365d95 N2), and never handed into another package's sandbox (89a33dc N1).
+--   UPLOADED        a Skald attempt uploaded this binary; binary_sha256 is ITS digest, one
+--                   of the row's upload intents.
+--   PRESENT_FOREIGN forge already held a binary that is none of this row's upload intents (a
+--                   409, or found before compiling): its digest is recorded, never claimed as
+--                   Skald's (c365d95 N2), and never handed into another package's sandbox
+--                   (89a33dc N1).
 --   REFUSED         a check said no (refusal_code names it): not a public source, a changed
 --                   tarball, a dependency that is not Skald-built, a dependency cycle.
 --   FAILED          out of attempts.
@@ -22,10 +24,15 @@
 -- or FAILED once its attempts are used up.
 --
 -- What is enforced HERE, and why:
+--   * an UPLOADED row's digest is one of its own upload intents (a trigger): the upload and
+--     the row's write are not atomic, so every attempt records what it is about to send
+--     BEFORE it sends it, and a 409 on a later attempt is recognised as Skald's own
+--     (1fba61d-F1); the intents are append-only;
 --   * the identity (key, package, version) is unique and never changes, and the source
 --     digests, once recorded, never change (a trigger): a tarball republished under the same
 --     version can only be refused, never re-recorded (604d63b N1);
---   * a binary's digest, once recorded, never changes;
+--   * a binary's digest, once recorded, never changes (save a foreign one cleared by the
+--     operator's re-open as its row goes back to waiting);
 --   * UPLOADED has a digest and provenance; QUEUED onwards to UPLOADED has source digests; a
 --     leased state has a lease; a finished row has a finish time; a refusal names its code;
 --   * a dependency edge joins two rows of the SAME platform key, never a row to itself.
@@ -123,7 +130,12 @@ BEGIN
         RAISE EXCEPTION 'binary_build_source_immutable: the source digests recorded at first fetch never change'
             USING ERRCODE = 'check_violation';
     END IF;
-    IF OLD.binary_sha256 IS NOT NULL AND NEW.binary_sha256 IS DISTINCT FROM OLD.binary_sha256 THEN
+    -- One exception, the operator's audited re-open (1fba61d N1, step 2e): a FOREIGN digest
+    -- is cleared as its row goes back to waiting, once forge no longer holds that binary.
+    -- An UPLOADED digest never changes.
+    IF OLD.binary_sha256 IS NOT NULL AND NEW.binary_sha256 IS DISTINCT FROM OLD.binary_sha256
+            AND NOT (OLD.state = 'PRESENT_FOREIGN' AND NEW.binary_sha256 IS NULL
+                AND NEW.state IN ('PENDING_SOURCE', 'QUEUED')) THEN
         RAISE EXCEPTION 'binary_build_binary_immutable: a recorded binary digest never changes'
             USING ERRCODE = 'check_violation';
     END IF;
@@ -132,6 +144,48 @@ END
 $$;
 CREATE TRIGGER binary_build_immutable BEFORE UPDATE ON skald.binary_build
     FOR EACH ROW EXECUTE FUNCTION skald.binary_build_immutable();
+
+-- What a compile attempt is about to upload, written (fenced) before the PUT and never
+-- changed or removed: forge keeps the bytes whether or not the row's own write follows, so
+-- the row must keep the claim. One per attempt (generation); provenance is the record the
+-- row takes if this digest becomes its binary.
+CREATE TABLE skald.binary_build_upload (
+    binary_build_id uuid        NOT NULL REFERENCES skald.binary_build (id),
+    binary_sha256   text        NOT NULL,
+    generation      bigint      NOT NULL,
+    provenance      jsonb       NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (binary_build_id, binary_sha256),
+    CONSTRAINT binary_build_upload_one_per_attempt UNIQUE (binary_build_id, generation),
+    CONSTRAINT binary_build_upload_digest_hex CHECK (binary_sha256 ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT binary_build_upload_provenance_is_a_record CHECK (
+        COALESCE(jsonb_typeof(provenance) = 'object'
+            AND jsonb_typeof(provenance -> 'schema') = 'string', false))
+);
+
+CREATE FUNCTION skald.binary_build_upload_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'binary_build_upload_append_only: an upload intent is never changed or removed'
+        USING ERRCODE = 'check_violation';
+END
+$$;
+CREATE TRIGGER binary_build_upload_append_only BEFORE UPDATE OR DELETE ON skald.binary_build_upload
+    FOR EACH ROW EXECUTE FUNCTION skald.binary_build_upload_append_only();
+
+-- An UPLOADED row's digest is one of its intents; on INSERT none can exist yet, so a row is
+-- never born UPLOADED.
+CREATE FUNCTION skald.binary_build_uploaded_was_intended() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.state = 'UPLOADED' AND NOT EXISTS (SELECT 1 FROM skald.binary_build_upload u
+            WHERE u.binary_build_id = NEW.id AND u.binary_sha256 = NEW.binary_sha256) THEN
+        RAISE EXCEPTION 'binary_build_uploaded_was_intended: an UPLOADED digest is one of the row''s upload intents'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END
+$$;
+CREATE TRIGGER binary_build_uploaded_was_intended BEFORE INSERT OR UPDATE ON skald.binary_build
+    FOR EACH ROW EXECUTE FUNCTION skald.binary_build_uploaded_was_intended();
 
 -- "binary_build needs dependency": read from the verified tarball's DESCRIPTION (Depends,
 -- Imports, LinkingTo; base packages excluded) on the trusted side. Same platform key, held

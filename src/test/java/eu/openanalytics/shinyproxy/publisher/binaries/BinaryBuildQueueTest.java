@@ -96,8 +96,8 @@ public class BinaryBuildQueueTest {
 
     @BeforeEach
     public void clean() {
-        jdbc.update("DELETE FROM skald.binary_build_dep");
-        jdbc.update("DELETE FROM skald.binary_build");
+        // TRUNCATE: upload intents are append-only to every row-level change, a test's reset included.
+        jdbc.update("TRUNCATE skald.binary_build_upload, skald.binary_build_dep, skald.binary_build");
         jdbc.update("DELETE FROM skald.content");
         jdbc.update("DELETE FROM skald.audit_event");
     }
@@ -162,7 +162,13 @@ public class BinaryBuildQueueTest {
     private static void uploaded(BinaryBuildQueue q, UUID id, String digest) {
         BuildClaim c = q.claimBuild("builder").orElseThrow();
         assertEquals(id, c.rowId(), "the claim is the row expected");
-        q.uploaded(c.lease(), digest, PROVENANCE);
+        upload(q, c.lease(), digest);
+    }
+
+    /** What step 2d does around a successful PUT: the intent first, then the row. */
+    private static void upload(BinaryBuildQueue q, BinaryLease lease, String digest) {
+        q.intendUpload(lease, digest, PROVENANCE);
+        q.uploaded(lease, digest);
     }
 
     /** An app build in {@code state} (QUEUED, or RUNNING with a lease). */
@@ -334,7 +340,7 @@ public class BinaryBuildQueueTest {
         assertEquals(SHA, c.sourceSha256());
         assertEquals(MD5, c.sourceMd5());
         assertFalse(q.claimBuild("other").isPresent(), "one compile at a time, and shiny waits");
-        q.uploaded(c.lease(), "2".repeat(64), PROVENANCE);
+        upload(q, c.lease(), "2".repeat(64));
 
         BuildClaim s = q.claimBuild("builder").orElseThrow();
         assertEquals(shiny, s.rowId());
@@ -356,7 +362,8 @@ public class BinaryBuildQueueTest {
         BinaryBuildQueue q = queue();
         UUID shiny = verified(q, "shiny", "httpuv");
         UUID httpuv = verified(q, "httpuv");
-        q.foreign(q.claimBuild("b").orElseThrow().lease(), "9".repeat(64), "409 on upload");
+        assertEquals(BinaryBuildQueue.Present.FOREIGN,
+            q.alreadyPresent(q.claimBuild("b").orElseThrow().lease(), "9".repeat(64), "409 on upload"));
         assertEquals("PRESENT_FOREIGN", state(httpuv));
         assertEquals("9".repeat(64), row(httpuv).get("binary_sha256"));
         assertFalse(q.claimBuild("b").isPresent(), "a foreign binary is never handed in");
@@ -395,7 +402,8 @@ public class BinaryBuildQueueTest {
         UUID top = verified(q, "aaa", "bbb");
         UUID mid = verified(q, "bbb", "ccc");
         verified(q, "ccc");
-        q.foreign(q.claimBuild("b").orElseThrow().lease(), "9".repeat(64), "found");
+        assertEquals(BinaryBuildQueue.Present.FOREIGN,
+            q.alreadyPresent(q.claimBuild("b").orElseThrow().lease(), "9".repeat(64), "found"));
         assertEquals(2, q.refuseBlocked());
         assertEquals("REFUSED", state(mid));
         assertEquals("REFUSED", state(top));
@@ -481,7 +489,8 @@ public class BinaryBuildQueueTest {
         BuildClaim c = q.claimBuild("b").orElseThrow();
         expire(a);
         assertFalse(q.renew(c.lease()));
-        assertThrows(Fenced.class, () -> q.uploaded(c.lease(), SHA, PROVENANCE));
+        assertThrows(Fenced.class, () -> q.intendUpload(c.lease(), SHA, PROVENANCE));
+        assertThrows(Fenced.class, () -> q.uploaded(c.lease(), SHA));
         assertEquals("RUNNING", state(a));
         assertNull(row(a).get("binary_sha256"));
     }
@@ -491,9 +500,10 @@ public class BinaryBuildQueueTest {
         BinaryBuildQueue q = queue();
         UUID a = verified(q, "aaa");
         BuildClaim c = q.claimBuild("b").orElseThrow();
+        q.intendUpload(c.lease(), SHA, PROVENANCE);
         jdbc.update("UPDATE skald.binary_build SET deadline_at = now() - interval '1 second' WHERE id = ?", a);
         assertFalse(q.renew(c.lease()));
-        assertThrows(Fenced.class, () -> q.uploaded(c.lease(), SHA, PROVENANCE));
+        assertThrows(Fenced.class, () -> q.uploaded(c.lease(), SHA));
     }
 
     @Test
@@ -503,11 +513,14 @@ public class BinaryBuildQueueTest {
         BuildClaim c = q.claimBuild("b").orElseThrow();
         BinaryLease old = new BinaryLease(a, c.lease().generation() - 1, "b");
         BinaryLease thief = new BinaryLease(a, c.lease().generation(), "x");
-        assertThrows(Fenced.class, () -> q.uploaded(old, SHA, PROVENANCE));
-        assertThrows(Fenced.class, () -> q.uploaded(thief, SHA, PROVENANCE));
+        q.intendUpload(c.lease(), SHA, PROVENANCE);
+        assertThrows(Fenced.class, () -> q.intendUpload(old, "c".repeat(64), PROVENANCE));
+        assertThrows(Fenced.class, () -> q.uploaded(old, SHA));
+        assertThrows(Fenced.class, () -> q.uploaded(thief, SHA));
         assertThrows(Fenced.class, () -> q.refuse(thief, "X", null));
         assertThrows(Fenced.class, () -> q.fail(thief, "X", null));
-        assertThrows(Fenced.class, () -> q.foreign(thief, SHA, null));
+        assertThrows(Fenced.class, () -> q.alreadyPresent(thief, SHA, null));
+        assertThrows(Fenced.class, () -> q.alreadyPresent(thief, "c".repeat(64), null));
         assertFalse(q.renew(thief));
         assertTrue(q.renew(c.lease()));
         assertEquals("RUNNING", state(a));
@@ -518,7 +531,8 @@ public class BinaryBuildQueueTest {
         BinaryBuildQueue q = queue();
         q.enqueue(KEY, "aaa", "1.0", null);
         SourceClaim c = q.claimSource("v").orElseThrow();
-        assertThrows(Fenced.class, () -> q.uploaded(c.lease(), SHA, PROVENANCE));
+        assertThrows(Fenced.class, () -> q.intendUpload(c.lease(), SHA, PROVENANCE));
+        assertThrows(Fenced.class, () -> q.uploaded(c.lease(), SHA));
         assertEquals("VERIFYING", state(c.rowId()));
     }
 
@@ -532,19 +546,93 @@ public class BinaryBuildQueueTest {
     }
 
     @Test
-    public void anUploadNeedsADigestAndProvenance() {
+    public void anUploadNeedsAHexDigestAProvenanceRecordAndAnIntent() {
         BinaryBuildQueue q = queue();
         verified(q, "aaa");
         BuildClaim c = q.claimBuild("b").orElseThrow();
-        assertThrows(IllegalArgumentException.class, () -> q.uploaded(c.lease(), "sha256:" + SHA, PROVENANCE));
-        assertThrows(IllegalArgumentException.class, () -> q.uploaded(c.lease(), SHA, Map.of("x", 1)));
-        assertThrows(IllegalArgumentException.class, () -> q.foreign(c.lease(), "z".repeat(64), null));
+        assertThrows(IllegalArgumentException.class, () -> q.intendUpload(c.lease(), "sha256:" + SHA, PROVENANCE));
+        assertThrows(IllegalArgumentException.class, () -> q.intendUpload(c.lease(), SHA, Map.of("x", 1)));
+        assertThrows(IllegalArgumentException.class, () -> q.uploaded(c.lease(), "z".repeat(64)));
+        assertThrows(IllegalArgumentException.class, () -> q.alreadyPresent(c.lease(), "z".repeat(64), null));
         assertThrows(IllegalArgumentException.class, () -> q.refuse(c.lease(), " ", null));
-        q.uploaded(c.lease(), SHA, PROVENANCE);
+        assertThrows(IllegalArgumentException.class, () -> q.fail(c.lease(), null, null));
+        assertThrows(IllegalArgumentException.class, () -> q.fail(c.lease(), " ", null));
+        assertThrows(IllegalStateException.class, () -> q.uploaded(c.lease(), SHA), "no intent recorded");
+        assertEquals("RUNNING", state(c.rowId()));
+        q.intendUpload(c.lease(), SHA, Map.of("schema", "p", "attempt", 1));
+        q.intendUpload(c.lease(), SHA, PROVENANCE);
+        q.uploaded(c.lease(), SHA);
         Map<String, Object> r = row(c.rowId());
         assertEquals("UPLOADED", r.get("state"));
+        assertEquals(SHA, r.get("binary_sha256"));
+        assertTrue(String.valueOf(r.get("provenance")).contains("\"schema\": \"p\""),
+            "the row takes the intent's provenance, the first recorded for this digest: " + r.get("provenance"));
         assertNull(r.get("lease_owner"));
         assertNotNull(r.get("finished_at"));
+    }
+
+    @Test
+    public void anAttemptIntendsOneDigest() {
+        BinaryBuildQueue q = queue();
+        verified(q, "aaa");
+        BuildClaim c = q.claimBuild("b").orElseThrow();
+        q.intendUpload(c.lease(), SHA, PROVENANCE);
+        assertThrows(org.springframework.dao.DataIntegrityViolationException.class,
+            () -> q.intendUpload(c.lease(), "c".repeat(64), PROVENANCE));
+    }
+
+    @Test
+    public void aLostUploadWriteIsRecognisedAsSkaldsOwnOnTheNext409() {
+        // 1fba61d-F1, the review's sequence: the first attempt uploads, then loses its lease
+        // before writing the row; the second attempt's PUT meets a 409 with the first's digest.
+        BinaryBuildQueue q = queue();
+        UUID a = verified(q, "aaa");
+        UUID b = verified(q, "bbb", "aaa");
+        BuildClaim first = q.claimBuild("b").orElseThrow();
+        assertEquals(a, first.rowId());
+        q.intendUpload(first.lease(), "1".repeat(64), Map.of("schema", "test", "attempt", "first"));
+        expire(a);
+        assertThrows(Fenced.class, () -> q.uploaded(first.lease(), "1".repeat(64)));
+        assertEquals(1, q.reap());
+        assertEquals("QUEUED", state(a));
+        BuildClaim second = q.claimBuild("b").orElseThrow();
+        assertEquals(a, second.rowId());
+        q.intendUpload(second.lease(), "2".repeat(64), PROVENANCE);
+        assertEquals(BinaryBuildQueue.Present.OURS, q.alreadyPresent(second.lease(), "1".repeat(64), "409 on upload"));
+        Map<String, Object> r = row(a);
+        assertEquals("UPLOADED", r.get("state"));
+        assertEquals("1".repeat(64), r.get("binary_sha256"));
+        assertTrue(String.valueOf(r.get("provenance")).contains("first"), "the first attempt's provenance");
+        assertEquals(0, q.reap());
+        BuildClaim dependent = q.claimBuild("b").orElseThrow();
+        assertEquals(b, dependent.rowId(), "its dependent is not refused");
+        assertEquals(List.of(new BinaryBuildQueue.BuiltDependency("aaa", "1.0", "1".repeat(64))),
+            dependent.dependencies());
+    }
+
+    @Test
+    public void aDigestNoAttemptIntendedIsForeignEvenAfterIntents() {
+        BinaryBuildQueue q = queue();
+        UUID a = verified(q, "aaa");
+        BuildClaim first = q.claimBuild("b").orElseThrow();
+        q.intendUpload(first.lease(), "1".repeat(64), PROVENANCE);
+        expire(a);
+        q.reap();
+        BuildClaim second = q.claimBuild("b").orElseThrow();
+        assertEquals(BinaryBuildQueue.Present.FOREIGN, q.alreadyPresent(second.lease(), "9".repeat(64), "409"));
+        assertEquals("PRESENT_FOREIGN", state(a));
+        assertEquals("9".repeat(64), row(a).get("binary_sha256"));
+        assertNull(row(a).get("provenance"));
+    }
+
+    @Test
+    public void aBinaryFoundBeforeCompilingIsForeign() {
+        BinaryBuildQueue q = queue();
+        UUID a = q.enqueue(KEY, "aaa", "1.0", null);
+        SourceClaim c = q.claimSource("v").orElseThrow();
+        assertEquals(BinaryBuildQueue.Present.FOREIGN, q.alreadyPresent(c.lease(), "9".repeat(64),
+            "present before compiling"));
+        assertEquals("PRESENT_FOREIGN", state(a));
     }
 
     // ------------------------------------------------------------------ failures and the reaper
@@ -601,7 +689,7 @@ public class BinaryBuildQueueTest {
         assertEquals("QUEUED", r.get("state"));
         assertEquals("LEASE_EXPIRED", r.get("error_code"));
         assertNull(r.get("lease_owner"));
-        assertThrows(Fenced.class, () -> q.uploaded(c.lease(), SHA, PROVENANCE));
+        assertThrows(Fenced.class, () -> q.intendUpload(c.lease(), SHA, PROVENANCE));
     }
 
     @Test
