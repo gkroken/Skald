@@ -151,7 +151,9 @@ public class T7bProbeTest {
                 "skald.builds.binaries.forge-url=" + FORGE,
                 "skald.builds.binaries.forge-token=" + System.getenv("SKALD_T7B_FORGE_TOKEN"),
                 "skald.builds.binaries.forge-registration-ttl-seconds=5",
-                "skald.builds.binaries.source-repository=" + FORGE + "repository/cran-proxy/",
+                // The source mutant (dev/t7b-probe.py --mutant source) names the group instead.
+                "skald.builds.binaries.source-repository=" + FORGE + "repository/"
+                        + System.getProperty("skald.t7b.source-repo", "cran-proxy") + "/",
                 "skald.builds.binaries.source-archived=true",
                 "skald.builds.binaries.max-running=3"));
         return new ApplicationContextRunner()
@@ -335,7 +337,11 @@ public class T7bProbeTest {
     public void sharedBinariesEndToEnd() throws Exception {
         application().run(ctx -> {
             try {
-                rowsInOrder(ctx);
+                if ("mutant".equals(System.getProperty("skald.t7b.mode"))) {
+                    mutantRows(ctx);
+                } else {
+                    rowsInOrder(ctx);
+                }
             } catch (Exception e) {
                 throw new IllegalStateException(e);
             }
@@ -416,6 +422,25 @@ public class T7bProbeTest {
         RESULTS.put("remote_rows", jdbc.queryForObject("SELECT count(*) FROM skald.binary_build WHERE package"
                 + " = 'skald.remote'", Integer.class));
 
+        RESULTS.set("rows_final", table(jdbc));
+    }
+
+    /**
+     * The short run the probe's mutants use: the two packages the isolation, source and token
+     * rows read (skald.netprobe, skald.shadowed) queued as an R build's success queues them
+     * (BinaryEnqueuer.built: the lock recorded, each version enqueued), built, and the rows
+     * recorded. No app build: an R lock must carry shiny and its closure, forty compiles per
+     * mutant, and how app builds feed the queue is the full run's row, not the mutants'.
+     */
+    private static void mutantRows(ApplicationContext ctx) throws Exception {
+        BinaryBuildQueue queue = ctx.getBean(BinaryBuildQueue.class);
+        UUID requestedBy = UUID.randomUUID();
+        Map<String, String> lock = Map.of("skald.netprobe", "1.0", "skald.shadowed", "1.0");
+        queue.recordLock(requestedBy, lock);
+        lock.forEach((pkg, version) -> queue.enqueue(KEY, pkg, version, requestedBy));
+        JdbcTemplate jdbc = ctx.getBean(JdbcTemplate.class);
+        drain(jdbc, Duration.ofMinutes(30));
+        RESULTS.set("rows_after_drain", table(jdbc));
         RESULTS.set("rows_final", table(jdbc));
     }
 

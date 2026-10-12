@@ -2530,6 +2530,17 @@ below are marked passed by this planning document.
       deferrals over the run, never a binary); version conflicts in the probe's locks 0.
       Forge issues found and fixed on the way: 005's addendum (a member `sourceRepo` was
       never served), 008 (index and pinned tarball disagreed); open: 009 (HEAD 404, cosmetic).
+      **The rows under their mutants (5b80946 N1-N3):** `dev/t7b-probe.py --mutants all`
+      (short mode: skald.netprobe and skald.shadowed queued as an R build's success queues
+      them, a fresh forge per run). Control: every row green. Each mutant red on exactly its
+      row: the install RUN with the worker's network (interfaces `lo eth0`, a refused connect
+      to the on-link bridge counts as reached -- N1: the old name-based check could not
+      fail); the forge token as an ENV, as a context file, and only on a tmpfs mount written
+      from base64 (N2: the search no longer stops at the root filesystem); a docker config's
+      `auths` in the context (N3); sources read from cran-hosted (caught first by CranIndex:
+      forge's hosted index has no MD5sum, so the row defers) and, with that layer and the
+      MD5 check removed too, the row records the HOSTED digest -- and forge's own upload
+      check against cran-proxy refuses the binary (FORGE_REJECTED, DESCRIPTION Packaged).
       **The fixed cost (moved here from T10, user 2026-10-10):** ~45-60 s before any
       recipe step (six launch containers in sequence, and every attempt pulling and
       extracting its base into an empty workspace). Pre-extract each published base into

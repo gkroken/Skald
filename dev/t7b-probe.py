@@ -41,7 +41,16 @@ The probe's containers, network and volumes are named skald-t7b-* and removed at
 Tokens and the registry password are passed by environment, never on a command line, and
 never printed.
 
-Usage: python3 dev/t7b-probe.py [--keep]
+  mutants         with --mutants: the isolation, source and token rows under the defects they
+                  exist to catch. Each mutant edits the source (an anchor that must match exactly
+                  once), runs the short mode (T7bProbeTest with skald.t7b.mode=mutant:
+                  skald.netprobe and skald.shadowed queued as an R build's success queues
+                  them, and built) against a fresh
+                  forge, restores the file (sha256 checked) and clears target/classes; it is
+                  killed when every row it targets is red. "control" is the unmutated short run:
+                  every row green.
+
+Usage: python3 dev/t7b-probe.py [--keep] [--mutants all|NAME,...]
 """
 
 import importlib.util
@@ -273,7 +282,7 @@ def upload_hosted(admin, hosted):
 
 # ---------------------------------------------------------------- the Java half
 
-def maven(password, published, token, admin):
+def maven(password, published, token, admin, extra_props=None):
     gid = str(os.stat("/var/run/docker.sock").st_gid)
     home = pathlib.Path.home()
     m2, m2home = home / ".cache/skald/m2", home / ".cache/skald/m2home"
@@ -287,6 +296,7 @@ def maven(password, published, token, admin):
         "skald.t7b.out": "/ws/" + str(OUT.relative_to(REPO)),
         "skald.t7b.data": "/ws/" + str(DATA.relative_to(REPO)),
     }
+    props.update(extra_props or {})
     secret_env = {"SKALD_T7B_PASSWORD": password, "SKALD_T7B_FORGE_TOKEN": token, "SKALD_T7B_FORGE_ADMIN": admin}
     cmd = ["docker", "run", "--rm", "--name", MAVEN_NAME, "--network", "host", "--group-add", gid]
     for name in secret_env:
@@ -320,6 +330,41 @@ def binary(admin, package, version):
     return body if status == 200 else None
 
 
+def sandbox_rows(admin):
+    """skald.netprobe's install, read back from its binary in forge (its configure)."""
+    body = binary(admin, "skald.netprobe", "1.0")
+    probe = {}
+    if body:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as t:
+            member = t.extractfile("skald.netprobe/probe.txt")
+            for line in member.read().decode().splitlines():
+                k, _, v = line.partition("=")
+                probe[k] = v.strip()
+    seen = ", ".join("%s=%s" % kv for kv in probe.items()) or "no probe.txt in the binary"
+    record("sandbox: network", probe.get("interfaces") == "lo" and probe.get("net") == "unreachable",
+           "interfaces=%s, net=%s" % (probe.get("interfaces"), probe.get("net")))
+    record("sandbox: forge token", probe.get("token_env") == "0" and probe.get("token_files") == "0",
+           "token_env=%s, token_files=%s" % (probe.get("token_env"), probe.get("token_files")))
+    record("sandbox: registry credential", probe.get("registry_auth_files") == "0",
+           "registry_auth_files=%s" % probe.get("registry_auth_files"))
+    record("sandbox: user", probe.get("uid") not in ("", "0", None), seen if not probe else "uid=%s" % probe.get("uid"))
+
+
+def shadowed_row(drained):
+    shadowed = drained.get("skald.shadowed", {})
+    public = sha256(DATA / "contrib/skald.shadowed_1.0.tar.gz")
+    hosted = sha256(OUT / "built/hosted-skald.shadowed-1.0/skald.shadowed_1.0.tar.gz")
+    recorded = shadowed.get("source_sha256") or ""
+    record("shadowed: public source", shadowed.get("state") == "UPLOADED" and recorded == public,
+           "%s, recorded %s, public %s%s" % (shadowed.get("state"), recorded[:12], public[:12],
+                                             " -- the HOSTED tarball's" if recorded == hosted else ""))
+
+
+def judge_mutant(r, admin):
+    shadowed_row({x["package"]: x for x in r.get("rows_after_drain", [])})
+    sandbox_rows(admin)
+
+
 def judge(r, admin):
     builds = r.get("builds", {})
     for name in ("A", "B", "C"):
@@ -345,10 +390,7 @@ def judge(r, admin):
     record("archived version", old.get("state") == "UPLOADED" and old.get("source_kind") == "archive"
            and old.get("version") == "1.0", "skald.old %s %s from %s" % (old.get("version"), old.get("state"),
                                                                          old.get("source_kind")))
-    shadowed = drained.get("skald.shadowed", {})
-    public = sha256(DATA / "contrib/skald.shadowed_1.0.tar.gz")
-    record("shadowed: public source", shadowed.get("state") == "UPLOADED" and shadowed.get("source_sha256") == public,
-           "recorded %s, public %s" % ((shadowed.get("source_sha256") or "")[:12], public[:12]))
+    shadowed_row(drained)
     private = drained.get("skald.private", {})
     record("hosted-only package", private.get("state") in ("PENDING_SOURCE", "REFUSED")
            and private.get("binary_sha256") in (None, "None") and binary(admin, "skald.private", "1.0") is None,
@@ -418,23 +460,120 @@ def judge(r, admin):
     record("served as binaries", not as_source and shadowed_as == "source",
            "every uploaded row a binary to %s, the shadowed one source (%s)%s" % (
                ua, shadowed_as, "" if not as_source else "; not binary: " + ", ".join(as_source)))
-    body = binary(admin, "skald.netprobe", "1.0")
-    probe = {}
-    if body:
-        with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as t:
-            member = t.extractfile("skald.netprobe/probe.txt")
-            for line in member.read().decode().splitlines():
-                k, _, v = line.partition("=")
-                probe[k] = v.strip()
-    record("sandbox: install code", probe.get("interfaces") == "lo" and probe.get("net") == "unreachable"
-           and probe.get("token_env") == "0" and probe.get("token_files") == "0" and probe.get("uid") not in ("", "0", None),
-           ", ".join("%s=%s" % kv for kv in probe.items()) or "no probe.txt in the binary")
+    sandbox_rows(admin)
     versions = {}
     for x in rows.values():
         versions.setdefault(x["package"], set()).add(x["version"])
     print("  measured: %d rows; packages with more than one version: %d; hosted-only rows: %s" % (
         len(rows), sum(1 for v in versions.values() if len(v) > 1),
         [p for p, x in rows.items() if p in HOSTED_ONLY]))
+
+
+RECIPE = REPO / "src/main/java/eu/openanalytics/shinyproxy/publisher/binaries/PackageRecipe.java"
+CRANINDEX = RECIPE.parent / "CranIndex.java"
+VERIFIER = RECIPE.parent / "SourceVerifier.java"
+LEAK = 'System.getenv("SKALD_T7B_FORGE_TOKEN")'
+SANDBOX_ROWS = {"sandbox: network", "sandbox: forge token", "sandbox: registry credential", "sandbox: user"}
+# name -> (source edits, extra properties, rows that must go red[, rows it cannot judge])
+MUTANTS = {
+    "control": ([], {}, set()),
+    # The install RUN with the worker's network (89a33dc N2's --network=none dropped).
+    "network": ([(RECIPE, '"RUN --network=none [', '"RUN [')], {}, {"sandbox: network"}),
+    # The forge token in the sandbox: as an environment variable, as a context file, and on a
+    # separate mount only (a tmpfs written from a base64 form the search pattern does not
+    # match), which a search confined to the root filesystem (-xdev) would miss (5b80946 N2).
+    "token-env": ([(RECIPE, '+ "USER " + user + "\\n"\n',
+                    '+ "USER " + user + "\\n" + "ENV SKALD_LEAK=" + ' + LEAK + ' + "\\n"\n')],
+                  {}, {"sandbox: forge token"}),
+    "token-file": ([(RECIPE, '        files.put("skald/build.sh",',
+                     '        files.put("skald/leak", ' + LEAK + '.getBytes(StandardCharsets.US_ASCII));\n'
+                     '        files.put("skald/build.sh",')], {}, {"sandbox: forge token"}),
+    "token-mount": ([(RECIPE, '"RUN --network=none [', '"RUN --network=none --mount=type=tmpfs,target=/mnt/leak ['),
+                     (RECIPE, '        return "w=" + WORK + "\\n"',
+                      '        return "echo " + java.util.Base64.getEncoder().encodeToString(' + LEAK
+                      + '.getBytes()) + " | base64 -d > /mnt/leak/t\\n" + "w=" + WORK + "\\n"')],
+                    {}, {"sandbox: forge token"}),
+    # A registry credential (a docker config) in the sandbox (5b80946 N3).
+    "registry-auth": ([(RECIPE, '        files.put("skald/build.sh",',
+                        '        files.put("skald/config.json", "{\\"auths\\": {\\"r\\": {\\"auth\\": \\"eA==\\"}}}"'
+                        '.getBytes(StandardCharsets.US_ASCII));\n        files.put("skald/build.sh",')],
+                      {}, {"sandbox: registry credential"}),
+    # Sources read from the operator's hosted repository as if it were the public one: its
+    # skald.shadowed must never be recorded as the public source. skald.netprobe is not hosted,
+    # so the sandbox rows have nothing to read in these runs. forge's hosted index carries no
+    # MD5sum and CranIndex trusts no record without one, so "source-hosted" is caught there
+    # (the row defers); "source-unchecked" also removes that layer and the tarball's MD5 check,
+    # so only the row itself is left to see the hosted bytes recorded.
+    "source-hosted": ([], {"skald.t7b.source-repo": "cran-hosted"}, {"shadowed: public source"}, SANDBOX_ROWS),
+    "source-unchecked": ([(CRANINDEX, 'String md5 = r.get("MD5sum");',
+                           'String md5 = r.getOrDefault("MD5sum", "0".repeat(32));'),
+                          (VERIFIER, 'if (entry != null && !read.md5().equals(entry.md5())) {',
+                           'if (false && entry != null && !read.md5().equals(entry.md5())) {')],
+                         {"skald.t7b.source-repo": "cran-hosted"}, {"shadowed: public source"}, SANDBOX_ROWS),
+}
+
+
+def mutate(edits):
+    """Applies edits; returns the originals to restore. Each anchor must match exactly once."""
+    originals = {}
+    for path, anchor, replacement in edits:
+        text = path.read_text()
+        originals.setdefault(path, text)
+        if text.count(anchor) != 1:
+            restore(originals)
+            raise SystemExit("mutant anchor matches %d times in %s: %r" % (text.count(anchor), path.name, anchor))
+        path.write_text(text.replace(anchor, replacement))
+    return originals
+
+
+def restore(originals):
+    import hashlib
+    for path, text in originals.items():
+        path.write_text(text)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != hashlib.sha256(text.encode()).hexdigest():
+            raise SystemExit("could not restore " + str(path))
+    for d in ("target/classes", "target/test-classes"):
+        t7p.remove_tree(REPO / d)
+
+
+def run_mutants(names, password, published, env, tmp, hosted):
+    verdicts = []
+    for name in names:
+        edits, props, targets = MUTANTS[name][:3]
+        unjudged = MUTANTS[name][3] if len(MUTANTS[name]) > 3 else set()
+        print("== mutant %s ==" % name, flush=True)
+        docker(["rm", "-f", "-v", FORGE])
+        admin = start_forge(tmp)
+        register_platform(admin, published, env)
+        token = mint_token(admin)
+        upload_hosted(admin, hosted)
+        (OUT / "results.json").unlink(missing_ok=True)
+        originals = mutate(edits)
+        try:
+            code, summary = maven(password, published, token, admin,
+                                  dict(props, **{"skald.t7b.mode": "mutant"}))
+        finally:
+            restore(originals)
+        before = len(results)
+        record("java", code == 0, summary)
+        report = OUT / "results.json"
+        if report.exists():
+            try:
+                judge_mutant(json.loads(report.read_text()), admin)
+            except Exception as e:
+                record("judge", False, "%s: %s" % (type(e).__name__, e))
+        rows = results[before:]
+        red = {n for n, ok, _ in rows if not ok} - unjudged
+        del results[before:]
+        if name == "control":
+            ok = not red
+            detail = "every row green" if ok else "red: " + ", ".join(sorted(red))
+        else:
+            ok = targets <= red and not (red - targets - {"java"})
+            detail = "red: %s (targets %s)" % (", ".join(sorted(red)) or "none", ", ".join(sorted(targets)))
+        verdicts.append(("mutant " + name, ok, detail))
+        record("mutant " + name, ok, detail)
+    return verdicts
 
 
 def main(argv):
@@ -468,6 +607,16 @@ def main(argv):
         if pub.returncode != 0:
             print(pub.stdout[-3000:], pub.stderr[-1000:])
             return 1
+        if "--mutants" in argv:
+            wanted = argv[argv.index("--mutants") + 1]
+            names = list(MUTANTS) if wanted == "all" else wanted.split(",")
+            unknown = [n for n in names if n not in MUTANTS]
+            if unknown:
+                raise SystemExit("unknown mutants: %s" % unknown)
+            run_mutants(names, password, published, env, tmp, hosted)
+            t7p.host_clean()
+            results.extend(t7p.results)
+            return 1 if [x for x in results if not x[1]] else 0
         register_platform(admin, published, env)
         token = mint_token(admin)
         upload_hosted(admin, hosted)
