@@ -199,7 +199,7 @@ public class T7PassProbeTest {
     static final App PY = new App("python-shiny", "python", "3.13.16", "app.py", "pip-hashed", "requirements.lock",
             "app.py", "\"pip\",\"install\"");
 
-    private static String sha256(byte[] b) throws Exception {
+    static String sha256(byte[] b) throws Exception {
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(b));
     }
 
@@ -213,7 +213,7 @@ public class T7PassProbeTest {
         return files;
     }
 
-    private static byte[] manifest(App app, Map<String, byte[]> payload) throws Exception {
+    static byte[] manifest(App app, Map<String, byte[]> payload) throws Exception {
         ObjectNode doc = JSON.createObjectNode();
         doc.put("schema_version", 1).put("type", "shiny");
         doc.putObject("runtime").put("language", app.language()).put("version", app.version());
@@ -226,7 +226,7 @@ public class T7PassProbeTest {
         return JSON.writeValueAsBytes(doc);
     }
 
-    private static byte[] archive(byte[] manifest, Map<String, byte[]> payload) throws Exception {
+    static byte[] archive(byte[] manifest, Map<String, byte[]> payload) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         try (GZIPOutputStream gz = new GZIPOutputStream(out); TarArchiveOutputStream tar = new TarArchiveOutputStream(gz)) {
             Map<String, byte[]> all = new LinkedHashMap<>();
@@ -245,15 +245,25 @@ public class T7PassProbeTest {
     }
 
     /** A content item and a VALIDATED bundle of {@code payload}, stored as T8's upload will store it. */
-    private static UUID[] store(ApplicationContext ctx, App app, Map<String, byte[]> payload) throws Exception {
+    static UUID[] store(ApplicationContext ctx, App app, Map<String, byte[]> payload) throws Exception {
+        return store(ctx, app, payload, workspace);
+    }
+
+    /** As above, extracting under {@code ws} (the T7b probe's own workspace). */
+    static UUID[] store(ApplicationContext ctx, App app, Map<String, byte[]> payload, Path ws) throws Exception {
         UUID content = UUID.randomUUID();
         ctx.getBean(JdbcTemplate.class).update("INSERT INTO skald.content (id, title, owner, type)"
                 + " VALUES (?, ?, 'probe', 'shiny')", content, "t7 probe " + app.fixture());
-        return new UUID[] {content, storeBundle(ctx, app, content, payload)};
+        return new UUID[] {content, storeBundle(ctx, app, content, payload, ws)};
     }
 
     /** A further VALIDATED bundle of {@code payload} for an existing content item. */
-    private static UUID storeBundle(ApplicationContext ctx, App app, UUID content, Map<String, byte[]> payload)
+    static UUID storeBundle(ApplicationContext ctx, App app, UUID content, Map<String, byte[]> payload)
+            throws Exception {
+        return storeBundle(ctx, app, content, payload, workspace);
+    }
+
+    static UUID storeBundle(ApplicationContext ctx, App app, UUID content, Map<String, byte[]> payload, Path ws)
             throws Exception {
         JdbcTemplate jdbc = ctx.getBean(JdbcTemplate.class);
         ObjectStore store = ctx.getBean(ObjectStore.class);
@@ -263,7 +273,7 @@ public class T7PassProbeTest {
         byte[] archive = archive(manifest, payload);
         // Validated first, under the same limits the worker uses: nothing is stored on trust.
         var extracted = BundleExtractor.extract(new ByteArrayInputStream(archive), archive.length,
-                Files.createDirectories(workspace.resolve("upload")), ExtractionLimits.defaults());
+                Files.createDirectories(ws.resolve("upload")), ExtractionLimits.defaults());
         try {
             ObjectNode inventory = JSON.createObjectNode();
             ArrayNode files = inventory.putArray("files");
@@ -306,7 +316,7 @@ public class T7PassProbeTest {
         return row;
     }
 
-    private static boolean settled(Map<String, Object> row) {
+    static boolean settled(Map<String, Object> row) {
         String state = (String) row.get("state");
         return List.of("FAILED", "CANCELLED", "TIMED_OUT", "INTERRUPTED", "SUCCEEDED").contains(state)
                 || ("PUBLISHING".equals(state) && Boolean.TRUE.equals(row.get("log_complete")));

@@ -1,0 +1,10 @@
+Package: skald.old
+Type: Package
+Title: Skald T7b Probe Package
+Version: 1.0
+Description: A package the T7b probe publishes as public.
+License: MIT + file LICENSE
+Author: Skald
+Maintainer: Skald <skald@example.org>
+Encoding: UTF-8
+NeedsCompilation: no

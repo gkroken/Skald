@@ -1,0 +1,2 @@
+importFrom(skald.chainb, b_value)
+export(a_value)

@@ -2415,7 +2415,8 @@ below are marked passed by this planning document.
       chain, no network from inside the install, no sandbox touching another's output).
       **Step 2d, part 1, done (this commit's part): forge's registration and the gate.**
       forge is pinned to 8545709 (CI's image, sha256:55579712...; forge-issues/004 fixed:
-      a registration is readable with any valid token). `skald.builds.binaries.forge-*`:
+      a registration is readable with any valid token; since 2e-3, aade5e3, sha256:170575bc...,
+      which also fixes 005-008). `skald.builds.binaries.forge-*`:
       forge's URL, the binary repository (cran-linux), the write token -- a secret given by
       the deployment's configuration like the registry password: never in the database,
       never logged (toString masks it), only ever sent by the trusted side's HTTP client --
@@ -2503,6 +2504,32 @@ below are marked passed by this planning document.
       (binaries absent), the per-package compiles, then a second app's R build (binaries
       present), with a probe row proving a package's sandbox cannot write another
       package's binary and that no sandbox sees the token.
+      **Step 2e, part 3, done (this commit's part): the probe, end to end.**
+      `python3 dev/t7b-probe.py` (Java half `T7bProbeTest`, enabled only by
+      `-Dskald.t7b.forge-port`): forge aade5e3 with `-auth` and a config file, its CRAN proxy
+      fronting the probe's own CRAN-like upstream (`dev/t7b-upstream.py`: CRAN's index with the
+      probe's packages from `dev/fixtures/t7b/packages/` merged in), `cran-linux` with
+      `sourceRepo: cran-proxy`, the platform registered by forge's own manifest script (its
+      builder digest equal to the published base's image ID), a token scoped to
+      `bin/linux/<key>/contrib/4.6/**`; the application's own configuration with the worker and
+      binaries on. Rows (run of 2026-10-12): A, the fixture lock plus nine probe packages, cold:
+      restore 154 s from source; B admitted at once (the compiles yield); 40 rows
+      uploaded in 3792 s at max-running 3, each served by forge with its recorded digest
+      and, to an R client of the platform, as a binary through the group's `__linux__` URL;
+      the three-level chain in order; skald.old 1.0 from the Archive; skald.shadowed built from
+      the PUBLIC tarball (its recorded digest), and served to clients as the hosted source
+      that shadows it; skald.private (hosted only) deferred, never uploaded; skald.changes
+      republished upstream once verified: forge pins the bytes it cached first, and the
+      binary is of those (forge-issues/008: HANDIN_DIGEST and SOURCE_CHANGED stay unit-tested
+      only, since forge never serves changed bytes); C, the same packages with the binaries:
+      restore 19 s (8.0x); D, the registration re-pointed at another image: back to
+      source, with the reason in provenance, no rows added; E, a remote package: refused,
+      no row. skald.netprobe's install, read back from its binary in forge: interfaces `lo`
+      only, forge unreachable, no token in any process environment or file, uid 10001.
+      Measured: hosted-only packages become a deferred row each (a16cf2a N1: one here, 4
+      deferrals over the run, never a binary); version conflicts in the probe's locks 0.
+      Forge issues found and fixed on the way: 005's addendum (a member `sourceRepo` was
+      never served), 008 (index and pinned tarball disagreed); open: 009 (HEAD 404, cosmetic).
       **The fixed cost (moved here from T10, user 2026-10-10):** ~45-60 s before any
       recipe step (six launch containers in sequence, and every attempt pulling and
       extracting its base into an empty workspace). Pre-extract each published base into

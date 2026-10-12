@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs inside the package's sandbox, at install (T7b probe): what it can reach and see goes
+# into the binary, where the probe reads it. A shared binary's install code must reach no
+# network and find no forge token (WORKPLAN-BUNDLES T7b step 2, point 6).
+mkdir -p inst
+{
+  echo "interfaces=$(awk 'NR > 2 { sub(":", "", $1); printf "%s ", $1 }' /proc/net/dev)"
+  reached=$(Rscript -e 'con <- tryCatch(socketConnection("forge", 80, timeout = 5), error = function(e) NULL); cat(if (is.null(con)) "unreachable" else "reached")' 2>/dev/null)
+  echo "net=${reached:-unreachable}"
+  echo "token_env=$( (cat /proc/[0-9]*/environ 2>/dev/null | tr '\0' '\n'; env) | grep -c 'forge_[0-9a-f]\{64\}')"
+  echo "token_files=$(find / -xdev -type f -size -2M 2>/dev/null | xargs grep -lsE 'forge_[0-9a-f]{64}' 2>/dev/null | grep -v '/probe.txt$' | wc -l)"
+  echo "uid=$(id -u)"
+} > inst/probe.txt
