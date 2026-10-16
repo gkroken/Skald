@@ -246,6 +246,13 @@ public class PackageBuildDriverTest {
             PackageBuildDriver.Built built = assertInstanceOf(PackageBuildDriver.Built.class, r, r.toString());
             assertArrayEquals(prebuilt, built.binary());
             assertEquals(List.of(), pool.ready().get(base), "the entry was taken");
+            // bc66e6f-F1: checked the moment run() returns, with no wait: the loop settles the
+            // row then, and from then on the package sweep (no grace) disposes of any attempt no
+            // RUNNING row owns, so a disposal still pending at that point would race the sweep's.
+            assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(PackageBuildDriver.attemptId(c))),
+                "nothing of the attempt is left when run() returns");
+            assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(entry)),
+                "nothing of its entry is left when run() returns");
         } finally {
             pool.stop();
         }

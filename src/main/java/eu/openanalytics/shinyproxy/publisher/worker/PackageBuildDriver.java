@@ -121,14 +121,10 @@ public final class PackageBuildDriver {
     /** Ready sandboxes warmed with {@link #base}, or null: every attempt launches its own. */
     private final WorkerPool pool;
     private final String base;
-    /** Disposes of a finished attempt after run() returns, or null: run() disposes itself. */
-    private final Disposer disposer;
-    /** The last attempt's disposal on the disposer, so a test can wait for it. */
-    volatile java.util.concurrent.Future<?> lastDisposal;
 
     public PackageBuildDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
                               PackageHandIn handIn, Renderer renderer, Config config) {
-        this(docker, launcher, client, handIn, renderer, config, null, null, null);
+        this(docker, launcher, client, handIn, renderer, config, null, null);
     }
 
     /**
@@ -138,14 +134,6 @@ public final class PackageBuildDriver {
      */
     public PackageBuildDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
                               PackageHandIn handIn, Renderer renderer, Config config, WorkerPool pool, String base) {
-        this(docker, launcher, client, handIn, renderer, config, pool, base, null);
-    }
-
-    /** As above; with a {@code disposer}, a finished attempt is disposed of there (never a stopped one). */
-    public PackageBuildDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
-                              PackageHandIn handIn, Renderer renderer, Config config, WorkerPool pool, String base,
-                              Disposer disposer) {
-        this.disposer = disposer;
         if ((pool == null) != (base == null)) {
             throw new IllegalArgumentException("a pool needs the base it is warmed with");
         }
@@ -212,16 +200,15 @@ public final class PackageBuildDriver {
             throw e;
         }
         clock.lap("finish");
-        if (disposer == null) {
-            List<String> left = launcher.dispose(h, clock);
-            if (!left.isEmpty()) {
-                log.warn("package attempt {}: disposal left {}", h.attemptId(), left);
-            }
-            clock.lap("dispose");
-        } else {
-            // As in BuildKitDriver: the work thread has ended, nothing of the attempt is in flight.
-            lastDisposal = disposer.submit("package attempt " + h.attemptId(), () -> launcher.dispose(h));
+        // Disposed of HERE, before run() returns, never on the Disposer (bc66e6f-F1): the loop
+        // settles the row once run() returns, and the package sweep (no grace) disposes of any
+        // attempt no RUNNING row owns, so a disposal still running then would race the sweep's,
+        // on any instance. Nobody waits on a package outcome; the row stays RUNNING across it.
+        List<String> left = launcher.dispose(h, clock);
+        if (!left.isEmpty()) {
+            log.warn("package attempt {}: disposal left {}", h.attemptId(), left);
         }
+        clock.lap("dispose");
         log.info("package attempt {} ({} {}): {}{}", h.attemptId(), claim.pkg(), claim.version(),
                 BuildKitDriver.PHASES, clock.summary());
         return crashed.get() != null

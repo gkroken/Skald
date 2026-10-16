@@ -92,6 +92,10 @@ public class WorkerConfigTest {
         WorkerConfig shortGrace = valid(dir);
         shortGrace.setSweepGrace(Duration.ofSeconds(30));
         assertTrue(only(shortGrace).contains("sweep-grace PT30S must be longer than settle"), only(shortGrace));
+        // bc66e6f N1: nor one a settled build's disposal (after its outcome) may outlast.
+        WorkerConfig underDisposal = valid(dir);
+        underDisposal.setSweepGrace(Disposer.CLOSE_WAIT);
+        assertTrue(only(underDisposal).contains("sweep-grace PT3M must be longer than PT3M"), only(underDisposal));
         WorkerConfig zeroPeriod = valid(dir);
         zeroPeriod.setSweepPeriod(Duration.ZERO);
         assertTrue(only(zeroPeriod).contains("sweep-period PT0S must be positive"), only(zeroPeriod));

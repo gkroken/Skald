@@ -2621,10 +2621,11 @@ below are marked passed by this planning document.
       the entry ("pool": entry, what warmed it, never_used). The refill counts only takeable
       entries (younger than ttl - 5 min), so an idle base always has one to hand out (4838310
       N1). A taken entry's disposal skips the attempt's own cleanup helper when the attempt
-      made no network of its own. Once the outcome is settled (never after a stop), the
-      disposal runs on a `Disposer` thread: the outcome is reported before the ~8 s disposal,
-      the work thread having ended (no create in flight) and the sweep's 15 min grace covering
-      a crash. Configuration: `skald.builds.worker.pool-size` (0-8, default 1; 0 turns the
+      made no network of its own. For app builds, once the outcome is settled (never after a
+      stop), the disposal runs on a `Disposer` thread: the outcome is reported before the ~8 s
+      disposal, the work thread having ended (no create in flight) and the sweep's grace
+      (15 min; refused at 3 min or less) covering a crash. Package attempts dispose inline: the
+      row settles when the driver returns and the package sweep has no grace (bc66e6f-F1). Configuration: `skald.builds.worker.pool-size` (0-8, default 1; 0 turns the
       pool off) and `pool-ttl` (at least 15 min, default 30 min). Idle cost (4838310 N4): each
       ready entry holds a gateway, a worker, a loop device and its quota image, so pool-size x
       the published bases for the app builds, plus the same per R base for the package

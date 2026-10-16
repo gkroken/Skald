@@ -126,7 +126,9 @@ public class WorkerConfig {
      * its own. Each ready one holds, while idle, a worker, a gateway, a loop device and a
      * workspace image with the base extracted (sparse; about the base's size on disk), so the
      * idle cost is pool-size times the number of published bases (4838310 N4); the binaries'
-     * package sandboxes keep a pool of the same size per R base.
+     * package sandboxes keep a pool of the same size per R base. The bases are those of the
+     * catalog read at startup, as the builds' own (bc66e6f N2): a base published later needs a
+     * restart for builds and pool alike.
      */
     private int poolSize = 1;
     /** How long a ready worker is kept before it is replaced by a fresh one. */
@@ -306,6 +308,9 @@ public class WorkerConfig {
         if (sweepGrace.compareTo(settle) <= 0) {
             problems.add("sweep-grace " + sweepGrace + " must be longer than settle (" + settle
                     + "): a stopped attempt's work thread may still be in a daemon call that long");
+        } else if (sweepGrace.compareTo(Disposer.CLOSE_WAIT) <= 0) {
+            problems.add("sweep-grace " + sweepGrace + " must be longer than " + Disposer.CLOSE_WAIT
+                    + ": a settled build's disposal runs after its outcome and may take that long (bc66e6f N1)");
         }
         if (poll.isNegative() || poll.isZero() || poll.compareTo(settings.renewEvery().dividedBy(2)) > 0) {
             problems.add("poll " + poll + " must be positive and at most renew_every / 2 ("

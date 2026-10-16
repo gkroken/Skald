@@ -160,7 +160,7 @@ public class BinariesConfig {
     public PackageBuildLoop packageBuildLoop(WorkerConfig worker, DockerClient skaldWorkerDocker,
                                              BinaryBuildQueue queue, SourceVerifier verifier, BinaryUploader uploader,
                                              BinaryGate gate, ForgeHandIn handIn, BinaryQueueSettings queueSettings,
-                                             WorkerPool.Group binaryWorkerPools, Disposer skaldDisposer)
+                                             WorkerPool.Group binaryWorkerPools)
             throws Exception {
         Images images = Images.of(worker.workerImage(), worker.gatewayImage());
         DockerWorkerLauncher launcher = new DockerWorkerLauncher(skaldWorkerDocker,
@@ -190,7 +190,7 @@ public class BinariesConfig {
                     new PackageBuildDriver.Config(Settings.defaults(), worker.quotaMegabytes(), egress,
                             worker.credential(), worker.poll(), worker.settle(), e.version(), e.rPlatform(),
                             BinaryArchive.Limits.DEFAULTS),
-                    pool, pool == null ? null : base.reference(), skaldDisposer);
+                    pool, pool == null ? null : base.reference());
             if (pool != null) {
                 binaryWorkerPools.start(pool);
             }

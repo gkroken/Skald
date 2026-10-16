@@ -38,10 +38,13 @@ import java.util.concurrent.atomic.AtomicInteger;
  * cost: with the worker taken from the pool, disposal was the largest fixed cost left, 7-17 s
  * between a pushed image and its PUBLISHING write). The drivers hand it an attempt only after
  * their work thread has ended, so no daemon call of the attempt is in flight (0c71146-F1), and
- * never a stopped attempt, whose disposal stays the stop path's. The reconciliation sweep leaves
- * a settled build's attempt alone for its grace (15 min), and the package sweep only takes
- * attempts no RUNNING row owns, so neither races a disposal here; one that fails or is cut
- * short by a shutdown is what those sweeps find later. {@link #close} waits for pending ones.
+ * never a stopped attempt, whose disposal stays the stop path's. App builds only: the
+ * reconciliation sweep leaves a settled build's attempt alone for its grace (15 min, and never
+ * less than {@link #CLOSE_WAIT}: WorkerConfig refuses a shorter one), so it does not race a
+ * disposal here; one that fails or is cut short by a shutdown is what the sweep finds later.
+ * The package driver disposes inline instead: its sweep has no grace and takes any attempt no
+ * RUNNING row owns, which a settled row's still is not (bc66e6f-F1). {@link #close} waits for
+ * pending ones.
  */
 public final class Disposer implements AutoCloseable {
 
