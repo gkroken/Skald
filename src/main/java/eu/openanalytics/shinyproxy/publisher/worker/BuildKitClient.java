@@ -187,6 +187,114 @@ public final class BuildKitClient {
         return "skald-helper-stage-" + h.attemptId();
     }
 
+    /** The warm-up client of a pooled worker (T7b, the fixed cost). */
+    static String warmClient(Handle h) {
+        return "skald-b-" + h.attemptId() + "-warm";
+    }
+
+    /** A published base by digest: {@code <registry>:5000/<repository>@sha256:<64 hex>}. */
+    private static final Pattern BASE_REFERENCE = Pattern.compile(
+            HOST_LABEL + "(?:\\." + HOST_LABEL + ")*:5000/"
+                    + "[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*"
+                    + "@sha256:[0-9a-f]{64}");
+
+    /**
+     * The warm-up's Dockerfile: the base, and one RUN of the base's own {@code true}, so the
+     * daemon pulls AND extracts every layer (an unused FROM is not even fetched). Nothing of
+     * any bundle is in it; it runs before the worker is anyone's.
+     */
+    static String warmDockerfile(String base) {
+        if (base == null || !BASE_REFERENCE.matcher(base).matches()) {
+            throw new IllegalArgumentException("not a published base by digest: " + base);
+        }
+        return "FROM " + base + "\nRUN [\"true\"]\n";
+    }
+
+    /**
+     * The warm-up client's entrypoint: the credential as for a push, then the Dockerfile on the
+     * client's own tmpfs (no context volume: the attempt that takes the worker stages its own),
+     * then buildctl. Both texts are environment values written with printf %s.
+     */
+    static final List<String> WARM_ENTRYPOINT = List.of("sh", "-c",
+            "umask 077 && mkdir /tmp/cfg /tmp/df && printf %s \"$SKALD_DOCKER_CONFIG\" > /tmp/cfg/config.json"
+                    + " && unset SKALD_DOCKER_CONFIG && printf %s \"$SKALD_DOCKERFILE\" > /tmp/df/Dockerfile"
+                    + " && DOCKER_CONFIG=/tmp/cfg \"$@\"",
+            "sh");
+
+    /** buildctl for the warm-up: no output, so the result is built and kept in the daemon's store only. */
+    static List<String> buildctlWarm() {
+        return List.of("buildctl", "--addr", DockerWorkerLauncher.SOCKET_ADDRESS,
+                "build", "--progress", "plain", "--frontend", "dockerfile.v0",
+                "--local", "context=/tmp/df", "--local", "dockerfile=/tmp/df");
+    }
+
+    /**
+     * Pulls and extracts {@code base} into a freshly launched, never-used worker, so the
+     * attempt that takes it from the pool finds the base in its own store (T7b, the fixed cost:
+     * every attempt pulled and extracted its base again). The client is hardened as a build's
+     * client, holds the registry credential alone, and is removed before this returns. Throws
+     * unless buildctl exits 0 within {@code deadline}.
+     */
+    public void warm(Handle h, String registry, Credential credential, String base, java.time.Duration deadline)
+            throws DockerException, InterruptedException {
+        if (!REGISTRY.matcher(registry).matches() || credential == null) {
+            throw new IllegalArgumentException("a warm-up needs the registry host and its credential");
+        }
+        String dockerfile = warmDockerfile(base);
+        String name = warmClient(h);
+        HostConfig hc = HostConfig.builder()
+                .networkMode("none")
+                .binds(h.socketVolume() + ":" + DockerWorkerLauncher.SOCKET_MOUNT)
+                .readonlyRootfs(true)
+                .tmpfs(Map.of("/tmp", "rw,noexec,nosuid,nodev,size=1m,mode=1777"))
+                .capDrop("ALL")
+                .securityOpt("no-new-privileges")
+                .memory(CLIENT_MEMORY)
+                .memorySwap(CLIENT_MEMORY)
+                .pidsLimit(64)
+                .nanoCpus(1_000_000_000L)
+                .privileged(false)
+                .logConfig(LogConfig.create("json-file", Map.of("max-size", "1m", "max-file", "1")))
+                .build();
+        docker.createContainer(ContainerConfig.builder().image(images.worker())
+                .user(DockerWorkerLauncher.WORKER_UID + ":" + DockerWorkerLauncher.WORKER_UID)
+                .entrypoint(WARM_ENTRYPOINT)
+                .cmd(buildctlWarm())
+                .env("SKALD_DOCKER_CONFIG=" + dockerConfig(registry + ":5000", credential),
+                        "SKALD_DOCKERFILE=" + dockerfile)
+                .labels(Map.of(DockerWorkerLauncher.ATTEMPT_LABEL, h.attemptId())).hostConfig(hc).build(), name);
+        try {
+            docker.startContainer(name);
+            long until = System.nanoTime() + deadline.toNanos();
+            while (true) {
+                ContainerState s = docker.inspectContainer(name).state();
+                if (!s.running()) {
+                    if (s.exitCode() == null || s.exitCode() != 0) {
+                        String log = read(name, LogsParam.stderr()).strip();
+                        throw new IllegalStateException("the warm-up exited " + s.exitCode() + ": "
+                                + BuildKitDriver.detail(log.isEmpty() ? "" : log.substring(log.lastIndexOf('\n') + 1)));
+                    }
+                    return;
+                }
+                if (System.nanoTime() > until) {
+                    throw new IllegalStateException("the warm-up did not finish within " + deadline);
+                }
+                Thread.sleep(500);
+            }
+        } finally {
+            boolean interrupted = Thread.interrupted();
+            try {
+                docker.removeContainer(name, RemoveContainerParam.forceKill());
+            } catch (NotFoundException e) {
+                // gone
+            } finally {
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }
+    }
+
     /**
      * Fills the attempt's context volume. Refuses if the volume already exists: a stale one
      * of the same attempt would carry an earlier context, and a foreign one is not ours.

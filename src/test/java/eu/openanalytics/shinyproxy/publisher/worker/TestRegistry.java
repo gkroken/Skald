@@ -61,6 +61,7 @@ final class TestRegistry implements AutoCloseable {
     final int port;
     final String outer;
     final String name;
+    private final String baseDigest;
 
     TestRegistry(DockerClient docker, String prefix, int port) throws Exception {
         this.docker = docker;
@@ -93,6 +94,32 @@ final class TestRegistry implements AutoCloseable {
             }
         }
         docker.removeImage(base);
+        this.baseDigest = manifestDigest("base/busybox", "1");
+    }
+
+    /** The digest the registry serves for a tag, as a client resolving it by digest gets it. */
+    String manifestDigest(String repository, String tag) throws Exception {
+        String basic = java.util.Base64.getEncoder().encodeToString((CRED.username() + ":" + CRED.password())
+                .getBytes(StandardCharsets.UTF_8));
+        var req = java.net.http.HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/v2/"
+                        + repository + "/manifests/" + tag))
+                .method("HEAD", java.net.http.HttpRequest.BodyPublishers.noBody())
+                .header("Authorization", "Basic " + basic)
+                .header("Accept", "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json,"
+                        + " application/vnd.docker.distribution.manifest.list.v2+json,"
+                        + " application/vnd.docker.distribution.manifest.v2+json").build();
+        try (var http = java.net.http.HttpClient.newHttpClient()) {
+            var resp = http.send(req, java.net.http.HttpResponse.BodyHandlers.discarding());
+            if (resp.statusCode() != 200) {
+                throw new IllegalStateException("HEAD " + req.uri() + ": " + resp.statusCode());
+            }
+            return resp.headers().firstValue("Docker-Content-Digest").orElseThrow();
+        }
+    }
+
+    /** The base image by its pushed digest, as the worker names it (a published base's form). */
+    String baseByDigest() {
+        return name + ":5000/base/busybox@" + baseDigest;
     }
 
     RegistryAuth auth() {

@@ -279,6 +279,22 @@ public class AttemptSweeperTest {
     }
 
     @Test
+    public void aDeadBuildsPoolEntryIsSweptWithIt() throws Exception {
+        // T7b, the fixed cost: a build that took a pooled worker runs under the entry's names;
+        // its marker carries the build's id, so the sweep finds the build and its disposal
+        // follows the marker. The entry's own id is no build's, so the sweep never takes it alone.
+        String dead = buildId();
+        String entry = DockerWorkerLauncher.poolEntryId(java.time.Instant.now().getEpochSecond(), new java.util.Random());
+        Handle w = launcher.launch(request(entry));
+        launcher.take(entry, dead);
+        AttemptSweeper sweeper = new AttemptSweeper(launcher, Set::of, List::of, logs, Duration.ofMinutes(10),
+                id -> id.equals(dead) || id.equals(entry));
+        assertEquals(List.of(dead), sweeper.sweep().disposed());
+        assertEquals(List.of(), launcher.leftovers(w), "the entry went with its dead build");
+        assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(dead)));
+    }
+
+    @Test
     public void aVolumeReCreatedForABindIsFoundByNameAfterACrash() throws Exception {
         // The same late bind, but the process died before its work thread could dispose:
         // nothing of the attempt carries a label any more, only the volume's name is left.

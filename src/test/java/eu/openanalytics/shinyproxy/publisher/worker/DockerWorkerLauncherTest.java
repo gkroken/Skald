@@ -505,6 +505,58 @@ public class DockerWorkerLauncherTest {
     }
 
     @Test
+    public void aPoolEntryIsTakenByOneAttemptOnly() throws Exception {
+        // No worker needed: the marker is the whole of a take. A second attempt's take of the
+        // same entry is refused (the marker carries the first one's label), and a pool entry
+        // never takes another.
+        String entry = DockerWorkerLauncher.poolEntryId(java.time.Instant.now().getEpochSecond(),
+                new java.util.Random());
+        String first = attempt();
+        Handle h = launcher.take(entry, first);
+        try {
+            assertEquals(entry, h.attemptId());
+            assertTrue(launcher.taken(entry));
+            IllegalStateException e = assertThrows(IllegalStateException.class, () -> launcher.take(entry, attempt()));
+            assertTrue(e.getMessage().contains("is not the one this launch made"), e.getMessage());
+            assertEquals(List.of(entry), launcher.takenBy(DockerWorkerLauncher.handle(first)), "still the first one's");
+            assertThrows(IllegalArgumentException.class, () -> launcher.take(entry,
+                    DockerWorkerLauncher.poolEntryId(0, new java.util.Random())));
+        } finally {
+            assertEquals(List.of(), launcher.dispose(DockerWorkerLauncher.handle(first)));
+        }
+        assertFalse(launcher.taken(entry), "the marker went with the attempt");
+    }
+
+    @Test
+    public void anAttemptsKillRemovalAndDisposalReachTheEntryItTook() throws Exception {
+        // The drivers stop and dispose of an attempt by ITS handle; a pooled worker runs under
+        // the entry's names. The marker is what joins them.
+        String entry = DockerWorkerLauncher.poolEntryId(java.time.Instant.now().getEpochSecond(),
+                new java.util.Random());
+        Handle w = launcher.launch(request(entry));
+        String a = attempt();
+        Handle h = DockerWorkerLauncher.handle(a);
+        try {
+            launcher.take(entry, a);
+            assertTrue(docker.inspectContainer(w.worker()).state().running());
+            assertEquals(List.of(), launcher.killWorker(h));
+            assertFalse(docker.inspectContainer(w.worker()).state().running(), "the entry's worker was killed");
+            assertEquals(List.of(), launcher.removeContainers(h));
+            assertTrue(docker.listContainers(DockerClient.ListContainersParam.allContainers(),
+                    DockerClient.ListContainersParam.withLabel(DockerWorkerLauncher.ATTEMPT_LABEL, entry)).isEmpty(),
+                    "the entry's containers were removed");
+            List<String> before = launcher.leftovers(h);
+            assertTrue(before.contains("marker " + DockerWorkerLauncher.marker(entry))
+                    && before.stream().anyMatch(l -> l.startsWith("pool entry " + entry + ": ")),
+                    "the attempt's leftovers name the entry's: " + before);
+        } finally {
+            assertEquals(List.of(), launcher.dispose(h));
+        }
+        assertEquals(List.of(), launcher.leftovers(w));
+        assertEquals(List.of(), launcher.leftovers(h));
+    }
+
+    @Test
     public void anOutputVolumeThatIsNotTheLaunchsIsRefused() throws Exception {
         // A local-output client binds the output volume by name; one the launch did not make
         // (another attempt's label, or none) is never exported into.

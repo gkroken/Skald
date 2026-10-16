@@ -208,6 +208,83 @@ public final class DockerWorkerLauncher {
         this.images = images;
     }
 
+    /**
+     * A pooled worker's id (T7b, the fixed cost): "w", its launch time as 8 hex digits of epoch
+     * seconds, and 24 random hex digits. Never an app build's 32 hex nor a package attempt's
+     * "p" id, so neither sweeper takes one for its own; its age is in its name, so any
+     * instance can tell a dead process's entry from a live one without asking the daemon.
+     */
+    static final Pattern POOL_ENTRY = Pattern.compile("w[0-9a-f]{32}");
+    /** On a taken entry's marker: the entry's id (the attempt's is the attempt label). */
+    static final String POOL_LABEL = "eu.skald.pool-entry";
+
+    static String poolEntryId(long epochSeconds, java.util.random.RandomGenerator random) {
+        StringBuilder b = new StringBuilder("w").append(String.format("%08x", epochSeconds & 0xffffffffL));
+        for (int i = 0; i < 24; i++) {
+            b.append(Character.forDigit(random.nextInt(16), 16));
+        }
+        return b.toString();
+    }
+
+    /** A pool entry's launch time, from its id. */
+    static long poolEntryEpochSeconds(String entry) {
+        if (!POOL_ENTRY.matcher(entry).matches()) {
+            throw new IllegalArgumentException("not a pool entry: " + entry);
+        }
+        return Long.parseLong(entry.substring(1, 9), 16);
+    }
+
+    /** The volume that says a pool entry is an attempt's. Outside ATTEMPT_VOLUME's names. */
+    static String marker(String entry) {
+        return "skald-taken-" + entry;
+    }
+
+    /**
+     * Makes the pooled worker {@code entry} the attempt's, before the attempt uses it: a marker
+     * volume labelled with the attempt (so the attempt's sweeper finds it, and every disposal
+     * of the attempt follows it to the entry) and the entry. Returns the entry's handle, by
+     * whose names the attempt then stages and runs its client. Refuses an entry already taken
+     * by another attempt (the marker exists with its label), and a taker that is itself a pool
+     * entry (markers are followed one level only).
+     */
+    public Handle take(String entry, String attemptId) throws DockerException, InterruptedException {
+        if (!POOL_ENTRY.matcher(entry).matches() || !ATTEMPT.matcher(attemptId).matches()
+                || POOL_ENTRY.matcher(attemptId).matches()) {
+            throw new IllegalArgumentException("take " + entry + " for " + attemptId);
+        }
+        createOwnedVolume(marker(entry), Map.of(ATTEMPT_LABEL, attemptId, POOL_LABEL, entry), null);
+        return handle(entry);
+    }
+
+    /** The pool entries the attempt has taken: its markers, by label and name. */
+    List<String> takenBy(Handle h) throws DockerException, InterruptedException {
+        if (POOL_ENTRY.matcher(h.attemptId()).matches()) {
+            return List.of();
+        }
+        List<String> entries = new ArrayList<>();
+        List<Volume> markers = docker.listVolumes(ListVolumesParam.filter("label", ATTEMPT_LABEL + "=" + h.attemptId()),
+                ListVolumesParam.filter("label", POOL_LABEL)).volumes();
+        if (markers != null) {
+            for (Volume v : markers) {
+                String entry = v.labels() == null ? null : v.labels().get(POOL_LABEL);
+                if (entry != null && POOL_ENTRY.matcher(entry).matches() && marker(entry).equals(v.name())) {
+                    entries.add(entry);
+                }
+            }
+        }
+        return entries;
+    }
+
+    /** Whether a pool entry carries a marker, whoever took it. */
+    boolean taken(String entry) throws DockerException, InterruptedException {
+        try {
+            Volume v = docker.inspectVolume(marker(entry));
+            return v.labels() != null && entry.equals(v.labels().get(POOL_LABEL));
+        } catch (NotFoundException | VolumeNotFoundException e) {
+            return false;
+        }
+    }
+
     static Handle handle(String attemptId) {
         String p = "skald-b-" + attemptId;
         return new Handle(attemptId, p + "-net", p + "-gw", p + "-worker", p + "-sock",
@@ -606,6 +683,30 @@ public final class DockerWorkerLauncher {
 
     /** As above, lapping each disposal phase on {@code clock} ("dispose.*"). */
     List<String> dispose(Handle h, PhaseClock clock) throws InterruptedException {
+        // A pool entry the attempt took is disposed of first, with everything the attempt made
+        // under its names; its marker goes only once the entry is gone, so a disposal that
+        // left something is found again by the attempt's sweeper.
+        List<String> pooled = new ArrayList<>();
+        try {
+            for (String entry : takenBy(h)) {
+                List<String> left = dispose(handle(entry), new PhaseClock());
+                if (left.isEmpty()) {
+                    quietly(pooled, () -> retrying(() -> docker.removeVolume(marker(entry))));
+                } else {
+                    pooled.add("pool entry " + entry + ": " + left);
+                }
+            }
+        } catch (DockerException e) {
+            pooled.add("could not list the attempt's pool entries: " + e.getMessage());
+        }
+        clock.lap("dispose.pool");
+        List<String> own = disposeOwn(h, clock);
+        List<String> all = new ArrayList<>(pooled);
+        all.addAll(own);
+        return all;
+    }
+
+    private List<String> disposeOwn(Handle h, PhaseClock clock) throws InterruptedException {
         // Only what carries THIS attempt's label is removed: an object that merely has one
         // of its names (a refused launch over a foreign volume, 9a2658d-F1) is not ours.
         // Also a volume the daemon made under one of the attempt's names for a bind (no labels,
@@ -669,6 +770,13 @@ public final class DockerWorkerLauncher {
      */
     public List<String> removeContainers(Handle h) throws InterruptedException {
         List<String> errors = java.util.Collections.synchronizedList(new ArrayList<>());
+        try {
+            for (String entry : takenBy(h)) {
+                errors.addAll(removeContainers(handle(entry)));
+            }
+        } catch (DockerException e) {
+            errors.add("could not list the attempt's pool entries: " + e.getMessage());
+        }
         // The worker first: it runs the untrusted code. In dispose() volumes go only after
         // every container, so the client holding the socket and context volumes may go after
         // it. Each removal on its own thread (T7b, the fixed cost: one after another they took
@@ -680,7 +788,8 @@ public final class DockerWorkerLauncher {
         List<Thread> removals = new ArrayList<>();
         // Named after the calling thread, so each removal reads as that thread's own call.
         String caller = Thread.currentThread().getName();
-        for (String c : List.of(h.worker(), h.client(), BuildKitClient.stageHelper(h), h.gateway(),
+        for (String c : List.of(h.worker(), h.client(), BuildKitClient.stageHelper(h), BuildKitClient.warmClient(h),
+                h.gateway(),
                 "skald-helper-cleanup-" + h.attemptId(), "skald-helper-check-" + h.attemptId(),
                 "skald-helper-setup-" + h.attemptId(),
                 // the helpers of launches before the setup helper, a dead process's included
@@ -756,6 +865,13 @@ public final class DockerWorkerLauncher {
      */
     public List<String> killWorker(Handle h) throws InterruptedException {
         List<String> errors = new ArrayList<>();
+        try {
+            for (String entry : takenBy(h)) {
+                errors.addAll(killWorker(handle(entry)));
+            }
+        } catch (DockerException e) {
+            errors.add("could not list the attempt's pool entries: " + e.getMessage());
+        }
         quietly(errors, () -> {
             var info = docker.inspectContainer(h.worker());
             if (ours(info.config().labels(), h) && info.state().running()) {
@@ -915,6 +1031,10 @@ public final class DockerWorkerLauncher {
     private List<String> leftovers(Handle h, String quotaState) throws InterruptedException {
         List<String> left = new ArrayList<>();
         try {
+            for (String entry : takenBy(h)) {
+                left.add("marker " + marker(entry));
+                leftovers(handle(entry), null).forEach(l -> left.add("pool entry " + entry + ": " + l));
+            }
             docker.listContainers(ListContainersParam.allContainers(),
                     ListContainersParam.withLabel(ATTEMPT_LABEL, h.attemptId()))
                     .forEach(c -> left.add("container " + c.names()));

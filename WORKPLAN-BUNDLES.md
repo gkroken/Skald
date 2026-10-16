@@ -2546,7 +2546,8 @@ below are marked passed by this planning document.
       extracting its base into an empty workspace). Pre-extract each published base into
       a platform-owned Docker volume the worker mounts read-only and never writes (never
       a host path: builds get no host mounts; no tenant data is shared), and keep a small
-      pool of pre-launched, never-used workers.
+      pool of pre-launched, never-used workers. (Superseded for the base by step c's route below:
+      each pooled worker extracts its base into its own store, no shared volume.)
       **Measured per phase (2026-10-16, before any of it).** Each attempt now writes where its
       time went: an app build's log ends with `[skald] phases: total T s: ...` (the pass
       probe records it per build with buildctl's step times, results.json `phases`/`steps`),
@@ -2583,6 +2584,38 @@ below are marked passed by this planning document.
       first. Measured through LauncherCli, three cycles each: launch 16.7-17.2 s -> 10.3-10.5 s
       (setup 3.9, gateway and worker 4.1-4.3), dispose 11.6-11.9 s -> 7.7-8.5 s (containers 3.8,
       the worker's kill bounding it; cleanup 3.2-3.9).
+      **Steps c and d, part 1, done (this commit's part): the warm pool, not wired yet.**
+      *Route change for step c (ef9afe2 N1), decided for users:* the base is pre-extracted
+      INSIDE each pooled worker, not into a shared read-only volume. BuildKit's OCI worker
+      (v0.33, overlayfs snapshotter) keeps its content store, snapshots and metadata under its
+      own writable --root and has no option to take external read-only layers or a shared
+      content store (that is the containerd worker's); a volume holding an extracted rootfs
+      could only become a build's base by copying it (COPY --from a named context: a full
+      copy, slower than the pull). So each never-used pool entry is launched exactly as an
+      attempt's worker and then warmed by a trusted client (`FROM <base by digest>` and
+      `RUN ["true"]`, no output, the registry credential the client's alone, the Dockerfile on
+      its own tmpfs): the base is pulled and extracted into that worker's own store before any
+      attempt sees it. Same effect on the critical path (WorkerPoolTest: a warmed entry's
+      build neither downloads nor extracts the base; a cold worker's does), and better on
+      isolation: no new mount in the worker and nothing shared between attempts, so T5's
+      isolation probes and the bounds probe's mounts row are unaffected by step c (they are
+      still rerun when T7b closes, since steps b and d changed the launch around the worker).
+      *The pool (`WorkerPool`):* per published base, `size` ready entries (default 1; 0: no
+      pool), each used by one attempt and then disposed of with it. An entry's id is "w", its
+      launch time (8 hex, epoch seconds) and 24 random hex digits: never a build's 32 hex nor
+      a package attempt's "p" id, so neither sweeper takes it, and any instance can tell its
+      age. An attempt takes one by a marker volume (`skald-taken-<entry>`, labelled with the
+      attempt and the entry; a second attempt's take of the same entry is refused); the
+      attempt's kill, container removal, disposal and leftovers follow its markers, so the
+      drivers' stop paths and both sweepers reach a taken entry through the attempt. One pool
+      thread makes every Docker call of the pool: it disposes of its own untaken entries at
+      the ttl (30 min) and replaces them, hands out only entries younger than ttl - 5 min,
+      and every 5 min disposes of any instance's UNTAKEN entry older than ttl + 5 min (a dead
+      process's: no live owner keeps one that long); a taken one is its attempt's. A failed
+      launch or warm-up is disposed of and the base waits a minute.
+      Part 2: the drivers take from the pool (BuildKitDriver by the build's base, the package
+      driver by its R base), configuration, provenance (which entry, warmed with what), and
+      the measurement.
       **Pass:** the targets above met and measured per phase; the binary rows' isolation,
       source and token rows red under their mutants; T5's isolation probes rerun green,
       the bounds probe's mounts row among them, since the read-only base store is a new
