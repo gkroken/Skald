@@ -2152,7 +2152,7 @@ below are marked passed by this planning document.
       T9; signed provenance, the SBOM and the deployment notes to T10; build speed (shared
       Linux R binaries, the fixed launch cost) to T7b.
 
-- [ ] **T7b. Build speed: shared Linux R binaries and a warm path.** Depends T7. Placed
+- [x] **T7b. Build speed: shared Linux R binaries and a warm path.** Depends T7. Placed
       before T8 by the user (2026-10-10): a publish should take about a minute, and an R
       app's cold restore compiles every package from source (330-590 s measured in T7's
       pass probe). Target, measured per phase in the pass probe: a source-only republish
@@ -2638,6 +2638,23 @@ below are marked passed by this planning document.
       source and token rows red under their mutants; T5's isolation probes rerun green,
       the bounds probe's mounts row among them, since steps b and d changed the launch around
       the worker (c18c5ab N2; 4838310 N3).
+      **Done (2026-10-16, HEAD 4160e3a).** Full suite through skald-test.sh: 1537 run, 0
+      failures, 7 skipped. T5's RUN-step probes through the platform's own launcher
+      (SKALD_LAUNCHER=java): attacks 6/6 contained, egress 31/31, bounds 11/11 held (the
+      workspace mount still nosuid,nodev; the loop device released). The T7b probe 25/25:
+      40 binaries in forge, each served with its recorded digest; the sandbox rows (network,
+      forge token, registry credential, user) green; restore 210 s from source -> 22 s with
+      binaries (9.4x); nothing left on the host. Its mutants: the control green, all 7 red
+      on their own rows. Package attempts (40, three in parallel, beside the pool's refills):
+      median 207 s, of which the build is 56 s; the launch's setup helper (median 43 s, 3.9 s
+      on an idle host) and the loop's release (13 s) dominate the rest. That is host
+      contention under the queue's parallelism, and a pool of 1 per R base is mostly empty
+      at that rate; it costs queue throughput only, which no user waits on.
+      **Carried on:** the security review T7b requires before binaries are enabled in any
+      deployment (integrity then rests on forge and the uploader); the HTTP re-open endpoint
+      (waits for the user's sign-off on its API shape); the release notes' note that
+      pool-size defaults to 1 (an idle worker, gateway, loop device and quota image per
+      published base, bc66e6f N3).
 
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus
