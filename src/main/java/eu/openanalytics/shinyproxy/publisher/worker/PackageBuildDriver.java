@@ -151,9 +151,10 @@ public final class PackageBuildDriver {
         AtomicBoolean aborted = new AtomicBoolean();
         AtomicReference<Result> result = new AtomicReference<>();
         AtomicReference<Throwable> crashed = new AtomicReference<>();
+        PhaseClock clock = new PhaseClock();
         Thread work = new Thread(() -> {
             try {
-                result.set(attempt(claim, h, aborted));
+                result.set(attempt(claim, h, aborted, clock));
             } catch (Throwable t) {
                 crashed.set(t);
             } finally {
@@ -180,10 +181,14 @@ public final class PackageBuildDriver {
             stopEverything(h, work);
             throw e;
         }
+        clock.lap("finish");
         List<String> left = launcher.dispose(h);
         if (!left.isEmpty()) {
             log.warn("package attempt {}: disposal left {}", h.attemptId(), left);
         }
+        clock.lap("dispose");
+        log.info("package attempt {} ({} {}): {}{}", h.attemptId(), claim.pkg(), claim.version(),
+                BuildKitDriver.PHASES, clock.summary());
         return crashed.get() != null
                 ? new Failed("DRIVER_ERROR", BuildKitDriver.detail(crashed.get().getClass().getSimpleName()))
                 : result.get();
@@ -211,7 +216,7 @@ public final class PackageBuildDriver {
     }
 
     /** The work thread: the hand-in, then every Docker call. */
-    private Result attempt(BuildClaim claim, Handle h, AtomicBoolean aborted) throws Exception {
+    private Result attempt(BuildClaim claim, Handle h, AtomicBoolean aborted, PhaseClock clock) throws Exception {
         Recipe recipe;
         List<BuiltDependency> closure;
         try {
@@ -233,13 +238,15 @@ public final class PackageBuildDriver {
         } catch (IOException e) {
             return new Failed("HANDIN_FETCH", BuildKitDriver.detail(e.getClass().getSimpleName() + ": " + e.getMessage()));
         }
+        clock.lap("handin");
         if (aborted.get()) {
             return new Stopped();
         }
         Path payload = Files.createTempDirectory("skald-package-");
         try {
             try {
-                launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(), config.egress()));
+                launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(), config.egress()),
+                        clock);
             } catch (IllegalStateException e) {
                 return new Failed("WORKER_LAUNCH", BuildKitDriver.detail(e.getMessage()));
             }
@@ -248,15 +255,20 @@ public final class PackageBuildDriver {
             }
             try {
                 client.stage(h, payload, recipe);
+                clock.lap("stage");
                 if (aborted.get()) {
                     return new Stopped();
                 }
                 client.startLocal(h, config.egress().registry(), config.credential());
+                clock.lap("client.start");
             } catch (IOException | IllegalStateException | org.mandas.docker.client.exceptions.DockerException e) {
                 return new Failed("STAGE", BuildKitDriver.detail(e.getMessage()));
             }
             while (!aborted.get()) {
                 var exit = client.exitCode(h);
+                if (exit.isPresent()) {
+                    clock.lap("build");
+                }
                 if (exit.isPresent() && exit.get() == 0) {
                     byte[] binary;
                     try {

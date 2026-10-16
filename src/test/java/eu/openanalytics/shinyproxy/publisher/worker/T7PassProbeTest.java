@@ -351,8 +351,53 @@ public class T7PassProbeTest {
             Path file = OUT.resolve(name + "-" + app.fixture() + ".log.jsonl");
             Files.write(file, text.toByteArray());
             r.put("log_file", file.getFileName().toString());
+            // Where the time went (T7b, the fixed cost): the driver's phases and buildctl's steps.
+            r.set("phases", phases(file));
+            r.set("steps", steps(file));
         }
         return r;
+    }
+
+    /** The driver's "[skald] phases: total T s: name s, ..." line, as {"total": T, name: s, ...}. */
+    static ObjectNode phases(Path log) throws Exception {
+        ObjectNode out = JSON.createObjectNode();
+        for (String l : Files.readAllLines(log)) {
+            String t = JSON.readTree(l).path("t").asText();
+            var m = java.util.regex.Pattern.compile("^\\[skald\\] phases: total ([0-9.]+) s:(.*)$").matcher(t);
+            if (m.matches()) {
+                out.put("total", Double.parseDouble(m.group(1)));
+                for (String part : m.group(2).split(",")) {
+                    String[] kv = part.strip().split(" ");
+                    if (kv.length == 2) {
+                        out.put(kv[0], Double.parseDouble(kv[1]));
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    /** buildctl's steps with their DONE times: [{"step": "#5 [2/6] RUN ...", "seconds": 12.3}, ...]. */
+    static com.fasterxml.jackson.databind.node.ArrayNode steps(Path log) throws Exception {
+        Map<String, String> names = new LinkedHashMap<>();
+        Map<String, Double> done = new LinkedHashMap<>();
+        var header = java.util.regex.Pattern.compile("^(#\\d+) (\\[.*)$");
+        var finished = java.util.regex.Pattern.compile("^(#\\d+) DONE ([0-9.]+)s$");
+        for (String l : Files.readAllLines(log)) {
+            String t = JSON.readTree(l).path("t").asText();
+            var h = header.matcher(t);
+            if (h.matches()) {
+                names.putIfAbsent(h.group(1), h.group(2).length() > 120 ? h.group(2).substring(0, 120) : h.group(2));
+            }
+            var d = finished.matcher(t);
+            if (d.matches()) {
+                done.put(d.group(1), Double.parseDouble(d.group(2)));
+            }
+        }
+        var out = JSON.createArrayNode();
+        names.forEach((id, name) -> out.addObject().put("step", id + " " + name)
+                .put("seconds", done.getOrDefault(id, -1.0)));
+        return out;
     }
 
     // ------------------------------------------------------------------ the dependency cache, read from a log

@@ -8,6 +8,9 @@
 # live: the sandbox is never told the gateway's address), ports 53, 80, 5000 and 8888 (the
 # gateway's). "Connection refused" counts as reached: it proves a path to a host, whatever
 # listens there (5b80946 N1: a name that only resolves outside the worker proves nothing).
+# Loopback targets are skipped (604d194 N1): a host whose resolv.conf names 127.0.0.53
+# (systemd-resolved) or 127.0.0.11 (Docker's DNS) would otherwise read "refused" on lo
+# inside --network=none, and "reached" -- a false red.
 # token_files and registry_auth_files search every mounted filesystem but /proc, /sys and
 # /dev (5b80946 N2), for a forge token and for a docker config's "auths" (N3).
 mkdir -p inst
@@ -27,7 +30,7 @@ targets=$(
     done
 )
 reached=unreachable
-for ip in $targets; do
+for ip in $(printf '%s\n' $targets | grep -vE '^(127\.|0\.|::1$|::$)'); do
   for port in 53 80 5000 8888; do
     err=$(timeout 1 bash -c "exec 3<>/dev/tcp/$ip/$port" 2>&1) && { reached="reached:$ip:$port"; break 2; }
     case "$err" in *refused*) reached="reached:$ip:$port(refused)"; break 2 ;; esac

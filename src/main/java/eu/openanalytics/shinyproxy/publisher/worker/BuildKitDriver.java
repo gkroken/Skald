@@ -125,6 +125,8 @@ public final class BuildKitDriver implements BuildDriver {
     }
 
     static final int DETAIL_MAX = 200;
+    /** Opens the build log's timing line: "[skald] phases: total 41.2 s: prepare 0.3, ...". */
+    static final String PHASES = "phases: ";
     /** The build record's provenance document (V3). */
     static final String PROVENANCE_SCHEMA = "skald.build-provenance/v1";
     /** How long the decision waits for the rest of an exited client's output. */
@@ -172,9 +174,10 @@ public final class BuildKitDriver implements BuildDriver {
         AtomicReference<Throwable> crashed = new AtomicReference<>();
         AtomicReference<Map<String, Object>> record = new AtomicReference<>();
         AtomicReference<Runnable> afterBuilt = new AtomicReference<>();
+        PhaseClock clock = new PhaseClock();
         Thread work = new Thread(() -> {
             try {
-                result.set(attempt(build, h, aborted, buildLog, record, afterBuilt));
+                result.set(attempt(build, h, aborted, buildLog, record, afterBuilt, clock));
             } catch (Throwable t) {
                 crashed.set(t);
             } finally {
@@ -213,10 +216,16 @@ public final class BuildKitDriver implements BuildDriver {
             throw e;
         }
         // The work is over; whatever it said, nothing of the attempt outlives this call.
+        clock.lap("finish");
         List<String> left = launcher.dispose(h);
         if (!left.isEmpty()) {
             log.warn("attempt {}: disposal left {}", h.attemptId(), left);
         }
+        clock.lap("dispose");
+        // Where the time went, for the owner and the pass probe (T7b, the fixed cost): the
+        // last line before the outcome. A stopped attempt has none.
+        buildLog.line("[skald] " + PHASES + clock.summary(), false);
+        log.info("attempt {}: {}{}", h.attemptId(), PHASES, clock.summary());
         // A stop that arrives after the work ended stopped nothing, so the outcome is what
         // happened: Stopped would claim a stop that never occurred (T8 carry (4): the
         // attempt goes on to PUBLISHING with its cancel request recorded).
@@ -348,13 +357,8 @@ public final class BuildKitDriver implements BuildDriver {
 
     /** The work thread: every Docker call of the attempt. */
     private Outcome attempt(Claimed build, Handle h, AtomicBoolean aborted, HeadTailLog buildLog,
-                            AtomicReference<Map<String, Object>> record) throws Exception {
-        return attempt(build, h, aborted, buildLog, record, new AtomicReference<>());
-    }
-
-    private Outcome attempt(Claimed build, Handle h, AtomicBoolean aborted, HeadTailLog buildLog,
-                            AtomicReference<Map<String, Object>> record, AtomicReference<Runnable> afterBuilt)
-            throws Exception {
+                            AtomicReference<Map<String, Object>> record, AtomicReference<Runnable> afterBuilt,
+                            PhaseClock clock) throws Exception {
         buildLog.line("[skald] attempt " + h.attemptId() + ": preparing the build context", false);
         Prepared prepared;
         try {
@@ -364,6 +368,7 @@ public final class BuildKitDriver implements BuildDriver {
         } catch (Exception e) {
             return new Failed("CONTEXT", detail(e.getMessage()));
         }
+        clock.lap("prepare");
         record.set(record(build, prepared, null, false));
         try {
             if (aborted.get()) {
@@ -375,7 +380,7 @@ public final class BuildKitDriver implements BuildDriver {
             buildLog.line("[skald] launching the build worker", false);
             try {
                 launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(),
-                        config.egress()));
+                        config.egress()), clock);
             } catch (IllegalStateException e) {
                 return new Failed("WORKER_LAUNCH", detail(e.getMessage()));
             }
@@ -392,13 +397,16 @@ public final class BuildKitDriver implements BuildDriver {
                 return new Failed("PROVENANCE", detail(e.getMessage()));
             }
             record.set(record(build, prepared, worker, false));
+            clock.lap("provenance");
             try {
                 client.stage(h, prepared.payload(), prepared.recipe());
+                clock.lap("stage");
                 if (aborted.get()) {
                     return new Stopped();
                 }
                 buildLog.line("[skald] building", false);
                 client.start(h, push);
+                clock.lap("client.start");
             } catch (java.io.IOException | IllegalStateException
                      | org.mandas.docker.client.exceptions.DockerException e) {
                 return new Failed("STAGE", detail(e.getMessage()));
@@ -412,6 +420,7 @@ public final class BuildKitDriver implements BuildDriver {
                 }
                 var exit = client.exitCode(h);
                 if (exit.isPresent()) {
+                    clock.lap("build");
                     // The client exited, so its output is ending: take all of it before
                     // deciding, since a failure's detail is its last line.
                     follower.join(FOLLOW_SETTLE_MILLIS);

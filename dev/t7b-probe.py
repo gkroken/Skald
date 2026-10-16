@@ -469,6 +469,31 @@ def judge(r, admin):
         [p for p, x in rows.items() if p in HOSTED_ONLY]))
 
 
+def package_phases():
+    """Where a package attempt's time went (T7b, the fixed cost): PackageBuildDriver logs one
+    "package attempt <id> (<pkg> <ver>): phases: total T s: name s, ..." line per attempt. Prints
+    each phase's median and maximum over the run's attempts; written to package-phases.json."""
+    line = re.compile(r"package attempt (p[0-9a-f]+) \((\S+) (\S+)\): phases: total ([0-9.]+) s:(.*)$")
+    attempts = []
+    for l in (OUT / "maven.log").read_text(errors="replace").splitlines():
+        m = line.search(l)
+        if m:
+            phases = {"total": float(m.group(4))}
+            for part in m.group(5).split(","):
+                kv = part.split()
+                if len(kv) == 2:
+                    phases[kv[0]] = float(kv[1])
+            attempts.append({"attempt": m.group(1), "package": m.group(2), "version": m.group(3), "phases": phases})
+    (OUT / "package-phases.json").write_text(json.dumps(attempts, indent=1))
+    names = []
+    for a in attempts:
+        names += [n for n in a["phases"] if n not in names]
+    print("  package attempts: %d (target/t7b/package-phases.json)" % len(attempts))
+    for n in names:
+        xs = sorted(a["phases"][n] for a in attempts if n in a["phases"])
+        print("    %-16s median %6.1f s  max %6.1f s" % (n, xs[len(xs) // 2], xs[-1]))
+
+
 RECIPE = REPO / "src/main/java/eu/openanalytics/shinyproxy/publisher/binaries/PackageRecipe.java"
 CRANINDEX = RECIPE.parent / "CranIndex.java"
 VERIFIER = RECIPE.parent / "SourceVerifier.java"
@@ -630,6 +655,7 @@ def main(argv):
                 judge(json.loads(report.read_text()), admin)
             except Exception as e:  # a judging bug is a failed row, never a skipped host check
                 record("judge", False, "%s: %s" % (type(e).__name__, e))
+        package_phases()
         t7p.host_clean()
         results.extend(t7p.results)
     finally:

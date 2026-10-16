@@ -2547,6 +2547,28 @@ below are marked passed by this planning document.
       a platform-owned Docker volume the worker mounts read-only and never writes (never
       a host path: builds get no host mounts; no tenant data is shared), and keep a small
       pool of pre-launched, never-used workers.
+      **Measured per phase (2026-10-16, before any of it).** Each attempt now writes where its
+      time went: an app build's log ends with `[skald] phases: total T s: ...` (the pass
+      probe records it per build with buildctl's step times, results.json `phases`/`steps`),
+      a package attempt logs the same line (dev/t7b-probe.py prints each phase's median and
+      maximum). The pass probe's cache rows, seconds from claim to PUBLISHING:
+      | phase (s)            | Py cold | Py source-only | R cold | R source-only |
+      | launch.network       |   0.9   |   0.7          |  0.4   |   0.5         |
+      | launch.conf (helper) |   4.2   |   3.1          |  2.9   |   3.3         |
+      | launch.gateway       |   5.7   |   3.1          |  3.1   |   3.9         |
+      | launch.quota (helper)|   4.4   |   4.1          |  3.3   |   4.0         |
+      | launch.chown (helper)|   3.4   |   3.2          |  3.6   |   3.4         |
+      | launch.worker        |   5.7   |   2.8          |  2.2   |   2.7         |
+      | stage + client.start |   4.4   |   5.5          |  3.8   |   3.9         |
+      | build (buildctl)     |  38.5   |  13.4          | 206.7  |  24.1         |
+      | dispose (2 helpers)  |  11.6   |  10.8          |  10.9  |  11.4         |
+      | total                |  78.9   |  46.8          | 237.0  |  57.2         |
+      So about 33 s of every attempt is fixed cost outside buildctl (launch ~20, stage and
+      client ~4, disposal ~11), each helper container costing 3-4 s on this host. Inside
+      buildctl, R's source-only build spends 12.4 s on the cached restore step, most of it
+      extracting the base's layers again (6.9 s for the largest) and the cached layer, and
+      10.7 s exporting and pushing. Targets: a source-only republish under 30 s (R 57, Python
+      47 today), a small first publish under 60 s (Python cold 79).
       **Pass:** the targets above met and measured per phase; the binary rows' isolation,
       source and token rows red under their mutants; T5's isolation probes rerun green,
       the bounds probe's mounts row among them, since the read-only base store is a new

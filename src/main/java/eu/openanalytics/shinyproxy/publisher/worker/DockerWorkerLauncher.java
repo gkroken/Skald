@@ -208,6 +208,11 @@ public final class DockerWorkerLauncher {
      * after disposing of everything it made.
      */
     public Handle launch(Request request) throws InterruptedException {
+        return launch(request, new PhaseClock());
+    }
+
+    /** As above, lapping each launch phase on {@code clock} ("launch.*"). */
+    Handle launch(Request request, PhaseClock clock) throws InterruptedException {
         Handle h = handle(request.attemptId());
         Map<String, String> labels = Map.of(ATTEMPT_LABEL, request.attemptId());
         // Outside the try: a refusal has made nothing, so there is nothing to dispose, and
@@ -219,6 +224,7 @@ public final class DockerWorkerLauncher {
         } catch (DockerException e) {
             throw new IllegalStateException("could not check the attempt's names: " + e.getMessage(), e);
         }
+        clock.lap("launch.names");
         try {
             String squid = GatewayConfig.squidConf(request.egress().registry(),
                     request.egress().repos(), request.egress().privateMirrors(),
@@ -230,10 +236,13 @@ public final class DockerWorkerLauncher {
             for (String v : List.of(h.socketVolume(), h.configVolume())) {
                 createOwnedVolume(v, labels, null);
             }
+            clock.lap("launch.network");
             writeConfig(h, squid, buildkitdToml(request.egress().registry()), labels);
+            clock.lap("launch.conf");
             startGateway(h, request.egress(), labels);
-            makeWorkspace(h, request.quotaMegabytes(), labels);
-            startWorker(h, launch, labels);
+            clock.lap("launch.gateway");
+            makeWorkspace(h, request.quotaMegabytes(), labels, clock);
+            startWorker(h, launch, labels, clock);
             return h;
         } catch (InterruptedException e) {
             dispose(h);
@@ -367,7 +376,7 @@ public final class DockerWorkerLauncher {
     static final String WORKSPACE_MKFS = "mkfs.ext4 -q -F -O ^has_journal";
     static final String WORKSPACE_MOUNT = "nosuid,nodev,barrier=0";
 
-    private void makeWorkspace(Handle h, int megabytes, Map<String, String> labels)
+    private void makeWorkspace(Handle h, int megabytes, Map<String, String> labels, PhaseClock clock)
             throws DockerException, InterruptedException {
         try {
             docker.inspectVolume(QUOTA_IMAGES_VOLUME);
@@ -385,6 +394,7 @@ public final class DockerWorkerLauncher {
         if (!LOOP.matcher(loop).matches()) {
             throw new IllegalStateException("the quota image did not attach: " + out.strip());
         }
+        clock.lap("launch.quota");
         Map<String, String> volumeLabels = new LinkedHashMap<>(labels);
         volumeLabels.put("eu.skald.loop-device", loop);
         createOwnedVolume(h.workspaceVolume(), volumeLabels,
@@ -392,6 +402,7 @@ public final class DockerWorkerLauncher {
         runHelper("chown-" + h.attemptId(), images.helper(), false,
                 List.of(h.workspaceVolume() + ":/w"), List.of(),
                 List.of("chown", WORKER_UID + ":" + WORKER_UID, "/w"), labels);
+        clock.lap("launch.chown");
     }
 
     /**
@@ -443,7 +454,7 @@ public final class DockerWorkerLauncher {
         return "http://" + ip + ":" + GatewayConfig.PORT;
     }
 
-    private void startWorker(Handle h, Launch launch, Map<String, String> labels)
+    private void startWorker(Handle h, Launch launch, Map<String, String> labels, PhaseClock clock)
             throws DockerException, InterruptedException {
         List<String> binds = new ArrayList<>(launch.binds());
         binds.add(h.socketVolume() + ":" + SOCKET_MOUNT);
@@ -471,7 +482,9 @@ public final class DockerWorkerLauncher {
         // 120 s: a 60 s wait was missed once under load (the daemon stalled after its fsverity
         // check and reported a worker only later); a healthy start takes a few seconds.
         waitForLog(h.worker(), "found worker", 120);
+        clock.lap("launch.worker");
         requireDaemonNoNewPrivs(h);
+        clock.lap("launch.nnp");
     }
 
     /**
