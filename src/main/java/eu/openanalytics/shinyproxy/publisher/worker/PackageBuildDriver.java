@@ -118,9 +118,39 @@ public final class PackageBuildDriver {
     private final PackageHandIn handIn;
     private final Renderer renderer;
     private final Config config;
+    /** Ready sandboxes warmed with {@link #base}, or null: every attempt launches its own. */
+    private final WorkerPool pool;
+    private final String base;
+    /** Disposes of a finished attempt after run() returns, or null: run() disposes itself. */
+    private final Disposer disposer;
+    /** The last attempt's disposal on the disposer, so a test can wait for it. */
+    volatile java.util.concurrent.Future<?> lastDisposal;
 
     public PackageBuildDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
                               PackageHandIn handIn, Renderer renderer, Config config) {
+        this(docker, launcher, client, handIn, renderer, config, null, null, null);
+    }
+
+    /**
+     * As above, taking a ready sandbox warmed with {@code base} (the recipe's base, by digest)
+     * from {@code pool}, which launches its entries with this driver's request (T7b, the fixed
+     * cost; one pool per driver, 4838310 N2).
+     */
+    public PackageBuildDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
+                              PackageHandIn handIn, Renderer renderer, Config config, WorkerPool pool, String base) {
+        this(docker, launcher, client, handIn, renderer, config, pool, base, null);
+    }
+
+    /** As above; with a {@code disposer}, a finished attempt is disposed of there (never a stopped one). */
+    public PackageBuildDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
+                              PackageHandIn handIn, Renderer renderer, Config config, WorkerPool pool, String base,
+                              Disposer disposer) {
+        this.disposer = disposer;
+        if ((pool == null) != (base == null)) {
+            throw new IllegalArgumentException("a pool needs the base it is warmed with");
+        }
+        this.pool = pool;
+        this.base = base;
         this.docker = docker;
         this.launcher = launcher;
         this.client = client;
@@ -182,11 +212,16 @@ public final class PackageBuildDriver {
             throw e;
         }
         clock.lap("finish");
-        List<String> left = launcher.dispose(h);
-        if (!left.isEmpty()) {
-            log.warn("package attempt {}: disposal left {}", h.attemptId(), left);
+        if (disposer == null) {
+            List<String> left = launcher.dispose(h, clock);
+            if (!left.isEmpty()) {
+                log.warn("package attempt {}: disposal left {}", h.attemptId(), left);
+            }
+            clock.lap("dispose");
+        } else {
+            // As in BuildKitDriver: the work thread has ended, nothing of the attempt is in flight.
+            lastDisposal = disposer.submit("package attempt " + h.attemptId(), () -> launcher.dispose(h));
         }
-        clock.lap("dispose");
         log.info("package attempt {} ({} {}): {}{}", h.attemptId(), claim.pkg(), claim.version(),
                 BuildKitDriver.PHASES, clock.summary());
         return crashed.get() != null
@@ -244,35 +279,43 @@ public final class PackageBuildDriver {
         }
         Path payload = Files.createTempDirectory("skald-package-");
         try {
-            try {
-                launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(), config.egress(),
-                        true), clock);
-            } catch (IllegalStateException e) {
-                return new Failed("WORKER_LAUNCH", BuildKitDriver.detail(e.getMessage()));
+            // As in BuildKitDriver: a pooled sandbox runs under its entry's names (eff); the stop
+            // path and the disposals stay the attempt's own (h), which reach it by the marker.
+            java.util.Optional<Handle> pooled = pool == null ? java.util.Optional.empty() : pool.take(base, h.attemptId());
+            Handle eff = pooled.orElse(h);
+            if (pooled.isPresent()) {
+                clock.lap("pool.take");
+            } else {
+                try {
+                    launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(), config.egress(),
+                            true), clock);
+                } catch (IllegalStateException e) {
+                    return new Failed("WORKER_LAUNCH", BuildKitDriver.detail(e.getMessage()));
+                }
             }
             if (aborted.get()) {
                 return new Stopped();
             }
             try {
-                client.stage(h, payload, recipe);
+                client.stage(eff, payload, recipe);
                 clock.lap("stage");
                 if (aborted.get()) {
                     return new Stopped();
                 }
-                client.startLocal(h, config.egress().registry(), config.credential());
+                client.startLocal(eff, config.egress().registry(), config.credential());
                 clock.lap("client.start");
             } catch (IOException | IllegalStateException | org.mandas.docker.client.exceptions.DockerException e) {
                 return new Failed("STAGE", BuildKitDriver.detail(e.getMessage()));
             }
             while (!aborted.get()) {
-                var exit = client.exitCode(h);
+                var exit = client.exitCode(eff);
                 if (exit.isPresent()) {
                     clock.lap("build");
                 }
                 if (exit.isPresent() && exit.get() == 0) {
                     byte[] binary;
                     try {
-                        binary = client.collect(h, OUTPUT, config.archiveLimits().maxBytes());
+                        binary = client.collect(eff, OUTPUT, config.archiveLimits().maxBytes());
                     } catch (IllegalStateException e) {
                         return new Refused("OUTPUT", BuildKitDriver.detail(e.getMessage()));
                     }
@@ -283,12 +326,12 @@ public final class PackageBuildDriver {
                         return new Refused(r.code(), BuildKitDriver.detail(r.getMessage()));
                     }
                 }
-                if (!workerRunning(h)) {
+                if (!workerRunning(eff)) {
                     return new Failed("WORKER_DIED", "the worker stopped");
                 }
                 if (exit.isPresent()) {
                     return new Failed("BUILD_FAILED", BuildKitDriver.detail("exit " + exit.get() + ": "
-                            + lastLine(client.log(h))));
+                            + lastLine(client.log(eff))));
                 }
                 Thread.sleep(config.poll().toMillis());
             }

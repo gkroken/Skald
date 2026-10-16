@@ -195,6 +195,10 @@ public class BuildKitDriverTest {
             work.join(180_000);
             assertFalse(work.isAlive(), "the work thread ended");
         }
+        java.util.concurrent.Future<?> disposal = lastDriver == null ? null : lastDriver.lastDisposal;
+        if (disposal != null) {
+            disposal.get(3, TimeUnit.MINUTES);
+        }
         Handle h = handle(c);
         assertEquals(List.of(), launcher.leftovers(h), "nothing of the attempt is left");
         // By NAME too: a volume Docker re-created for a bind carries no label, and the
@@ -209,6 +213,148 @@ public class BuildKitDriverTest {
         }
         docker.listNetworks().stream().filter(n -> n.name().contains(id)).forEach(n -> named.add("network " + n.name()));
         assertEquals(List.of(), named, "nothing named for the attempt is left");
+    }
+
+    /** A pool launched with {@link #driver}'s own request, warmed with the registry's base by digest. */
+    private static WorkerPool pool() {
+        Egress egress = new Egress(List.of(registry.outer), registry.name, List.of("pypi.org"), List.of(), List.of(),
+                List.of());
+        return new WorkerPool(launcher, client, id -> new DockerWorkerLauncher.Request(id, Settings.defaults(), 256, egress),
+                List.of(registry.baseByDigest()), registry.name, TestRegistry.CRED, WorkerPool.Settings.defaults());
+    }
+
+    /** As {@link #source}, FROM the base by digest, with the base in the inputs as BundleContextSource puts it. */
+    private static ContextSource pooledSource(Path dir, String steps) throws Exception {
+        Path payload = Files.createDirectories(dir.resolve("payload"));
+        Files.writeString(payload.resolve("app.py"), "print('hello')\n");
+        Recipe recipe = new Recipe("FROM " + registry.baseByDigest() + "\nCOPY app/ /app/\n" + steps, Map.of());
+        return build -> new Prepared(payload, recipe, "content/bkd", () -> { }, null,
+                Map.of("base", Map.of("reference", registry.baseByDigest())));
+    }
+
+    /** As driverOn: the driver's launcher and client on {@code d}, so a wrapper sees every call. */
+    private static BuildKitDriver pooledDriver(DockerClient d, ContextSource source, WorkerPool pool) {
+        return pooledDriver(d, source, pool, null);
+    }
+
+    private static BuildKitDriver pooledDriver(DockerClient d, ContextSource source, WorkerPool pool, Disposer disposer) {
+        Images images = Images.of(WORKER, GATEWAY);
+        DockerWorkerLauncher l = new DockerWorkerLauncher(d, WorkerProfile.load("runc-rootless"), images);
+        return lastDriver = new BuildKitDriver(d, l, new BuildKitClient(d, l, images), source, logWriter,
+                new Config(Settings.defaults(), 256,
+                new Egress(List.of(registry.outer), registry.name, List.of("pypi.org"), List.of(), List.of(), List.of()),
+                TestRegistry.CRED, POLL, Duration.ofSeconds(30), LOG_LIMITS), pool, disposer);
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aPooledBuildRecordsItsEntryAndLeavesNothingOfIt(@TempDir Path dir) throws Exception {
+        WorkerPool pool = pool();
+        pool.tick();
+        String entry = pool.ready().get(registry.baseByDigest()).get(0);
+        Claimed c = claimed();
+        Outcome outcome;
+        try {
+            outcome = pooledDriver(docker, pooledSource(dir, "RUN [\"true\"]\n"), pool).run(c, () -> false);
+        } finally {
+            pool.stop();
+        }
+        Built built = assertInstanceOf(Built.class, outcome, outcome.toString());
+        @SuppressWarnings("unchecked")
+        Map<String, Object> worker = (Map<String, Object>) built.provenance().get("worker");
+        assertEquals(Map.of("entry", entry, "warmed_with", registry.baseByDigest(), "never_used", true),
+                worker.get("pool"), "the record says which ready worker built it, warmed with what");
+        assertNotNull(worker.get("images"), "and still what it ran");
+        assertNothingLeft(c);
+        assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(entry)), "the entry went with it");
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void withADisposerTheOutcomeComesBeforeTheDisposalAndTheDisposalStillLeavesNothing(@TempDir Path dir)
+            throws Exception {
+        WorkerPool pool = pool();
+        pool.tick();
+        String entry = pool.ready().get(registry.baseByDigest()).get(0);
+        Claimed c = claimed();
+        Disposer disposer = new Disposer(2);
+        Outcome outcome;
+        try {
+            BuildKitDriver d = pooledDriver(docker, pooledSource(dir, "RUN [\"true\"]\n"), pool, disposer);
+            outcome = d.run(c, () -> false);
+            assertNotNull(d.lastDisposal, "the disposal was handed to the disposer");
+        } finally {
+            pool.stop();
+            disposer.close();
+        }
+        assertInstanceOf(Built.class, outcome, outcome.toString());
+        String phases = logWriter.readFinal(c.contentId(), c.buildId()).isPresent() ? phasesLine(c) : "";
+        assertTrue(phases.startsWith("[skald] phases: ") && !phases.contains("dispose"),
+                "the log's phases end before the disposal: " + phases);
+        assertNothingLeft(c);
+        assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(entry)), "the entry went with it");
+    }
+
+    /** The build log's "[skald] phases:" line. */
+    private static String phasesLine(Claimed c) throws Exception {
+        var fin = logWriter.readFinal(c.contentId(), c.buildId()).orElseThrow();
+        StringBuilder text = new StringBuilder();
+        for (long seq = 1; seq <= fin.lastSequence(); seq++) {
+            try (var in = logStore.store.open(logStore.bucket,
+                    eu.openanalytics.shinyproxy.publisher.storage.ObjectKeys.logChunk(c.contentId(), c.buildId(), seq))) {
+                text.append(new String(in.readAllBytes(), StandardCharsets.UTF_8));
+            }
+        }
+        for (String l : text.toString().split("\n")) {
+            String t = new com.fasterxml.jackson.databind.ObjectMapper().readTree(l).path("t").asText();
+            if (t.startsWith("[skald] phases: ")) {
+                return t;
+            }
+        }
+        return "";
+    }
+
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aStopReachesAPooledWorkerWithinTheBound(@TempDir Path dir) throws Exception {
+        // The stop path kills and removes by the ATTEMPT's handle; the build runs on the entry's
+        // names. The marker joins them, so the entry's worker stops within the same bound.
+        WorkerPool pool = pool();
+        pool.tick();
+        String entry = pool.ready().get(registry.baseByDigest()).get(0);
+        Handle w = DockerWorkerLauncher.handle(entry);
+        Claimed c = claimed();
+        AtomicBoolean stop = new AtomicBoolean();
+        long[] flipped = new long[1];
+        long[] workerGone = new long[1];
+        Thread watcher = whenClientRuns(w, () -> {
+            try {
+                Thread.sleep(10_000);
+            } catch (InterruptedException e) {
+                return;
+            }
+            flipped[0] = System.nanoTime();
+            stop.set(true);
+            try {
+                workerGone[0] = untilStopped(w.worker());
+            } catch (Exception e) {
+                // reported by the assertion
+            }
+        });
+        Hold record = new Hold();
+        Outcome outcome;
+        try {
+            outcome = pooledDriver(record.wrap("none", "none"), pooledSource(dir, "RUN [\"sleep\", \"600\"]\n"), pool)
+                    .run(c, stop::get);
+        } finally {
+            pool.stop();
+        }
+        watcher.join(10_000);
+        assertInstanceOf(Stopped.class, outcome, outcome.toString());
+        assertTrue(flipped[0] > 0, "the stop flipped while the pooled worker's client ran");
+        assertStoppedInTime("stop of a pooled worker", flipped[0], record.kill, workerGone[0]);
+        assertNothingLeft(c);
+        assertEquals(List.of(), launcher.leftovers(w), "the entry went with it");
     }
 
     @Test

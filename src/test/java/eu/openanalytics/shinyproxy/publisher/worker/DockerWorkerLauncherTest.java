@@ -556,6 +556,49 @@ public class DockerWorkerLauncherTest {
         assertEquals(List.of(), launcher.leftovers(h));
     }
 
+    /** A launcher whose daemon records the name of every container created. */
+    private static DockerWorkerLauncher recording(List<String> created) {
+        DockerClient rec = (DockerClient) java.lang.reflect.Proxy.newProxyInstance(DockerClient.class.getClassLoader(),
+                new Class<?>[] {DockerClient.class}, (proxy, m, args) -> {
+                    if (m.getName().equals("createContainer") && args != null && args.length == 2) {
+                        created.add(String.valueOf(args[1]));
+                    }
+                    try {
+                        return m.invoke(docker, args);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        return new DockerWorkerLauncher(rec, WorkerProfile.load("runc-rootless"), Images.of(WORKER, GATEWAY));
+    }
+
+    @Test
+    public void aPooledAttemptsDisposalRunsOnlyItsEntrysCleanupUnlessItHasANetworkOfItsOwn() throws Exception {
+        // A pooled attempt never launched its own worker: the launch makes the network before
+        // any quota image, and disposal removes it only after its cleanup, so with no network
+        // of its own there is nothing for its own cleanup helper to do (3-4 s skipped).
+        for (boolean ownNetwork : List.of(false, true)) {
+            String entry = DockerWorkerLauncher.poolEntryId(java.time.Instant.now().getEpochSecond(),
+                    new java.util.Random());
+            Handle w = launcher.launch(request(entry));
+            String a = attempt();
+            Handle h = DockerWorkerLauncher.handle(a);
+            launcher.take(entry, a);
+            if (ownNetwork) {
+                docker.createNetwork(org.mandas.docker.client.messages.NetworkConfig.builder().name(h.network())
+                        .internal(true).labels(Map.of(DockerWorkerLauncher.ATTEMPT_LABEL, a)).build());
+            }
+            List<String> created = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            assertEquals(List.of(), recording(created).dispose(h));
+            assertTrue(created.contains("skald-helper-cleanup-" + entry), "the entry's cleanup ran: " + created);
+            assertEquals(ownNetwork, created.contains("skald-helper-cleanup-" + a),
+                    (ownNetwork ? "a network of its own: its cleanup runs" : "no network of its own: no cleanup")
+                            + ": " + created);
+            assertEquals(List.of(), launcher.leftovers(w));
+            assertEquals(List.of(), launcher.leftovers(h));
+        }
+    }
+
     @Test
     public void anOutputVolumeThatIsNotTheLaunchsIsRefused() throws Exception {
         // A local-output client binds the output volume by name; one the launch did not make

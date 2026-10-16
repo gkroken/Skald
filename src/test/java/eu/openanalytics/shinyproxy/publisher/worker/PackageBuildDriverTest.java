@@ -221,6 +221,39 @@ public class PackageBuildDriverTest {
     }
 
     @Test
+    @Timeout(value = 20, unit = java.util.concurrent.TimeUnit.MINUTES)
+    public void aPooledSandboxExportsOneCheckedBinaryWithNoNetworkAndLeavesNothingOfItsEntry() throws Exception {
+        // T7b, the fixed cost: the sandbox comes from the driver's own pool, launched with the
+        // driver's request (its output volume, its egress) and warmed with the recipe's base.
+        String base = registry.baseByDigest();
+        byte[] prebuilt = installed("foo", "1.0");
+        byte[] source = "source".getBytes(StandardCharsets.UTF_8);
+        BuildClaim c = claim("foo", List.of(), source);
+        PackageBuildDriver.Config config = config(List.of());
+        WorkerPool pool = new WorkerPool(launcher, client,
+            id -> new DockerWorkerLauncher.Request(id, config.settings(), config.quotaMegabytes(), config.egress(), true),
+            List.of(base), registry.name, TestRegistry.CRED, WorkerPool.Settings.defaults());
+        pool.tick();
+        String entry = pool.ready().get(base).get(0);
+        PackageBuildDriver.Renderer renderer = standIn(prebuilt, NET_CHECK, false, "binary.tar.gz");
+        PackageBuildDriver.Renderer onDigest = (src, deps) -> {
+            Recipe r = renderer.render(src, deps);
+            return new Recipe(r.dockerfile().replace("FROM " + registry.base() + " ", "FROM " + base + " "), r.files());
+        };
+        try {
+            PackageBuildDriver.Result r = new PackageBuildDriver(docker, launcher, client, handIn(source, Map.of(), Map.of()),
+                onDigest, config, pool, base).run(c, () -> false);
+            PackageBuildDriver.Built built = assertInstanceOf(PackageBuildDriver.Built.class, r, r.toString());
+            assertArrayEquals(prebuilt, built.binary());
+            assertEquals(List.of(), pool.ready().get(base), "the entry was taken");
+        } finally {
+            pool.stop();
+        }
+        assertNothingLeft(c);
+        assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(entry)), "the entry went with it");
+    }
+
+    @Test
     @Timeout(value = 15, unit = java.util.concurrent.TimeUnit.MINUTES)
     public void theNetworkCheckCanSeeAnInterface() throws Exception {
         // The control for the row above: the same RUN WITH a network fails the check, so the

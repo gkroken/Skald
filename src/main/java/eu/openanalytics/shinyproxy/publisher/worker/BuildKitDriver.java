@@ -146,11 +146,39 @@ public final class BuildKitDriver implements BuildDriver {
     private final ContextSource source;
     private final BuildLogWriter logs;
     private final Config config;
+    /** Ready workers warmed with a base, or null: every attempt launches its own. */
+    private final WorkerPool pool;
+    /** Disposes of a settled attempt after run() returns, or null: run() disposes itself. */
+    private final Disposer disposer;
+    /** The last attempt's disposal on the disposer, so a test can wait for it. */
+    volatile java.util.concurrent.Future<?> lastDisposal;
     /** The last attempt's work thread, so a test can wait for its own disposal. */
     volatile Thread lastWork;
 
     public BuildKitDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
                           ContextSource source, BuildLogWriter logs, Config config) {
+        this(docker, launcher, client, source, logs, config, null, null);
+    }
+
+    /**
+     * As above, taking a ready worker from {@code pool} when one is warmed with the build's base
+     * (T7b, the fixed cost). The pool must launch its entries with this driver's request: one
+     * pool per driver (4838310 N2).
+     */
+    public BuildKitDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
+                          ContextSource source, BuildLogWriter logs, Config config, WorkerPool pool) {
+        this(docker, launcher, client, source, logs, config, pool, null);
+    }
+
+    /**
+     * As above; with a {@code disposer}, a settled attempt (built or failed, never stopped) is
+     * disposed of there once its outcome is returned, off the critical path.
+     */
+    public BuildKitDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
+                          ContextSource source, BuildLogWriter logs, Config config, WorkerPool pool,
+                          Disposer disposer) {
+        this.pool = pool;
+        this.disposer = disposer;
         this.docker = docker;
         this.launcher = launcher;
         this.client = client;
@@ -217,11 +245,13 @@ public final class BuildKitDriver implements BuildDriver {
         }
         // The work is over; whatever it said, nothing of the attempt outlives this call.
         clock.lap("finish");
-        List<String> left = launcher.dispose(h);
-        if (!left.isEmpty()) {
-            log.warn("attempt {}: disposal left {}", h.attemptId(), left);
+        if (disposer == null) {
+            List<String> left = launcher.dispose(h, clock);
+            if (!left.isEmpty()) {
+                log.warn("attempt {}: disposal left {}", h.attemptId(), left);
+            }
+            clock.lap("dispose");
         }
-        clock.lap("dispose");
         // Where the time went, for the owner and the pass probe (T7b, the fixed cost): the
         // last line before the outcome. A stopped attempt has none.
         buildLog.line("[skald] " + PHASES + clock.summary(), false);
@@ -236,6 +266,15 @@ public final class BuildKitDriver implements BuildDriver {
         // T7b, a16cf2a-F1: the binaries' bookkeeping (a lock, a queue of packages) runs only for
         // a build whose outcome IS Built, after it is settled, on its own thread: nothing about
         // it -- its length, a stop, an exception -- can turn a pushed image into another outcome.
+        if (disposer != null) {
+            // The work thread has ended: nothing of the attempt is in flight at the daemon.
+            lastDisposal = disposer.submit("attempt " + h.attemptId(), () -> {
+                PhaseClock d = new PhaseClock();
+                List<String> left = launcher.dispose(h, d);
+                log.info("attempt {}: disposed after its outcome: {}{}", h.attemptId(), PHASES, d.summary());
+                return left;
+            });
+        }
         Runnable after = afterBuilt.get();
         if (done instanceof Built && after != null) {
             AFTER_BUILT.execute(() -> {
@@ -377,12 +416,23 @@ public final class BuildKitDriver implements BuildDriver {
             Push push = new Push(config.egress().registry(), prepared.repository(), build.buildId(),
                     config.credential(), prepared.cacheKey() == null ? null
                             : new BuildKitClient.Cache(build.contentId(), prepared.cacheKey()));
-            buildLog.line("[skald] launching the build worker", false);
-            try {
-                launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(),
-                        config.egress()), clock);
-            } catch (IllegalStateException e) {
-                return new Failed("WORKER_LAUNCH", detail(e.getMessage()));
+            // A ready worker warmed with this base, if the pool has one: it runs under its own
+            // names (eff), and the attempt's own handle (h) reaches it through the marker, so
+            // the stop path and every disposal below stay h's.
+            String base = baseOf(prepared);
+            Optional<Handle> pooled = pool == null || base == null ? Optional.empty() : pool.take(base, h.attemptId());
+            Handle eff = pooled.orElse(h);
+            if (pooled.isPresent()) {
+                buildLog.line("[skald] taking a ready build worker", false);
+                clock.lap("pool.take");
+            } else {
+                buildLog.line("[skald] launching the build worker", false);
+                try {
+                    launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(),
+                            config.egress()), clock);
+                } catch (IllegalStateException e) {
+                    return new Failed("WORKER_LAUNCH", detail(e.getMessage()));
+                }
             }
             if (aborted.get()) {
                 return new Stopped();
@@ -392,33 +442,36 @@ public final class BuildKitDriver implements BuildDriver {
             // the platform's).
             Map<String, Object> worker;
             try {
-                worker = launcher.provenance(h);
+                worker = launcher.provenance(eff);
+                if (pooled.isPresent()) {
+                    worker = poolRecord(worker, eff, base);
+                }
             } catch (IllegalStateException | org.mandas.docker.client.exceptions.DockerException e) {
                 return new Failed("PROVENANCE", detail(e.getMessage()));
             }
             record.set(record(build, prepared, worker, false));
             clock.lap("provenance");
             try {
-                client.stage(h, prepared.payload(), prepared.recipe());
+                client.stage(eff, prepared.payload(), prepared.recipe());
                 clock.lap("stage");
                 if (aborted.get()) {
                     return new Stopped();
                 }
                 buildLog.line("[skald] building", false);
-                client.start(h, push);
+                client.start(eff, push);
                 clock.lap("client.start");
             } catch (java.io.IOException | IllegalStateException
                      | org.mandas.docker.client.exceptions.DockerException e) {
                 return new Failed("STAGE", detail(e.getMessage()));
             }
-            Thread follower = follow(h, buildLog);
+            Thread follower = follow(eff, buildLog);
             while (!aborted.get()) {
                 buildLog.tick();
                 if (buildLog.failed()) {
                     // The log could not be persisted: the build stops, and says why.
                     return new Failed("LOG_STORAGE", detail(buildLog.failure()));
                 }
-                var exit = client.exitCode(h);
+                var exit = client.exitCode(eff);
                 if (exit.isPresent()) {
                     clock.lap("build");
                     // The client exited, so its output is ending: take all of it before
@@ -429,7 +482,7 @@ public final class BuildKitDriver implements BuildDriver {
                 if (exit.isPresent() && exit.get() == 0) {
                     Built built;
                     try {
-                        built = new Built(client.pushed(h, push), record(build, prepared, worker, true));
+                        built = new Built(client.pushed(eff, push), record(build, prepared, worker, true));
                     } catch (IllegalStateException e) {
                         return new Failed("BUILD_RESULT", detail(e.getMessage()));
                     }
@@ -441,8 +494,8 @@ public final class BuildKitDriver implements BuildDriver {
                 // The one death check, before a failed exit is read as the build's: a client
                 // whose worker died fails too, and the cause is the worker. It also ends an
                 // attempt whose client hangs on a dead worker.
-                if (!workerRunning(h)) {
-                    return new Failed("WORKER_DIED", detail(workerState(h)));
+                if (!workerRunning(eff)) {
+                    return new Failed("WORKER_DIED", detail(workerState(eff)));
                 }
                 if (exit.isPresent()) {
                     return new Failed("BUILD_FAILED", detail("exit " + exit.get() + ": " + buildLog.lastLine()));
@@ -453,6 +506,24 @@ public final class BuildKitDriver implements BuildDriver {
         } finally {
             prepared.release().run();
         }
+    }
+
+    /** The build's base reference by digest, from its prepared inputs, or null. */
+    static String baseOf(Prepared prepared) {
+        Object base = prepared.inputs().get("base");
+        Object ref = base instanceof Map<?, ?> m ? m.get("reference") : null;
+        return ref instanceof String r ? r : null;
+    }
+
+    /** The worker's provenance, saying it came from the pool: which entry, warmed with what. */
+    static Map<String, Object> poolRecord(Map<String, Object> worker, Handle entry, String base) {
+        Map<String, Object> out = new LinkedHashMap<>(worker);
+        Map<String, Object> pooled = new LinkedHashMap<>();
+        pooled.put("entry", entry.attemptId());
+        pooled.put("warmed_with", base);
+        pooled.put("never_used", true);
+        out.put("pool", pooled);
+        return out;
     }
 
     /**

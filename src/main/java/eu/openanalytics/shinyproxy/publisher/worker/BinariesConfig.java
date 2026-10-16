@@ -150,10 +150,17 @@ public class BinariesConfig {
         return new BinaryUploader(queue, gate, forge, BinaryArchive.Limits.DEFAULTS);
     }
 
+    /** The package sandboxes' pools, one per R base's driver; stopped after the loop. */
+    @Bean(destroyMethod = "stop")
+    public WorkerPool.Group binaryWorkerPools(DockerClient skaldWorkerDocker) {
+        return new WorkerPool.Group();
+    }
+
     @Bean(initMethod = "start", destroyMethod = "stop")
     public PackageBuildLoop packageBuildLoop(WorkerConfig worker, DockerClient skaldWorkerDocker,
                                              BinaryBuildQueue queue, SourceVerifier verifier, BinaryUploader uploader,
-                                             BinaryGate gate, ForgeHandIn handIn, BinaryQueueSettings queueSettings)
+                                             BinaryGate gate, ForgeHandIn handIn, BinaryQueueSettings queueSettings,
+                                             WorkerPool.Group binaryWorkerPools, Disposer skaldDisposer)
             throws Exception {
         Images images = Images.of(worker.workerImage(), worker.gatewayImage());
         DockerWorkerLauncher launcher = new DockerWorkerLauncher(skaldWorkerDocker,
@@ -170,14 +177,23 @@ public class BinariesConfig {
                 continue;
             }
             var base = resolved.get().base();
+            // The base's registry and nothing else (PackageBuildDriver.Config refuses more).
+            Egress egress = new Egress(worker.outerNetworks(), worker.registry(), List.of(), List.of(), List.of(),
+                    List.of());
+            // One pool per driver, launched with this driver's own request (4838310 N2): its
+            // narrower egress and its output volume.
+            WorkerPool pool = worker.poolSize() == 0 ? null : new WorkerPool(launcher, client,
+                    id -> new DockerWorkerLauncher.Request(id, Settings.defaults(), worker.quotaMegabytes(), egress, true),
+                    List.of(base.reference()), worker.registry(), worker.credential(), worker.poolSettings());
             PackageBuildDriver driver = new PackageBuildDriver(skaldWorkerDocker, launcher, client, handIn,
                     (s, d) -> PackageRecipe.render(base, s, d),
-                    new PackageBuildDriver.Config(Settings.defaults(), worker.quotaMegabytes(),
-                            // The base's registry and nothing else (PackageBuildDriver.Config refuses more).
-                            new Egress(worker.outerNetworks(), worker.registry(), List.of(), List.of(), List.of(),
-                                    List.of()),
+                    new PackageBuildDriver.Config(Settings.defaults(), worker.quotaMegabytes(), egress,
                             worker.credential(), worker.poll(), worker.settle(), e.version(), e.rPlatform(),
-                            BinaryArchive.Limits.DEFAULTS));
+                            BinaryArchive.Limits.DEFAULTS),
+                    pool, pool == null ? null : base.reference(), skaldDisposer);
+            if (pool != null) {
+                binaryWorkerPools.start(pool);
+            }
             platforms.computeIfAbsent(e.platformKey().get(), k -> new ArrayList<>())
                     .add(new PackageBuildLoop.Platform(e, base.reference(), cat.imageId(e.id()), driver::run));
         }

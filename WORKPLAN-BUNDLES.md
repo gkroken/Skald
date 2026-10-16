@@ -2613,13 +2613,30 @@ below are marked passed by this planning document.
       and every 5 min disposes of any instance's UNTAKEN entry older than ttl + 5 min (a dead
       process's: no live owner keeps one that long); a taken one is its attempt's. A failed
       launch or warm-up is disposed of and the base waits a minute.
-      Part 2: the drivers take from the pool (BuildKitDriver by the build's base, the package
-      driver by its R base), configuration, provenance (which entry, warmed with what), and
-      the measurement.
+      **Step d, part 2, done (this commit's part): the drivers take from the pool.**
+      BuildKitDriver takes an entry by the build's base (inputs.base.reference) and falls back
+      to its own launch when none is ready; the package driver takes by its R base. One pool
+      per driver, each with that driver's own request (egress, output, quota), so an app build
+      never gets a package sandbox's entry nor the reverse (4838310 N2). The provenance records
+      the entry ("pool": entry, what warmed it, never_used). The refill counts only takeable
+      entries (younger than ttl - 5 min), so an idle base always has one to hand out (4838310
+      N1). A taken entry's disposal skips the attempt's own cleanup helper when the attempt
+      made no network of its own. Once the outcome is settled (never after a stop), the
+      disposal runs on a `Disposer` thread: the outcome is reported before the ~8 s disposal,
+      the work thread having ended (no create in flight) and the sweep's 15 min grace covering
+      a crash. Configuration: `skald.builds.worker.pool-size` (0-8, default 1; 0 turns the
+      pool off) and `pool-ttl` (at least 15 min, default 30 min). Idle cost (4838310 N4): each
+      ready entry holds a gateway, a worker, a loop device and its quota image, so pool-size x
+      the published bases for the app builds, plus the same per R base for the package
+      sandboxes. Pass probe, pooled (43/43 green): Python source-only 46.8 -> 18.5 s, R
+      source-only 57.2 -> 25.3 s, Python lock-comment 15.7 s, a small first publish of new
+      content (Python other-content) 37.7 s; both targets met. A refill runs beside the next
+      build and competes with it on this host (Python cold's client start took 29.8 s once
+      while the R base refilled).
       **Pass:** the targets above met and measured per phase; the binary rows' isolation,
       source and token rows red under their mutants; T5's isolation probes rerun green,
-      the bounds probe's mounts row among them, since the read-only base store is a new
-      mount in the worker (c18c5ab N2).
+      the bounds probe's mounts row among them, since steps b and d changed the launch around
+      the worker (c18c5ab N2; 4838310 N3).
 
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus

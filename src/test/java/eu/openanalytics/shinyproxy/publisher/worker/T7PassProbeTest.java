@@ -476,12 +476,28 @@ public class T7PassProbeTest {
         return new String(payload.get(file), StandardCharsets.UTF_8);
     }
 
+    /**
+     * Waits, at most 10 minutes, until every pool has a takeable entry for every base (T7b: the
+     * rows measure a running server, whose pool is warm between publishes), and returns the
+     * seconds waited, which the row records. A server with pool-size 0 has none to wait for.
+     */
+    static double warmPool(ApplicationContext ctx) throws Exception {
+        long start = System.nanoTime();
+        WorkerPool.Group pools = ctx.getBean("skaldWorkerPools", WorkerPool.Group.class);
+        while (!pools.warm() && System.nanoTime() - start < Duration.ofMinutes(10).toNanos()) {
+            Thread.sleep(1000);
+        }
+        return (System.nanoTime() - start) / 1e9;
+    }
+
     /** One cache row: builds, records the result with what the cache did, and returns it. */
     private static ObjectNode cacheRow(ApplicationContext ctx, String name, App app, UUID content,
                                        Map<String, byte[]> payload, Duration bound) throws Exception {
         UUID bundle = storeBundle(ctx, app, content, payload);
+        double waited = warmPool(ctx);
         Map<String, Object> row = build(ctx, name + "-" + app.fixture(), content, bundle, bound);
         ObjectNode r = result(ctx, name, app, row);
+        r.put("pool_wait_seconds", waited);
         assertEquals("PUBLISHING", row.get("state"), r.toString());
         Path log = OUT.resolve(r.path("log_file").asText());
         ObjectNode cache = r.putObject("cache");

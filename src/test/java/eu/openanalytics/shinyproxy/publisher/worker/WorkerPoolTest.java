@@ -186,13 +186,17 @@ public class WorkerPoolTest {
             now.addAndGet(Duration.ofMinutes(26).toSeconds());
             assertEquals(Optional.empty(), live.take(base, attempt()), "too old to hand out");
             assertEquals(List.of(mine), live.ready().get(base));
+            // 4838310 N1: the round makes its replacement now, while it waits out its ttl.
+            live.tick();
+            List<String> both = live.ready().get(base);
+            assertEquals(2, both.size(), "a takeable replacement beside the old one: " + both);
+            String fresh = both.get(1);
 
-            // Past the ttl: ours expired and replaced.
+            // Past the ttl: ours expired; the replacement stays.
             now.addAndGet(Duration.ofMinutes(5).toSeconds());
             live.tick();
             assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(mine)), "expired and disposed of");
-            assertEquals(1, live.ready().get(base).size());
-            assertFalse(live.ready().get(base).contains(mine), "replaced");
+            assertEquals(List.of(fresh), live.ready().get(base), "replaced");
             assertTrue(launcher.attemptsPresent().contains(abandoned), "not yet stale: ttl + MARGIN not passed");
 
             // Past ttl + MARGIN: the dead instance's untaken entry is swept, the taken one stays.

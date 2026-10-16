@@ -35,6 +35,7 @@ import eu.openanalytics.shinyproxy.publisher.storage.HeadTailLog;
 import eu.openanalytics.shinyproxy.publisher.storage.ObjectStore;
 import eu.openanalytics.shinyproxy.publisher.worker.BuildKitClient.Credential;
 import eu.openanalytics.shinyproxy.publisher.worker.DockerWorkerLauncher.Egress;
+import eu.openanalytics.shinyproxy.publisher.worker.DockerWorkerLauncher.Request;
 import eu.openanalytics.shinyproxy.publisher.worker.DockerWorkerLauncher.Images;
 import eu.openanalytics.shinyproxy.publisher.worker.WorkerProfile.Settings;
 import org.mandas.docker.client.DockerClient;
@@ -119,8 +120,35 @@ public class WorkerConfig {
      * thread may outlive the driver's settle in a daemon call (2fc53d9-F1).
      */
     private Duration sweepGrace = Duration.ofMinutes(15);
+    /**
+     * Ready workers per published base (T7b, the fixed cost): launched and warmed with the base
+     * ahead of any build, each used by one build and then disposed of. 0: every build launches
+     * its own. Each ready one holds, while idle, a worker, a gateway, a loop device and a
+     * workspace image with the base extracted (sparse; about the base's size on disk), so the
+     * idle cost is pool-size times the number of published bases (4838310 N4); the binaries'
+     * package sandboxes keep a pool of the same size per R base.
+     */
+    private int poolSize = 1;
+    /** How long a ready worker is kept before it is replaced by a fresh one. */
+    private Duration poolTtl = Duration.ofMinutes(30);
     private String bundleBucket = "skald-bundles";
     private String logBucket = "skald-logs";
+
+    /**
+     * The build loop's pools; stopped after the loop (which depends on it) and before the
+     * Docker client closes (this depends on it: the pool thread's last act is its disposals,
+     * which failed on a closed client and left every ready entry, in the first pass probe run).
+     */
+    @Bean(destroyMethod = "stop")
+    public WorkerPool.Group skaldWorkerPools(DockerClient skaldWorkerDocker) {
+        return new WorkerPool.Group();
+    }
+
+    /** Settled attempts' disposals, after the loops that hand them over and before the Docker client closes. */
+    @Bean(destroyMethod = "close")
+    public Disposer skaldDisposer(DockerClient skaldWorkerDocker) {
+        return new Disposer(4);
+    }
 
     @Bean(destroyMethod = "close")
     public DockerClient skaldWorkerDocker() throws Exception {
@@ -149,7 +177,8 @@ public class WorkerConfig {
     public BuildLoop skaldBuildLoop(DockerClient skaldWorkerDocker, ObjectProvider<BuildCoordinator> coordinator,
                                     CoordinatorSettings settings, ObjectProvider<ObjectStore> store,
                                     ExtractionLimits limits,
-                                    ObjectProvider<eu.openanalytics.shinyproxy.publisher.binaries.BinaryHook> binaryHook)
+                                    ObjectProvider<eu.openanalytics.shinyproxy.publisher.binaries.BinaryHook> binaryHook,
+                                    WorkerPool.Group skaldWorkerPools, Disposer skaldDisposer)
             throws Exception {
         List<String> problems = problems(settings);
         if (coordinator.getIfAvailable() == null) {
@@ -192,11 +221,19 @@ public class WorkerConfig {
                 // T7b: present only with skald.builds.binaries-enabled (BinariesConfig).
                 .withBinaryHook(binaryHook.getIfAvailable());
         BuildLogWriter logWriter = new BuildLogWriter(objects, logBucket);
+        Egress egress = new Egress(outerNetworks, registry, repos, privateMirrors, List.of(), List.of());
+        WorkerPool pool = poolSize == 0 ? null : new WorkerPool(launcher, client,
+                id -> new Request(id, Settings.defaults(), quotaMegabytes, egress), publishedReferences(catalog),
+                registry, new Credential(registryUsername, registryPassword), poolSettings());
         BuildKitDriver driver = new BuildKitDriver(skaldWorkerDocker, launcher, client, source,
                 logWriter,
-                new BuildKitDriver.Config(Settings.defaults(), quotaMegabytes,
-                        new Egress(outerNetworks, registry, repos, privateMirrors, List.of(), List.of()),
-                        new Credential(registryUsername, registryPassword), poll, settle, HeadTailLog.Limits.defaults()));
+                new BuildKitDriver.Config(Settings.defaults(), quotaMegabytes, egress,
+                        new Credential(registryUsername, registryPassword), poll, settle, HeadTailLog.Limits.defaults()),
+                pool, skaldDisposer);
+        if (pool != null) {
+            // Only now: every startup check passed, so no worker is launched for a refused start.
+            skaldWorkerPools.start(pool);
+        }
         PublishVerifier verifier = new PublishVerifier(URI.create(registryApi), registry,
                 new Credential(registryUsername, registryPassword), logWriter);
         return new BuildLoop(new BuildRunner(coordinator.getObject(), settings, verifier), driver,
@@ -219,6 +256,32 @@ public class WorkerConfig {
                 new BuildLogWriter(store.getObject(), logBucket), sweepPeriod);
     }
 
+    /**
+     * The published bases a build of this architecture can resolve to, by digest: each catalog
+     * entry's newest recipe revision, as BundleContextSource resolves it.
+     */
+    List<String> publishedReferences(BaseCatalog catalog) {
+        java.util.LinkedHashSet<String> refs = new java.util.LinkedHashSet<>();
+        if (catalog != null) {
+            for (BaseCatalog.Entry e : catalog.entries()) {
+                if (!e.architecture().equals(architecture)) {
+                    continue;
+                }
+                try {
+                    catalog.resolveEntry(e.type(), e.language(), e.version(), e.architecture())
+                            .ifPresent(r -> refs.add(r.base().reference()));
+                } catch (IllegalStateException unpublished) {
+                    // a build of it is refused at prepare time; nothing to warm
+                }
+            }
+        }
+        return List.copyOf(refs);
+    }
+
+    WorkerPool.Settings poolSettings() {
+        return new WorkerPool.Settings(poolSize, poolTtl, Duration.ofMinutes(10), Duration.ofSeconds(5));
+    }
+
     /** Every refusal that needs no Docker, catalog or bean: the configuration itself. */
     List<String> problems(CoordinatorSettings settings) {
         List<String> problems = new ArrayList<>();
@@ -231,6 +294,11 @@ public class WorkerConfig {
             if (named[1] == null || named[1].isBlank()) {
                 problems.add("skald.builds.worker." + named[0] + " is not set");
             }
+        }
+        try {
+            poolSettings();
+        } catch (IllegalArgumentException e) {
+            problems.add("pool-size / pool-ttl: " + e.getMessage());
         }
         if (sweepPeriod.isNegative() || sweepPeriod.isZero()) {
             problems.add("sweep-period " + sweepPeriod + " must be positive");
@@ -383,6 +451,14 @@ public class WorkerConfig {
         this.sweepGrace = sweepGrace;
     }
 
+    public void setPoolSize(int poolSize) {
+        this.poolSize = poolSize;
+    }
+
+    public void setPoolTtl(Duration poolTtl) {
+        this.poolTtl = poolTtl;
+    }
+
     public void setBundleBucket(String bundleBucket) {
         this.bundleBucket = bundleBucket;
     }
@@ -442,5 +518,9 @@ public class WorkerConfig {
 
     String owner() {
         return owner;
+    }
+
+    int poolSize() {
+        return poolSize;
     }
 }

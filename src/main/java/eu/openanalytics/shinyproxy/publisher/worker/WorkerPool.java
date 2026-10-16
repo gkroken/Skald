@@ -76,6 +76,32 @@ public final class WorkerPool {
         }
     }
 
+    /**
+     * The pools of one configuration, stopped together when its bean is destroyed: after the
+     * loop that takes from them, which depends on this bean.
+     */
+    public static final class Group {
+
+        private final List<WorkerPool> pools = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        /** Adds and starts a pool. */
+        public void start(WorkerPool pool) {
+            pools.add(pool);
+            pool.start();
+        }
+
+        public void stop() throws InterruptedException {
+            for (WorkerPool pool : pools) {
+                pool.stop();
+            }
+        }
+
+        /** Whether every pool has a takeable entry for every base (for probes measuring a warm server). */
+        public boolean warm() {
+            return pools.stream().allMatch(WorkerPool::warm);
+        }
+    }
+
     static final Duration MARGIN = Duration.ofMinutes(5);
     /** How often the stale sweep runs: its inventory starts a privileged helper. */
     static final Duration SWEEP_EVERY = Duration.ofMinutes(5);
@@ -162,6 +188,11 @@ public final class WorkerPool {
             log.warn("pool entry {}: could not be taken for {}: {}", entry, attemptId, e.toString());
             return Optional.empty();
         }
+    }
+
+    /** Whether every base has a takeable entry. */
+    boolean warm() {
+        return bases.stream().allMatch(b -> takeable(b) > 0);
     }
 
     /** Ready entries per base, for tests and logs. */
@@ -268,7 +299,7 @@ public final class WorkerPool {
             sweepStale();
         }
         for (String base : bases) {
-            while (!stopping && readyCount(base) < settings.size()
+            while (!stopping && takeable(base) < settings.size()
                     && epochSeconds.getAsLong() >= notBefore.getOrDefault(base, 0L)) {
                 String entry = DockerWorkerLauncher.poolEntryId(epochSeconds.getAsLong(), random);
                 if (!fill(base, entry)) {
@@ -278,8 +309,13 @@ public final class WorkerPool {
         }
     }
 
-    private synchronized int readyCount(String base) {
-        return ready.get(base).size();
+    /**
+     * Ready entries {@link #take} would still hand out. An entry past ttl - MARGIN no longer
+     * counts, so its replacement is made while it waits out its ttl (4838310 N1: with size 1,
+     * the last 5 min of every cycle had nothing to hand out).
+     */
+    private synchronized int takeable(String base) {
+        return (int) ready.get(base).stream().filter(e -> age(e) < settings.ttl().minus(MARGIN).toSeconds()).count();
     }
 
     /** Launches and warms one entry; true once it is ready. A failure disposes of it. */

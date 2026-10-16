@@ -687,8 +687,10 @@ public final class DockerWorkerLauncher {
         // under its names; its marker goes only once the entry is gone, so a disposal that
         // left something is found again by the attempt's sweeper.
         List<String> pooled = new ArrayList<>();
+        boolean tookAny = false;
         try {
             for (String entry : takenBy(h)) {
+                tookAny = true;
                 List<String> left = dispose(handle(entry), new PhaseClock());
                 if (left.isEmpty()) {
                     quietly(pooled, () -> retrying(() -> docker.removeVolume(marker(entry))));
@@ -700,13 +702,32 @@ public final class DockerWorkerLauncher {
             pooled.add("could not list the attempt's pool entries: " + e.getMessage());
         }
         clock.lap("dispose.pool");
-        List<String> own = disposeOwn(h, clock);
+        List<String> own = disposeOwn(h, clock, tookAny && !hasNetwork(h));
         List<String> all = new ArrayList<>(pooled);
         all.addAll(own);
         return all;
     }
 
-    private List<String> disposeOwn(Handle h, PhaseClock clock) throws InterruptedException {
+    /** Whether the attempt's own network exists (any labels): the first thing a launch makes. */
+    private boolean hasNetwork(Handle h) throws InterruptedException {
+        try {
+            docker.inspectNetwork(h.network());
+            return true;
+        } catch (DockerException e) {
+            // Unsure is "yes": the cleanup then runs, as it always did.
+            return !(e instanceof NotFoundException
+                    || e instanceof org.mandas.docker.client.exceptions.NetworkNotFoundException);
+        }
+    }
+
+    /**
+     * {@code noOwnLaunch}: the attempt took a pool entry and has no network of its own. A launch
+     * makes the network before its setup helper makes the quota image, and a disposal removes
+     * the network only after its cleanup, so such an attempt has no quota image or device:
+     * the cleanup helper (3-4 s of privileged container) is skipped and the quota state is
+     * empty. Only for an attempt that took an entry: the drivers take OR launch, never both.
+     */
+    private List<String> disposeOwn(Handle h, PhaseClock clock, boolean noOwnLaunch) throws InterruptedException {
         // Only what carries THIS attempt's label is removed: an object that merely has one
         // of its names (a refused launch over a foreign volume, 9a2658d-F1) is not ours.
         // Also a volume the daemon made under one of the attempt's names for a bind (no labels,
@@ -730,8 +751,11 @@ public final class DockerWorkerLauncher {
         // The same helper then reports what is still attached or present (QUOTA_STATE's
         // command, after a marker), so no second privileged helper runs to check it.
         String image = h.quotaImage();
-        AtomicReference<String> quotaState = new AtomicReference<>();
+        AtomicReference<String> quotaState = new AtomicReference<>(noOwnLaunch ? "" : null);
         quietly(errors, () -> {
+            if (noOwnLaunch) {
+                return;
+            }
             String out = runHelper("cleanup-" + h.attemptId(), images.setup(), true,
                     List.of(QUOTA_IMAGES_VOLUME + ":/s"), List.of(),
                     List.of("sh", "-c", "for f in /sys/block/loop*/loop/backing_file; do"
