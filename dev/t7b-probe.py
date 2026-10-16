@@ -655,7 +655,10 @@ def main(argv):
                 judge(json.loads(report.read_text()), admin)
             except Exception as e:  # a judging bug is a failed row, never a skipped host check
                 record("judge", False, "%s: %s" % (type(e).__name__, e))
-        package_phases()
+        try:
+            package_phases()
+        except Exception as e:  # reporting, as the judge: a failed row, never a skipped host check
+            record("package phases", False, "%s: %s" % (type(e).__name__, e))
         t7p.host_clean()
         results.extend(t7p.results)
     finally:

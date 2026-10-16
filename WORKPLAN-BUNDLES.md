@@ -2551,7 +2551,8 @@ below are marked passed by this planning document.
       time went: an app build's log ends with `[skald] phases: total T s: ...` (the pass
       probe records it per build with buildctl's step times, results.json `phases`/`steps`),
       a package attempt logs the same line (dev/t7b-probe.py prints each phase's median and
-      maximum). The pass probe's cache rows, seconds from claim to PUBLISHING:
+      maximum). The pass probe's cache rows, seconds from the driver's start to the end of its
+      disposal (the claim and the PUBLISHING write are outside it; 0acd9f2 N2):
       | phase (s)            | Py cold | Py source-only | R cold | R source-only |
       | launch.network       |   0.9   |   0.7          |  0.4   |   0.5         |
       | launch.conf (helper) |   4.2   |   3.1          |  2.9   |   3.3         |
@@ -2569,6 +2570,19 @@ below are marked passed by this planning document.
       extracting the base's layers again (6.9 s for the largest) and the cached layer, and
       10.7 s exporting and pushing. Targets: a source-only republish under 30 s (R 57, Python
       47 today), a small first publish under 60 s (Python cold 79).
+      **Step b, done (this commit's part): fewer containers.** A bare `docker run --rm busybox
+      true` takes 3.2 s on this host, so each container avoided saves about that. One
+      privileged setup helper (network none, a fixed command; the two texts still travel as
+      environment values written with printf %s) writes squid.conf and buildkitd.toml, gives
+      the socket volume (and the output volume, `Request.output`, made by the launch now) to
+      the worker's uid, and makes the workspace with `mkfs.ext4 -E root_owner=2401:2401`: the
+      conf, quota, chown and outchown helpers are gone. The gateway and the worker then start
+      side by side (`inParallel`: returns only once both ended, whatever either did). The
+      disposal's cleanup helper prints the quota state after its work, so the check helper no
+      longer runs in dispose(); the containers are removed on parallel threads, the worker's
+      first. Measured through LauncherCli, three cycles each: launch 16.7-17.2 s -> 10.3-10.5 s
+      (setup 3.9, gateway and worker 4.1-4.3), dispose 11.6-11.9 s -> 7.7-8.5 s (containers 3.8,
+      the worker's kill bounding it; cleanup 3.2-3.9).
       **Pass:** the targets above met and measured per phase; the binary rows' isolation,
       source and token rows red under their mutants; T5's isolation probes rerun green,
       the bounds probe's mounts row among them, since the read-only base store is a new

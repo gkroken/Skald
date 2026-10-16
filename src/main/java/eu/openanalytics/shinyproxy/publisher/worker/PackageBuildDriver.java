@@ -245,8 +245,8 @@ public final class PackageBuildDriver {
         Path payload = Files.createTempDirectory("skald-package-");
         try {
             try {
-                launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(), config.egress()),
-                        clock);
+                launcher.launch(new Request(h.attemptId(), config.settings(), config.quotaMegabytes(), config.egress(),
+                        true), clock);
             } catch (IllegalStateException e) {
                 return new Failed("WORKER_LAUNCH", BuildKitDriver.detail(e.getMessage()));
             }

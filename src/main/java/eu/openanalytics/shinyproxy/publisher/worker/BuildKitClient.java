@@ -461,8 +461,8 @@ public final class BuildKitClient {
     }
 
     /**
-     * Creates the attempt's output volume and starts a local-output client; returns at once.
-     * The context must be staged. {@code registry} is the host the gateway allows; the
+     * Starts a local-output client; returns at once. The context must be staged, and the
+     * attempt launched with its output volume (Request.output). {@code registry} is the host the gateway allows; the
      * credential lets the worker pull the base from it and is the client's alone, as for a
      * push.
      */
@@ -470,7 +470,7 @@ public final class BuildKitClient {
         if (!REGISTRY.matcher(registry).matches() || credential == null) {
             throw new IllegalArgumentException("a local build needs the registry host and its credential");
         }
-        launcher.prepareOutput(h);
+        launcher.requireOutput(h);
         Map<String, String> labels = Map.of(DockerWorkerLauncher.ATTEMPT_LABEL, h.attemptId());
         HostConfig hc = HostConfig.builder()
                 .networkMode("none")

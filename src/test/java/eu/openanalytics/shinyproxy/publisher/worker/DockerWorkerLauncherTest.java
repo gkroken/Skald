@@ -221,16 +221,16 @@ public class DockerWorkerLauncherTest {
     @Test
     public void aHelperRemovalTheDaemonFailsOnceIsRetried() throws Exception {
         // e4306c6 review N2: a force-remove right after a helper's wait returned can be
-        // answered "is still running". The launch's first helper (conf) meets that once; the
+        // answered "is still running". The launch's first helper (setup) meets that once; the
         // removal is retried, so the launch goes on, and nothing is left.
         String id = attempt();
         java.util.concurrent.atomic.AtomicInteger failures = new java.util.concurrent.atomic.AtomicInteger(1);
         DockerClient flaky = (DockerClient) java.lang.reflect.Proxy.newProxyInstance(DockerClient.class.getClassLoader(),
                 new Class<?>[] {DockerClient.class}, (proxy, m, args) -> {
-                    if (m.getName().equals("removeContainer") && ("skald-helper-conf-" + id).equals(args[0])
+                    if (m.getName().equals("removeContainer") && ("skald-helper-setup-" + id).equals(args[0])
                             && failures.getAndDecrement() > 0) {
                         throw new org.mandas.docker.client.exceptions.DockerException(
-                                "simulated: container skald-helper-conf-" + id + " is still running");
+                                "simulated: container skald-helper-setup-" + id + " is still running");
                     }
                     try {
                         return m.invoke(docker, args);
@@ -242,7 +242,7 @@ public class DockerWorkerLauncherTest {
                 Images.of(WORKER, GATEWAY));
         Handle h = onFlaky.launch(request(id));
         try {
-            // Decremented on every removal of the conf helper: -1 is exactly two calls, the
+            // Decremented on every removal of the setup helper: -1 is exactly two calls, the
             // one that failed and its retry.
             assertEquals(-1, failures.get(), "the removal failed once and was retried once");
             assertTrue(docker.inspectContainer(h.worker()).state().running());
@@ -464,6 +464,83 @@ public class DockerWorkerLauncherTest {
                 "the device is attached before disposal: " + before);
         assertEquals(List.of(), launcher.dispose(h));
         assertEquals(List.of(), launcher.leftovers(h));
+    }
+
+    /** The uid owning a volume's root, read by a throwaway helper. */
+    private static String owner(String volume) throws Exception {
+        String c = docker.createContainer(org.mandas.docker.client.messages.ContainerConfig.builder()
+                .image(Images.HELPER).cmd("stat", "-c", "%u", "/v")
+                .hostConfig(HostConfig.builder().networkMode("none").binds(volume + ":/v:ro").build()).build()).id();
+        try {
+            docker.startContainer(c);
+            assertEquals(0L, docker.waitContainer(c).statusCode());
+            return docker.logs(c, org.mandas.docker.client.DockerClient.LogsParam.stdout()).readFully().strip();
+        } finally {
+            docker.removeContainer(c);
+        }
+    }
+
+    @Test
+    public void theWorkspaceIsTheWorkersFromMkfsAndAnOutputVolumeIsMadeOnlyWhenAsked() throws Exception {
+        // T7b, the fixed cost: no chown helper (mkfs sets the root's owner) and no output helper
+        // (the setup helper gives the output volume to the worker when the request asks).
+        String id = attempt();
+        Handle h = launcher.launch(request(id));
+        try {
+            assertEquals(DockerWorkerLauncher.WORKER_UID, owner(h.workspaceVolume()));
+            IllegalStateException none = assertThrows(IllegalStateException.class, () -> launcher.requireOutput(h));
+            assertTrue(none.getMessage().contains("without an output volume"), none.getMessage());
+        } finally {
+            assertEquals(List.of(), launcher.dispose(h));
+        }
+        String out = attempt();
+        Request r = request(out);
+        Handle ho = launcher.launch(new Request(out, r.settings(), r.quotaMegabytes(), r.egress(), true));
+        try {
+            launcher.requireOutput(ho);
+            assertEquals(DockerWorkerLauncher.WORKER_UID, owner(ho.outputVolume()));
+        } finally {
+            assertEquals(List.of(), launcher.dispose(ho));
+        }
+    }
+
+    @Test
+    public void anOutputVolumeThatIsNotTheLaunchsIsRefused() throws Exception {
+        // A local-output client binds the output volume by name; one the launch did not make
+        // (another attempt's label, or none) is never exported into.
+        String id = attempt();
+        Handle h = DockerWorkerLauncher.handle(id);
+        for (Map<String, String> labels : List.of(Map.of(DockerWorkerLauncher.ATTEMPT_LABEL, attempt()), Map.<String, String>of())) {
+            docker.createVolume(Volume.builder().name(h.outputVolume()).labels(labels).build());
+            try {
+                IllegalStateException e = assertThrows(IllegalStateException.class, () -> launcher.requireOutput(h));
+                assertTrue(e.getMessage().contains("is not this attempt's"), e.getMessage());
+            } finally {
+                docker.removeVolume(h.outputVolume());
+            }
+        }
+    }
+
+    @Test
+    public void aDeviceTheCleanupCannotDetachIsReportedByTheCleanupsOwnCheck() throws Exception {
+        // dispose() no longer runs a second helper to check the quota: the cleanup reports it.
+        // A container that is not the attempt's holds the workspace mounted, so its device
+        // stays attached (and its volume in use); disposal must say so, not report clean.
+        String id = attempt();
+        Handle h = launcher.launch(request(id));
+        String holder = docker.createContainer(org.mandas.docker.client.messages.ContainerConfig.builder()
+                .image(Images.HELPER).cmd("sleep", "600")
+                .hostConfig(HostConfig.builder().networkMode("none").binds(h.workspaceVolume() + ":/w").build())
+                .build()).id();
+        try {
+            docker.startContainer(holder);
+            List<String> left = launcher.dispose(h);
+            assertTrue(left.stream().anyMatch(l -> l.startsWith("quota /sys/block/loop")),
+                    "the attached device is reported: " + left);
+        } finally {
+            docker.removeContainer(holder, org.mandas.docker.client.DockerClient.RemoveContainerParam.forceKill());
+            assertEquals(List.of(), launcher.dispose(h));
+        }
     }
 
     @Test

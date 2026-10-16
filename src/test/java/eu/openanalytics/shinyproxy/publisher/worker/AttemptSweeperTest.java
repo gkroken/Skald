@@ -225,7 +225,7 @@ public class AttemptSweeperTest {
     @Test
     public void aLateDaemonCallOfAFinishedAttemptLeavesNothingBehind() throws Exception {
         // 2fc53d9-F1, the reviewer's reproduction. The build has finished (CANCELLED, say)
-        // while its work thread is still inside a daemon call: here the launch's config
+        // while its work thread is still inside a daemon call: here the launch's setup
         // helper create, held. A sweep disposes of the attempt meanwhile. The call then goes
         // through and binds the conf and sock volumes the sweep removed, so the daemon
         // re-creates them UNLABELLED; the launch fails on the missing network and its work
@@ -233,7 +233,7 @@ public class AttemptSweeperTest {
         // unlabelled volumes, reported clean, and no later sweep could find them.
         String id = buildId();
         Handle h = DockerWorkerLauncher.handle(id);
-        String held = "skald-helper-conf-" + id;
+        String held = "skald-helper-setup-" + id;
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         DockerClient holding = (DockerClient) Proxy.newProxyInstance(DockerClient.class.getClassLoader(),

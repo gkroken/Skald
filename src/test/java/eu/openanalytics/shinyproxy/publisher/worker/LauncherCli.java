@@ -71,14 +71,18 @@ public final class LauncherCli {
                     WorkerProfile.load("runc-rootless"), Images.of(one(opts, "worker"), one(opts, "gateway")));
             switch (args[0]) {
                 case "launch" -> {
+                    PhaseClock clock = new PhaseClock();
                     Handle h = launcher.launch(new Request(one(opts, "attempt"), Settings.defaults(),
                             Integer.parseInt(one(opts, "quota-mb")),
                             new Egress(all(opts, "outer-network"), one(opts, "registry"), all(opts, "repo"),
-                                    all(opts, "private-mirror"), all(opts, "dns"), all(opts, "add-host"))));
+                                    all(opts, "private-mirror"), all(opts, "dns"), all(opts, "add-host"))), clock);
+                    System.err.println("phases: " + clock.summary());
                     System.out.println(json.writeValueAsString(h));
                 }
                 case "dispose" -> {
-                    List<String> left = launcher.dispose(DockerWorkerLauncher.handle(one(opts, "attempt")));
+                    PhaseClock clock = new PhaseClock();
+                    List<String> left = launcher.dispose(DockerWorkerLauncher.handle(one(opts, "attempt")), clock);
+                    System.err.println("phases: " + clock.summary());
                     System.out.println(json.writeValueAsString(left));
                     if (!left.isEmpty()) {
                         System.exit(1);
