@@ -518,7 +518,6 @@ public final class BuildKitDriver implements BuildDriver {
         }
     }
 
-    /** The build's base reference by digest, from its prepared inputs, or null. */
     /**
      * The base's blobs, mounted into the repositories the build pushes to, so the push sends
      * only the build's own layers (3d18996-F1). Never fails the build: whatever is not mounted,
@@ -540,6 +539,7 @@ public final class BuildKitDriver implements BuildDriver {
         }
     }
 
+    /** The build's base reference by digest, from its prepared inputs, or null. */
     static String baseOf(Prepared prepared) {
         Object base = prepared.inputs().get("base");
         Object ref = base instanceof Map<?, ?> m ? m.get("reference") : null;

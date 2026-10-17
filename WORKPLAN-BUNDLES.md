@@ -2650,6 +2650,18 @@ below are marked passed by this planning document.
       on an idle host) and the loop's release (13 s) dominate the rest. That is host
       contention under the queue's parallelism, and a pool of 1 per R base is mostly empty
       at that rate; it costs queue throughput only, which no user waits on.
+      **Re-closed (2026-10-18, 14fd2e4; 3d18996-F1).** The third target, an R first publish
+      whose packages all have binaries, was measured only as a restore ratio and took 138 s:
+      every first push uploaded the whole base again, to the image's repository and to its
+      cache's. The platform now mounts the base's blobs into both before the build
+      (BlobMounter, about 1 s). The probe's row "first publish, binaries" (C, start to
+      publishing) is 50.6 s, the reviewer's rerun 52.2 s, against 60 s. Its condition is a
+      settled host (user, 2026-10-17): before C the probe waits, at most 15 min, until both
+      pool groups are warm, no other build or helper runs and the 1-minute load average is
+      under 2, and the row fails if the host never settles. Without that condition the same
+      code took 86.9 s (no wait) and 102.6 s (right after the 40-package drain): a first
+      publish that lands while the package queue drains takes well over a minute on this
+      host. T7c's capacity-bounded pool is where that case belongs.
       **Carried on:** the security review T7b requires before binaries are enabled in any
       deployment (integrity then rests on forge and the uploader); the HTTP re-open endpoint
       (waits for the user's sign-off on its API shape); the release notes' note that
