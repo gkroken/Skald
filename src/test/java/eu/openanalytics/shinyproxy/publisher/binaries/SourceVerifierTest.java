@@ -24,6 +24,7 @@ package eu.openanalytics.shinyproxy.publisher.binaries;
 
 import com.sun.net.httpserver.HttpServer;
 import eu.openanalytics.shinyproxy.publisher.build.CoordinatorSettings;
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -61,7 +62,7 @@ public class SourceVerifierTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static final String KEY = "noble-x86_64/4.6";
     private static JdbcTemplate jdbc;

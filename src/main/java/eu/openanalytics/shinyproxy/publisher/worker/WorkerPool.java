@@ -100,6 +100,13 @@ public final class WorkerPool {
         public boolean warm() {
             return pools.stream().allMatch(WorkerPool::warm);
         }
+
+        /** Every pool's ready entries (for probes waiting for a quiet host). */
+        java.util.Set<String> readyEntries() {
+            java.util.Set<String> out = new java.util.HashSet<>();
+            pools.forEach(p -> p.ready().values().forEach(out::addAll));
+            return out;
+        }
     }
 
     static final Duration MARGIN = Duration.ofMinutes(5);

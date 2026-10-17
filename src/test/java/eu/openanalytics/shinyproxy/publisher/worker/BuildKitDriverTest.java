@@ -246,6 +246,41 @@ public class BuildKitDriverTest {
                 TestRegistry.CRED, POLL, Duration.ofSeconds(30), LOG_LIMITS), pool, disposer);
     }
 
+    /**
+     * 3d18996-F1: the base's blobs are mounted into the push's repository before the build, and
+     * a mount the registry refuses (here: a wrong credential) is logged and the build goes on.
+     */
+    @Test
+    @Timeout(value = 20, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void theBaseIsMountedBeforeThePushAndARefusedMountStillBuilds(@TempDir Path dir) throws Exception {
+        WorkerPool pool = pool();
+        try {
+            for (BuildKitClient.Credential cred : List.of(TestRegistry.CRED,
+                    new BuildKitClient.Credential(TestRegistry.CRED.username(), "wrong"))) {
+                pool.tick();
+                Claimed c = claimed();
+                BlobMounter mounter = new BlobMounter(java.net.URI.create("http://localhost:" + registry.port),
+                        registry.name, "amd64", cred);
+                Outcome outcome = pooledDriver(docker, pooledSource(dir, "RUN [\"true\"]\n"), pool)
+                        .withBlobMounter(mounter).run(c, () -> false);
+                assertInstanceOf(Built.class, outcome, outcome.toString());
+                List<String> lines = records(c).stream().map(x -> x.path("t").asText())
+                        .filter(l -> l.contains("base layers")).toList();
+                assertEquals(1, lines.size(), lines.toString());
+                if (cred == TestRegistry.CRED) {
+                    assertTrue(lines.get(0).matches("\\[skald\\] base layers linked into the push's repositories: [1-9][0-9]*"),
+                            lines.get(0));
+                } else {
+                    assertTrue(lines.get(0).startsWith("[skald] base layers not linked, the push uploads them: ")
+                            && lines.get(0).contains("401"), lines.get(0));
+                }
+                assertNothingLeft(c);
+            }
+        } finally {
+            pool.stop();
+        }
+    }
+
     @Test
     @Timeout(value = 20, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
     public void aPooledBuildRecordsItsEntryAndLeavesNothingOfIt(@TempDir Path dir) throws Exception {

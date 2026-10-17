@@ -231,7 +231,10 @@ public class WorkerConfig {
                 logWriter,
                 new BuildKitDriver.Config(Settings.defaults(), quotaMegabytes, egress,
                         new Credential(registryUsername, registryPassword), poll, settle, HeadTailLog.Limits.defaults()),
-                pool, skaldDisposer);
+                pool, skaldDisposer)
+                // 3d18996-F1: the base's blobs mounted, not uploaded again by every first push.
+                .withBlobMounter(new BlobMounter(URI.create(registryApi), registry, architecture,
+                        new Credential(registryUsername, registryPassword)));
         if (pool != null) {
             // Only now: every startup check passed, so no worker is launched for a refused start.
             skaldWorkerPools.start(pool);

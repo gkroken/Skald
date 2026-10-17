@@ -31,6 +31,7 @@ import eu.openanalytics.shinyproxy.publisher.build.BuildAdmission;
 import eu.openanalytics.shinyproxy.publisher.build.BuildsConfig;
 import eu.openanalytics.shinyproxy.publisher.bundle.BundleLimitsConfig;
 import eu.openanalytics.shinyproxy.publisher.db.DataSourceConfig;
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import eu.openanalytics.shinyproxy.publisher.storage.BuildLogWriter;
 import eu.openanalytics.shinyproxy.publisher.storage.LogFinal;
 import eu.openanalytics.shinyproxy.publisher.storage.ObjectKeys;
@@ -41,6 +42,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.mandas.docker.client.DockerClient;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;
 import org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration;
@@ -63,6 +65,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -100,7 +103,7 @@ public class T7bProbeTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-            new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+            TestPostgres.create();
     private static TestObjectStore objects;
     private static Path workspace;
     private static final ObjectNode RESULTS = JSON.createObjectNode();
@@ -235,6 +238,42 @@ public class T7bProbeTest {
     }
 
     /** The build's row, its log written beside results.json, and its restore step's seconds. */
+    /**
+     * Waits, at most 15 minutes, until every pool (the apps' and the packages') is warm,
+     * nothing else of a build runs (no attempt container but the pools' ready entries, no
+     * helper) and the host has settled: a 1-minute load average under 2 (user, 2026-10-17: C's
+     * target is a first publish on a server that is not busy; right after the drain, the
+     * daemon's and the disk's work outlives every container). Returns the seconds waited, or
+     * -1 if the host never got quiet.
+     */
+    private static double quiet(ApplicationContext ctx) throws Exception {
+        long start = System.nanoTime();
+        List<WorkerPool.Group> pools = List.copyOf(ctx.getBeansOfType(WorkerPool.Group.class).values());
+        DockerClient docker = ctx.getBean("skaldWorkerDocker", DockerClient.class);
+        while (System.nanoTime() - start < Duration.ofMinutes(15).toNanos()) {
+            if (pools.stream().allMatch(WorkerPool.Group::warm)) {
+                Set<String> ready = new java.util.HashSet<>();
+                pools.forEach(g -> ready.addAll(g.readyEntries()));
+                boolean busy = docker.listContainers(DockerClient.ListContainersParam.allContainers()).stream()
+                        .anyMatch(k -> {
+                            String attempt = k.labels() == null ? null : k.labels().get(DockerWorkerLauncher.ATTEMPT_LABEL);
+                            return (attempt != null && !ready.contains(attempt)) || (k.names() != null
+                                    && k.names().stream().anyMatch(n -> n.startsWith("/skald-helper-")));
+                        });
+                if (!busy && loadAverage() < 2) {
+                    return (System.nanoTime() - start) / 1e9;
+                }
+            }
+            Thread.sleep(2000);
+        }
+        return -1;
+    }
+
+    /** The host's 1-minute load average (Maven runs in a container, which shares the host's kernel). */
+    private static double loadAverage() throws Exception {
+        return Double.parseDouble(Files.readString(Path.of("/proc/loadavg")).split(" ")[0]);
+    }
+
     private static ObjectNode record(ApplicationContext ctx, String name, Map<String, Object> row) throws Exception {
         ObjectNode r = ((ObjectNode) RESULTS.withObject("/builds")).putObject(name);
         r.put("state", (String) row.get("state")).put("error_code", (String) row.get("error_code"))
@@ -386,9 +425,12 @@ public class T7bProbeTest {
         RESULTS.set("changes_after_reopen", JSON.valueToTree(jdbc.queryForMap("SELECT state, refusal_code,"
                 + " refusal_detail FROM skald.binary_build WHERE id = ?", changes)));
 
-        // C: A's lock (plus one package, for the cache) with the binaries present.
+        // C: A's lock (plus one package, for the cache) with the binaries present, measured as
+        // a first publish on a running server: the drain ends when the rows do, while the last
+        // package attempts are still being disposed of and the pools refill (3d18996-F1).
+        double quiet = quiet(ctx);
         Map<String, Object> c = build(ctx, "C", payload("C", C_EXTRA, false), true);
-        record(ctx, "C", c);
+        record(ctx, "C", c).put("quiet_wait_seconds", quiet);
 
         // D: the registration names another image: the plain mirror, with the reason.
         String registration = forge("GET", "api/v1/cran/platforms/" + KEY, null);

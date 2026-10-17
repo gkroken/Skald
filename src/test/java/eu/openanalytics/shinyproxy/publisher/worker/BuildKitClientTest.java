@@ -109,6 +109,9 @@ public class BuildKitClientTest {
         assertEquals("type=registry,ref=" + ref + ",mode=min,ignore-error=true", args.get(e + 1));
         assertFalse(BuildKitClient.buildctl(new Push("registry", "content/abc", BUILD, CRED), PROXY).contains("--import-cache"),
                 "no cache, no cache arguments");
+        // 3d18996-F1: the base is mounted into every repository the build pushes blobs to.
+        assertEquals(List.of("content/abc", "skald/cache/" + content), push.repositories());
+        assertEquals(List.of("content/abc"), new Push("registry", "content/abc", BUILD, CRED).repositories());
         for (String bad : List.of("AB".repeat(32), "ab".repeat(31), "ab".repeat(32) + "a", "ab".repeat(31) + ",x",
                 "")) {
             assertThrows(IllegalArgumentException.class, () -> new BuildKitClient.Cache(content, bad), bad);

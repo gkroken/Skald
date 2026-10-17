@@ -26,6 +26,7 @@ import com.sun.net.httpserver.HttpServer;
 import eu.openanalytics.shinyproxy.publisher.binaries.BinaryBuildQueue.BuildClaim;
 import eu.openanalytics.shinyproxy.publisher.binaries.BinaryBuildQueue.BuiltDependency;
 import eu.openanalytics.shinyproxy.publisher.build.CoordinatorSettings;
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import eu.openanalytics.shinyproxy.publisher.recipe.BaseCatalog;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -62,7 +63,7 @@ public class BinaryUploaderTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static final String KEY = "noble-x86_64/4.6";
     private static final String TOKEN = "forge_uploader_test_token";

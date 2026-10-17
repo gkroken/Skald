@@ -57,10 +57,10 @@ import java.util.regex.Pattern;
  */
 public final class PublishVerifier implements BuildRunner.Publishing {
 
-    private static final Pattern IMAGE = Pattern.compile(
+    static final Pattern IMAGE = Pattern.compile(
             "([a-z0-9.-]+:5000)/([a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*)"
                     + "@(sha256:[0-9a-f]{64})");
-    private static final String ACCEPT = String.join(", ",
+    static final String ACCEPT = String.join(", ",
             "application/vnd.oci.image.index.v1+json", "application/vnd.oci.image.manifest.v1+json",
             "application/vnd.docker.distribution.manifest.list.v2+json",
             "application/vnd.docker.distribution.manifest.v2+json");

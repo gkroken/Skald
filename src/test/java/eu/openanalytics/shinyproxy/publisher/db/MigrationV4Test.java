@@ -46,7 +46,7 @@ public class MigrationV4Test {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static final String KEY = "noble-x86_64/4.6";
     private static final String SHA = "a".repeat(64);

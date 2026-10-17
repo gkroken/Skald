@@ -22,6 +22,7 @@
  */
 package eu.openanalytics.shinyproxy.publisher.build;
 
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -56,7 +57,7 @@ public class ContentDeletionTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static JdbcTemplate jdbc;
     private static TransactionTemplate tx;

@@ -164,7 +164,17 @@ public final class BuildKitClient {
 
         /** The cache reference, or null when the push has no cache. */
         String cacheRef() {
-            return cache == null ? null : registryAddress() + "/skald/cache/" + cache.scope() + ":" + cache.key();
+            return cache == null ? null : registryAddress() + "/" + cacheRepository() + ":" + cache.key();
+        }
+
+        /** The cache's repository, or null when the push has no cache. */
+        String cacheRepository() {
+            return cache == null ? null : "skald/cache/" + cache.scope();
+        }
+
+        /** Every repository the build pushes blobs to: the image's, then the cache's. */
+        List<String> repositories() {
+            return cache == null ? List.of(repository) : List.of(repository, cacheRepository());
         }
 
         /** The reference the attempt reports: by digest, never by tag. */

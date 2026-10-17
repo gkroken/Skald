@@ -29,6 +29,7 @@ import eu.openanalytics.shinyproxy.publisher.binaries.BinaryBuildQueue.SourceCla
 import eu.openanalytics.shinyproxy.publisher.build.BuildsConfig;
 import eu.openanalytics.shinyproxy.publisher.build.CoordinatorSettings;
 import eu.openanalytics.shinyproxy.publisher.build.Fenced;
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -71,7 +72,7 @@ public class BinaryBuildQueueTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static final String KEY = "noble-x86_64/4.6";
     private static final String SHA = "a".repeat(64);

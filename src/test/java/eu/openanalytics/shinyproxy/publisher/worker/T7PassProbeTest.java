@@ -33,6 +33,7 @@ import eu.openanalytics.shinyproxy.publisher.bundle.BundleExtractor;
 import eu.openanalytics.shinyproxy.publisher.bundle.BundleLimitsConfig;
 import eu.openanalytics.shinyproxy.publisher.bundle.ExtractionLimits;
 import eu.openanalytics.shinyproxy.publisher.db.DataSourceConfig;
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import eu.openanalytics.shinyproxy.publisher.storage.BuildLogWriter;
 import eu.openanalytics.shinyproxy.publisher.storage.BundleReceipt;
 import eu.openanalytics.shinyproxy.publisher.storage.BundleWriter;
@@ -103,7 +104,7 @@ public class T7PassProbeTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-            new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+            TestPostgres.create();
     private static TestObjectStore objects;
     private static Path workspace;
     private static final ArrayNode RESULTS = JSON.createArrayNode();
@@ -531,6 +532,13 @@ public class T7PassProbeTest {
                 assertTrue(prov.path("worker").path("images").path("worker").path("id").asText().startsWith("sha256:"));
                 assertEquals("BUILT", r.path("log_final").path("outcome").asText(), r.toString());
                 assertTrue(r.path("log_final").path("complete").asBoolean(), r.toString());
+                // 3d18996-F1: the base's blobs were mounted into the image's and the cache's
+                // repositories, every one of them, so the push sent only the build's layers.
+                String text = decoded(OUT.resolve(r.path("log_file").asText()));
+                assertTrue(java.util.regex.Pattern.compile(
+                                "\\[skald\\] base layers linked into the push's repositories: [1-9][0-9]*\n").matcher(text).find(),
+                        "every base blob mounted before the push: " + text.lines()
+                                .filter(l -> l.contains("base layers")).toList());
                 if (app == R) {
                     // The restore asked forge's binary tree for the base's own release (T7b).
                     assertTrue(decoded(OUT.resolve(r.path("log_file").asText()))

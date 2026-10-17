@@ -28,6 +28,7 @@ import eu.openanalytics.containerproxy.service.ProxyAccessControlService;
 import eu.openanalytics.containerproxy.service.ProxyService;
 import eu.openanalytics.containerproxy.test.helpers.ShinyProxyClient;
 import eu.openanalytics.shinyproxy.ShinyProxySpecProvider;
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import okhttp3.MediaType;
 import okhttp3.Request;
 import okhttp3.RequestBody;
@@ -75,7 +76,7 @@ public class VersionResolvabilityTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static ConfigurableApplicationContext app;
     private static JdbcTemplate jdbc;

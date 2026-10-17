@@ -150,6 +150,8 @@ public final class BuildKitDriver implements BuildDriver {
     private final WorkerPool pool;
     /** Disposes of a settled attempt after run() returns, or null: run() disposes itself. */
     private final Disposer disposer;
+    /** Mounts the base's blobs into the push's repositories before the build, or null: the push uploads them. */
+    private volatile BlobMounter mounter;
     /** The last attempt's disposal on the disposer, so a test can wait for it. */
     volatile java.util.concurrent.Future<?> lastDisposal;
     /** The last attempt's work thread, so a test can wait for its own disposal. */
@@ -185,6 +187,12 @@ public final class BuildKitDriver implements BuildDriver {
         this.source = source;
         this.logs = logs;
         this.config = config;
+    }
+
+    /** With {@code mounter}, the base's blobs are mounted into the push's repositories before each build (3d18996-F1). */
+    public BuildKitDriver withBlobMounter(BlobMounter mounter) {
+        this.mounter = mounter;
+        return this;
     }
 
     /** The attempt id the launcher names every object by: the build id's 32 hex digits. */
@@ -457,6 +465,8 @@ public final class BuildKitDriver implements BuildDriver {
                 if (aborted.get()) {
                     return new Stopped();
                 }
+                mountBase(base, push, buildLog);
+                clock.lap("mount");
                 buildLog.line("[skald] building", false);
                 client.start(eff, push);
                 clock.lap("client.start");
@@ -509,6 +519,27 @@ public final class BuildKitDriver implements BuildDriver {
     }
 
     /** The build's base reference by digest, from its prepared inputs, or null. */
+    /**
+     * The base's blobs, mounted into the repositories the build pushes to, so the push sends
+     * only the build's own layers (3d18996-F1). Never fails the build: whatever is not mounted,
+     * the push uploads, as it did before.
+     */
+    private void mountBase(String base, Push push, HeadTailLog buildLog) throws InterruptedException {
+        BlobMounter m = mounter;
+        if (m == null || base == null) {
+            return;
+        }
+        try {
+            BlobMounter.Result r = m.mount(base, push.repositories());
+            buildLog.line("[skald] base layers linked into the push's repositories: " + r.mounted()
+                    + (r.notMounted() == 0 ? "" : ", " + r.notMounted() + " left for the push to upload"), false);
+        } catch (InterruptedException e) {
+            throw e;
+        } catch (Exception e) {
+            buildLog.line("[skald] base layers not linked, the push uploads them: " + detail(e.getMessage()), false);
+        }
+    }
+
     static String baseOf(Prepared prepared) {
         Object base = prepared.inputs().get("base");
         Object ref = base instanceof Map<?, ?> m ? m.get("reference") : null;

@@ -33,6 +33,7 @@ import eu.openanalytics.shinyproxy.publisher.binaries.ForgePlatforms;
 import eu.openanalytics.shinyproxy.publisher.binaries.ForgeSettings;
 import eu.openanalytics.shinyproxy.publisher.binaries.SourceSettings;
 import eu.openanalytics.shinyproxy.publisher.build.CoordinatorSettings;
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import eu.openanalytics.shinyproxy.publisher.recipe.BaseCatalog;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -75,7 +76,7 @@ public class PackageBuildLoopTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static final String KEY = "noble-x86_64/4.6";
     private static final String IMAGE_ID = "sha256:" + "a".repeat(64);

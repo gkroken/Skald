@@ -26,6 +26,7 @@ import eu.openanalytics.containerproxy.ContainerProxyApplication;
 import eu.openanalytics.containerproxy.model.spec.ProxySpec;
 import eu.openanalytics.containerproxy.service.ProxyAccessControlService;
 import eu.openanalytics.shinyproxy.ShinyProxySpecProvider;
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
@@ -66,7 +67,7 @@ public class ContentAccessControlTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static ConfigurableApplicationContext app;
     private static JdbcTemplate jdbc;

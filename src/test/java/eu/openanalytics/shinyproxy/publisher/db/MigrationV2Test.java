@@ -56,7 +56,7 @@ public class MigrationV2Test {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     @BeforeAll
     public static void beforeAll() {

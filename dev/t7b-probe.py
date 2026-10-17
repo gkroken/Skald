@@ -411,6 +411,14 @@ def judge(r, admin):
     a, c = builds.get("A", {}).get("restore_seconds", -1), builds.get("C", {}).get("restore_seconds", -1)
     record("restore with binaries", 0 < c < a, "A (cold, source) %.0fs; C (binaries) %.0fs; %.1fx" % (
         a, c, a / c if c > 0 else 0))
+    # T7b's third target, by the user's measure ("a publish should take about a minute",
+    # 2026-10-10): C is an R first publish whose packages all have binaries (3d18996-F1).
+    total = float(builds.get("C", {}).get("seconds") or -1)
+    # C is measured on a quiet host: the wait returns -1 if it never got quiet in 15 min.
+    quiet = float(builds.get("C", {}).get("quiet_wait_seconds", -1))
+    record("first publish, binaries", 0 < total <= 60 and quiet >= 0,
+           "C %.1fs from start to publishing (target: 60s); restore %.0fs; waited %.0fs for a quiet host"
+           % (total, c, quiet))
     d = builds.get("D", {})
     deps = ((d.get("provenance") or {}).get("dependencies") or {})
     record("registration changed", d.get("state") == "PUBLISHING"

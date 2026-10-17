@@ -22,6 +22,7 @@
  */
 package eu.openanalytics.shinyproxy.publisher.build;
 
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import eu.openanalytics.shinyproxy.publisher.registry.VersionAllocator;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -61,7 +62,7 @@ public class BuildFinalizationTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static JdbcTemplate jdbc;
     private static final String DIGEST = "registry:5000/c@sha256:" + "c".repeat(64);

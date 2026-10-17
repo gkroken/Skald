@@ -25,6 +25,7 @@ package eu.openanalytics.shinyproxy.publisher.admin;
 import eu.openanalytics.containerproxy.ContainerProxyApplication;
 import eu.openanalytics.containerproxy.test.helpers.ShinyProxyClient;
 import eu.openanalytics.shinyproxy.ShinyProxySpecProvider;
+import eu.openanalytics.shinyproxy.publisher.db.TestPostgres;
 import eu.openanalytics.shinyproxy.publisher.registry.ContentPath;
 import eu.openanalytics.shinyproxy.publisher.registry.ContentSpecRepository;
 import okhttp3.MediaType;
@@ -74,7 +75,7 @@ public class ContentAdminControllerTest {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static ConfigurableApplicationContext app;
     private static JdbcTemplate jdbc;

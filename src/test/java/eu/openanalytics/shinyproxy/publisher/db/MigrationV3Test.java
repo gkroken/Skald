@@ -46,7 +46,7 @@ public class MigrationV3Test {
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
-        new PostgreSQLContainer<>("postgres:16").withDatabaseName("skald");
+        TestPostgres.create();
 
     private static final String IMAGE = "'registry:5000/x@sha256:' || repeat('b', 64)";
 
