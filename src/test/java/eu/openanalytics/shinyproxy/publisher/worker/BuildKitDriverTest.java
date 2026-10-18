@@ -834,6 +834,34 @@ public class BuildKitDriverTest {
     }
 
     @Test
+    @Timeout(value = 15, unit = TimeUnit.MINUTES, threadMode = Timeout.ThreadMode.SEPARATE_THREAD)
+    public void aClientStalledDuringTheBuildStillPushes(@TempDir Path dir) throws Exception {
+        // 91908cd N2: BuildKit 0.33 drops a session after two missed 15 s health checks, and
+        // the push needs one. A 45 s pause of the client during a RUN misses them the same way.
+        AtomicInteger released = new AtomicInteger();
+        java.util.concurrent.atomic.AtomicBoolean paused = new java.util.concurrent.atomic.AtomicBoolean();
+        Claimed c = claimed();
+        Handle h = handle(c);
+        Thread staller = whenClientRuns(h, () -> {
+            try {
+                Thread.sleep(15_000);
+                docker.pauseContainer(h.client());
+                paused.set(true);
+                Thread.sleep(45_000);
+                docker.unpauseContainer(h.client());
+            } catch (Exception e) {
+                // reported by the assertions
+            }
+        });
+        Outcome outcome = driver(Settings.defaults(), source(dir, "RUN [\"sleep\", \"90\"]\n", released))
+                .run(c, () -> false);
+        staller.join(120_000);
+        assertTrue(paused.get(), "the client was paused during the RUN");
+        assertInstanceOf(Built.class, outcome, outcome.toString());
+        assertNothingLeft(c);
+    }
+
+    @Test
     public void aFailingStepIsABuildFailureWithItsLastLine(@TempDir Path dir) throws Exception {
         AtomicInteger released = new AtomicInteger();
         Claimed c = claimed();

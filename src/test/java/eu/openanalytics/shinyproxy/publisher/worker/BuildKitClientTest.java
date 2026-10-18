@@ -120,6 +120,29 @@ public class BuildKitClientTest {
     }
 
     @Test
+    public void theClientsFirstRunHasEveryInputAndNoOutput() {
+        // 91908cd N2: buildctl runs first without its outputs, then with them; the count the
+        // command starts with is where the outputs begin.
+        UUID content = UUID.fromString("00000000-0000-0000-0000-0000000000cc");
+        for (Push push : List.of(new Push("registry", "content/abc", BUILD, CRED),
+                new Push("registry", "content/abc", BUILD, CRED, new BuildKitClient.Cache(content, "ab".repeat(32))))) {
+            List<String> command = BuildKitClient.clientCommand(push, PROXY);
+            List<String> args = BuildKitClient.buildctl(push, PROXY);
+            assertEquals(args, command.subList(1, command.size()));
+            List<String> first = args.subList(0, Integer.parseInt(command.get(0)));
+            List<String> outputs = args.subList(first.size(), args.size());
+            assertEquals("--output", outputs.get(0));
+            for (String output : List.of("--output", "--metadata-file", "--export-cache")) {
+                assertFalse(first.contains(output), output + " is not in the first run: " + first);
+            }
+            for (String input : List.of("--opt", "--local", "--frontend")) {
+                assertFalse(outputs.contains(input), input + " is not after the outputs: " + outputs);
+            }
+            assertEquals(push.cache() != null, first.contains("--import-cache"), "the first run imports the cache");
+        }
+    }
+
+    @Test
     public void theCredentialIsNeverPrintedAndOnlyTheClientConfigCarriesIt() {
         Push push = new Push("registry", "abc", BUILD, CRED);
         assertFalse(CRED.toString().contains("s3cret"));

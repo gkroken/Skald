@@ -464,12 +464,33 @@ public final class BuildKitClient {
     /**
      * The client's entrypoint: a shell that writes the credential and then runs its
      * arguments, so buildctl's argv ({@link #buildctl}) never passes through the shell's
-     * parser.
+     * parser. Its first argument is how many of the rest come before the outputs
+     * ({@link #clientCommand}): buildctl runs first with only those, building with no output,
+     * then with all of them, the same solve as a cache hit that pushes, exports the cache and
+     * writes the metadata. Only the outputs need the client's session, and BuildKit 0.33 drops
+     * a session after two missed 15 s health checks, so a long build on a busy host would
+     * otherwise reach its push with none (as package builds did, 91908cd). The first run's
+     * argv is cut from the list in a subshell, never re-parsed.
      */
     static final List<String> CLIENT_ENTRYPOINT = List.of("sh", "-c",
             "umask 077 && mkdir /tmp/cfg && printf %s \"$SKALD_DOCKER_CONFIG\" > /tmp/cfg/config.json"
-                    + " && unset SKALD_DOCKER_CONFIG && DOCKER_CONFIG=/tmp/cfg \"$@\" && cat " + METADATA,
+                    + " && unset SKALD_DOCKER_CONFIG && k=$1 && shift"
+                    + " && (i=0; for a; do [ $i -lt $k ] && set -- \"$@\" \"$a\"; i=$((i+1)); done;"
+                    + " shift $i; DOCKER_CONFIG=/tmp/cfg \"$@\")"
+                    + " && DOCKER_CONFIG=/tmp/cfg \"$@\" && cat " + METADATA,
             "sh");
+
+    /** The client's command: the count of {@link #buildctl}'s arguments before its outputs, then them. */
+    static List<String> clientCommand(Push push, String proxy) {
+        List<String> args = buildctl(push, proxy);
+        int outputs = args.indexOf("--output");
+        if (outputs < 0) {
+            throw new IllegalStateException("buildctl's arguments name no output");
+        }
+        List<String> command = new java.util.ArrayList<>(List.of(String.valueOf(outputs)));
+        command.addAll(args);
+        return List.copyOf(command);
+    }
 
     /**
      * BuildKit's SLSA provenance attestation, attached to every pushed image: an attestation
@@ -528,14 +549,18 @@ public final class BuildKitClient {
                 "--local", "context=" + CONTEXT_MOUNT + "/ctx", "--local", "dockerfile=" + CONTEXT_MOUNT + "/df",
                 "--opt", PROVENANCE_ATTESTATION));
         args.addAll(proxyArgs(proxy));
+        // A missing cache is a cold build; a cache that cannot be exported is not a build
+        // failure (ignore-error). mode=min: the dependency layers are layers of the image.
+        // The import comes before the outputs, so the first, output-less run uses it too.
+        if (push.cache() != null) {
+            args.addAll(List.of("--import-cache", "type=registry,ref=" + push.cacheRef()));
+        }
         args.addAll(List.of(
                 "--output", "type=image,name=" + push.name() + ",push=true",
                 "--metadata-file", METADATA));
         if (push.cache() != null) {
-            // A missing cache is a cold build; a cache that cannot be exported is not a build
-            // failure (ignore-error). mode=min: the dependency layers are layers of the image.
-            args.addAll(List.of("--import-cache", "type=registry,ref=" + push.cacheRef(),
-                    "--export-cache", "type=registry,ref=" + push.cacheRef() + ",mode=min,ignore-error=true"));
+            args.addAll(List.of("--export-cache",
+                    "type=registry,ref=" + push.cacheRef() + ",mode=min,ignore-error=true"));
         }
         return List.copyOf(args);
     }
@@ -683,7 +708,7 @@ public final class BuildKitClient {
         docker.createContainer(ContainerConfig.builder().image(images.worker())
                 .user(DockerWorkerLauncher.WORKER_UID + ":" + DockerWorkerLauncher.WORKER_UID)
                 .entrypoint(CLIENT_ENTRYPOINT)
-                .cmd(buildctl(push, launcher.gatewayProxy(h)))
+                .cmd(clientCommand(push, launcher.gatewayProxy(h)))
                 .env("SKALD_DOCKER_CONFIG=" + dockerConfig(push))
                 .labels(labels).hostConfig(hc).build(), h.client());
         docker.startContainer(h.client());
