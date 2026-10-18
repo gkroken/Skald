@@ -72,7 +72,7 @@ public class BundleContextSourceTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String PY_ID = "python-shiny-3.13.16-amd64-r1";
     private static final String PY_REF = "skald-registry:5000/skald/base/" + PY_ID + "@sha256:" + "b".repeat(64);
-    private static final String R_ID = "r-shiny-4.6.1-amd64-r1";
+    private static final String R_ID = "r-shiny-4.6.1-amd64-r2";
     private static final String R_REF = "skald-registry:5000/skald/base/" + R_ID + "@sha256:" + "c".repeat(64);
     private static final Mirrors MIRRORS = new Mirrors(URI.create("http://forge:8080/repository/cran-public/"),
             URI.create("http://forge:8080/repository/pypi-public/simple/"));

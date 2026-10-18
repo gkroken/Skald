@@ -61,7 +61,7 @@ public class BinaryEnqueuerTest {
         TestPostgres.create();
 
     private static final String KEY = "noble-x86_64/4.6";
-    private static final String R_ID = "r-shiny-4.6.1-amd64-r1";
+    private static final String R_ID = "r-shiny-4.6.1-amd64-r2";
     private static final String IMAGE_ID = "sha256:" + "a".repeat(64);
     private static JdbcTemplate jdbc;
     private static HttpServer server;

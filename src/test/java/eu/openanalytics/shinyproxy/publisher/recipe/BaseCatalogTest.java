@@ -46,7 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class BaseCatalogTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String R = "r-shiny-4.6.1-amd64-r1";
+    private static final String R = "r-shiny-4.6.1-amd64-r2";
     private static final String PY = "python-shiny-3.13.16-amd64-r1";
     private static final String REG = "skald-registry:5000";
 
@@ -203,13 +203,13 @@ public class BaseCatalogTest {
     @Test
     public void theNewestRecipeRevisionIsChosen() throws Exception {
         ObjectNode cat = (ObjectNode) JSON.readTree(catalog());
-        ObjectNode r2 = ((ObjectNode) cat.get("bases").get(0)).deepCopy();
-        r2.put("id", "r-shiny-4.6.1-amd64-r2").put("recipe_revision", 2);
-        ((com.fasterxml.jackson.databind.node.ArrayNode) cat.get("bases")).add(r2);
+        ObjectNode r3 = ((ObjectNode) cat.get("bases").get(0)).deepCopy();
+        r3.put("id", "r-shiny-4.6.1-amd64-r3").put("recipe_revision", 3);
+        ((com.fasterxml.jackson.databind.node.ArrayNode) cat.get("bases")).add(r3);
         byte[] c = bytes(cat);
         ObjectNode p = published(c);
-        ((ObjectNode) p.get("bases")).put("r-shiny-4.6.1-amd64-r2", ref("r-shiny-4.6.1-amd64-r2", 'd'));
-        assertEquals(ref("r-shiny-4.6.1-amd64-r2", 'd'),
+        ((ObjectNode) p.get("bases")).put("r-shiny-4.6.1-amd64-r3", ref("r-shiny-4.6.1-amd64-r3", 'd'));
+        assertEquals(ref("r-shiny-4.6.1-amd64-r3", 'd'),
                 BaseCatalog.load(c, bytes(p)).resolve("shiny", "r", "4.6.1", "amd64").orElseThrow().reference());
     }
 

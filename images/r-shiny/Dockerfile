@@ -23,15 +23,25 @@ ARG RENV_SHA256=c6dd55e6ad50e846bb91e2d2ced99b32c08a110dc9f5337cb7ea29749f049c5f
 # with an Rprofile that sets no repository at all.
 RUN printf 'options(download.file.method = "libcurl")\n' > /usr/local/lib/R/etc/Rprofile.site
 
-# The system libraries the shiny dependency tree compiles against: fs needs libuv's headers,
-# httpuv zlib's, and both find them through pkg-config. Found by restoring shiny through forge
-# on this base, where fs and httpuv failed to configure without them. System packages are the
-# administrator's, installed here, never by an upload (Q3(4)). They come from Ubuntu's archive,
-# whose signed Release files apt verifies; versions are not pinned, because the archive drops
-# superseded versions and a pin would only make the base unbuildable later -- the catalog
-# records the NAMES, and bases-probe checks each is installed in the built image.
+# The system libraries CRAN packages compile against. Revision 1 had only what the shiny tree
+# needs (fs: libuv's headers, httpuv: zlib's, both through pkg-config). Revision 2 (user,
+# 2026-10-18) adds what common apps need, found by publishing a real one (leaflet, plotly,
+# duckdb, DT): curl and openssl's headers (curl, openssl, httr, s2), libxml2 (xml2), png, jpeg
+# and tiff (png, jpeg, tiff, raster output), xz to unpack sources shipped as .tar.xz
+# (duckdb), fontconfig, freetype, harfbuzz and fribidi (systemfonts, textshaping, ragg), ICU
+# (stringi without its bundled copy), cmake (packages that build vendored C++), and the
+# geospatial stack leaflet alone pulls in through terra: GDAL, GEOS, PROJ, SQLite, udunits
+# (terra, sf, s2, units). Headers ship with the runtime libraries they belong to, so the same
+# base serves the build's restore and the running app. System packages are the
+# administrator's, installed here, never by an upload (Q3(4)). They come from Ubuntu's
+# archive, whose signed Release files apt verifies; versions are not pinned, because the
+# archive drops superseded versions and a pin would only make the base unbuildable later --
+# the catalog records the NAMES, and bases-probe checks each is installed in the built image.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libuv1-dev pkg-config zlib1g-dev \
+ && apt-get install -y --no-install-recommends cmake libcurl4-openssl-dev libfontconfig1-dev \
+      libfreetype-dev libfribidi-dev libgdal-dev libgeos-dev libharfbuzz-dev libicu-dev \
+      libjpeg-dev libpng-dev libproj-dev libsqlite3-dev libssl-dev libtiff-dev \
+      libudunits2-dev libuv1-dev libxml2-dev pkg-config xz-utils zlib1g-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # renv at an EXACT version, from the mirror's current tree or its Archive, verified against

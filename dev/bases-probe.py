@@ -311,8 +311,9 @@ def self_test():
             "repos": "@CRAN@", "agent": "R (4.6.1 x86_64-pc-linux-gnu x86_64 linux-gnu)",
             "r_platform": "x86_64-pc-linux-gnu",
             "r_recommended": " ".join("%s=%s" % kv for kv in r["r_recommended"].items()),
-            "dpkg": "base-files=13 libuv1-dev=1 pkg-config=1 zlib1g-dev=1 libpkgconf3=1"
-                    " libuv1t64=1 pkgconf=1 pkgconf-bin=1"}
+            # Every package the catalog says the base adds, as an installed image would report it.
+            "dpkg": " ".join(["base-files=13"] + ["%s=1" % p for p in sorted(
+                set(r["system_packages"]) | set(r["system_packages_pulled_in"]))])}
     upstream = {"dpkg": "base-files=13"}
 
     def expect(label, judged, want):
@@ -341,7 +342,7 @@ def self_test():
     expect("a missing system package is caught", judge_live(r, dict(clean, dpkg=
            clean["dpkg"].replace(" zlib1g-dev=1", "")), upstream), False)
     expect("an unrecorded added package is caught (transitive surprise)", judge_live(
-           r, dict(clean, dpkg=clean["dpkg"] + " libssl-dev=3"), upstream), False)
+           r, dict(clean, dpkg=clean["dpkg"] + " nginx-core=3"), upstream), False)
     expect("a recorded package the base does not add is caught", judge_live(
            r, clean, {"dpkg": "base-files=13 pkgconf=1"}), False)
     expect("the clean facts pass", judge_live(r, clean, upstream), True)
@@ -353,9 +354,9 @@ def self_test():
     expect("a Dockerfile/catalog renv hash mismatch is caught",
            judge_static(r, text.replace(r["package_manager_sha256"]["renv"], "0" * 64)), False)
     expect("a Dockerfile installing less than the catalog records is caught",
-           judge_static(r, text.replace(" libuv1-dev pkg-config", " pkg-config")), False)
+           judge_static(r, text.replace(" libuv1-dev", "")), False)
     expect("a Dockerfile installing more than the catalog records is caught",
-           judge_static(r, text.replace(" zlib1g-dev", " zlib1g-dev libcurl4-openssl-dev")),
+           judge_static(r, text.replace(" zlib1g-dev", " zlib1g-dev nginx-core")),
            False)
     run_line = "RUN apt-get update \\\n && apt-get install -y --no-install-recommends "
     for form in ("apt-get update && apt-get -y install libfoo", "apt install -y libbar",

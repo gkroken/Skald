@@ -143,7 +143,7 @@ public class PackageBuildLoopTest {
     }
 
     private static BaseCatalog.Entry base() {
-        return new BaseCatalog.Entry("r-shiny-4.6.1-amd64-r1", "shiny", "r", "4.6.1", "amd64", 1, "10001", "10001",
+        return new BaseCatalog.Entry("r-shiny-4.6.1-amd64-r2", "shiny", "r", "4.6.1", "amd64", 2, "10001", "10001",
             Map.of(), "noble", "x86_64-pc-linux-gnu", Map.of());
     }
 
