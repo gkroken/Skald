@@ -172,21 +172,31 @@ public final class PackageBuildLoop {
         BinaryBuildQueue.Holding holding = queue.hold(claim.lease());
         AtomicBoolean lost = new AtomicBoolean();
         long every = settings.renewEvery().toMillis();
-        ScheduledFuture<?> renewal = renewals.scheduleAtFixedRate(() -> {
-            try {
-                if (!queue.renew(claim.lease())) {
+        ScheduledFuture<?> renewal = null;
+        try {
+            renewal = renewals.scheduleAtFixedRate(() -> {
+                try {
+                    if (!queue.renew(claim.lease())) {
+                        lost.set(true);
+                    }
+                } catch (RuntimeException e) {
                     lost.set(true);
                 }
-            } catch (RuntimeException e) {
-                lost.set(true);
-            }
-        }, every, every, TimeUnit.MILLISECONDS);
-        try {
+            }, every, every, TimeUnit.MILLISECONDS);
             Optional<Platform> platform = platformFor(claim);
             if (platform.isEmpty()) {
                 return true;
             }
             PackageBuildDriver.Result result = platform.get().runner().run(claim, lost::get);
+            // One renewal before the first write (4219fc0 N1): a stall that ended as the
+            // sandbox finished leaves the lease expired until the next scheduled renewal,
+            // and the fenced write would spend the attempt on a good binary. Its answer is
+            // not needed: a lease that is no longer ours fences the write below anyway.
+            try {
+                queue.renew(claim.lease());
+            } catch (RuntimeException e) {
+                // the write's fence decides
+            }
             // A lease lost meanwhile needs no check here: every write below is fenced by the
             // lease (the upload's intent, recorded before the PUT, first), so it is refused as
             // Fenced and nothing reaches forge.
@@ -206,7 +216,9 @@ public final class PackageBuildLoop {
             log.warn("binary {} {}: no longer this holder's ({})", claim.pkg(), claim.version(), fenced.getMessage());
             return true;
         } finally {
-            renewal.cancel(false);
+            if (renewal != null) {
+                renewal.cancel(false);
+            }
             holding.close();
         }
     }

@@ -282,6 +282,19 @@ public class PackageBuildLoopTest {
     }
 
     @Test
+    public void aSandboxThatFinishesAsAStallEndsStillUploads() throws Exception {
+        // 4219fc0 N1: the lease expired during a stall and the sandbox returns before the next
+        // scheduled renewal (30 s away); the loop renews once before its first write.
+        BinaryBuildQueue q = queue(BinaryQueueSettings.DEFAULTS);
+        UUID id = queued(q);
+        loop(q, BinaryQueueSettings.DEFAULTS, (c, stop) -> {
+            jdbc.update("UPDATE skald.binary_build SET lease_expires_at = now() - interval '1 second' WHERE id = ?", id);
+            return built(c);
+        }).compileOnce();
+        assertEquals("UPLOADED", row(id).get("state"));
+    }
+
+    @Test
     public void aLostLeaseIsTheSandboxsStopSignalAndNothingIsWritten() throws Exception {
         BinaryBuildQueue q = queue(SHORT);
         UUID id = queued(q);

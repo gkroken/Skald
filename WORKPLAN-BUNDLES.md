@@ -2671,7 +2671,12 @@ below are marked passed by this planning document.
       deployment (integrity then rests on forge and the uploader); the HTTP re-open endpoint
       (waits for the user's sign-off on its API shape); the release notes' note that
       pool-size defaults to 1 (an idle worker, gateway, loop device and quota image per
-      published base, bc66e6f N3).
+      published base, bc66e6f N3); and two more for the release notes (2026-10-19): a package
+      that never builds can hold a compile slot for up to 6 h (180-minute deadline, two
+      attempts) before it is FAILED, blocking the other compiles at max-running 1
+      (d6fbcde N2), and a package holder that hangs inside its own process is recovered at
+      its deadline, not after its lease, since this process's reaper spares its live
+      holders (4219fc0 N2).
 
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus
