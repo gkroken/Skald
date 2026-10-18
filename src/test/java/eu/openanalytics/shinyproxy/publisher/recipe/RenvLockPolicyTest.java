@@ -105,7 +105,8 @@ public class RenvLockPolicyTest {
             expect(wrong, "Source " + source, Reason.NOT_FROM_REPOSITORY,
                     m -> pkg(m, "shiny").put("Source", source));
         }
-        for (String repository : List.of("RSPM", "P3M", "BioCsoft", "https://evil.invalid/cran")) {
+        for (String repository : List.of("BioCsoft", "BioCann", "R-Forge", "cran", "rspm", "CRAN ",
+                "https://evil.invalid/cran")) {
             expect(wrong, "Repository " + repository, Reason.NOT_FROM_REPOSITORY,
                     m -> pkg(m, "httpuv").put("Repository", repository));
         }
@@ -117,6 +118,21 @@ public class RenvLockPolicyTest {
                     m -> pkg(m, "later").put(field, "https://github.com/evil/later"));
         }
         assertEquals(List.of(), wrong);
+    }
+
+    @Test
+    public void aLockResolvedOnPositsCopyOfCranIsAcceptedAndRestoredFromTheMirror() throws IOException {
+        // How renv records a package installed from Posit's package manager: its DESCRIPTION
+        // says Repository: RSPM (user, 2026-10-18: publishers may use it, Skald does not).
+        for (String repository : List.of("RSPM", "P3M", "PPM")) {
+            ObjectNode m = (ObjectNode) JSON.readTree(fixture());
+            pkg(m, "httpuv").put("Repository", repository);
+            RenvLock lock = RenvLockPolicy.check(JSON.writeValueAsBytes(m), "4.6.1");
+            assertEquals(RenvLockPolicy.check(fixture(), "4.6.1"), lock, repository);
+            String text = new String(lock.render(URI.create("http://forge/repository/cran-public/")),
+                    StandardCharsets.UTF_8);
+            assertFalse(text.contains(repository), repository + " rendered: " + text);
+        }
     }
 
     @Test

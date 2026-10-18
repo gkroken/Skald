@@ -1950,6 +1950,9 @@ below are marked passed by this planning document.
       Package Manager -- R and Python packages resolve through forge (the user's own
       repository manager, github.com/gkroken/forge) in front of CRAN and PyPI, declared as a
       private mirror; cold R builds compile from source and warm ones hit decision 7's cache.
+      (Clarified 2026-10-18, user: "no Posit" means no Posit product in Skald's deployment. A
+      publisher's lock resolved on Posit's copy of CRAN, `Repository: RSPM`, is accepted and
+      restored from the mirror like any CRAN package.)
       User-experienced forge problems met on the way go to `code_review/forge-issues/`.
       **Part 1 (2026-10-02):** `images/catalog.json` with R 4.6.1 and Python 3.13.16 (T1 was to
       pin exact versions and never did; T7 pinned them), the reviewed Dockerfiles under

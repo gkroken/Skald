@@ -56,8 +56,12 @@ import java.util.regex.Pattern;
  *
  * <p><b>What is refused.</b> A package whose {@code Source} is not {@code Repository}
  * (GitHub, GitLab, Bitbucket, git, URL, Local, Bioconductor, ...), one whose
- * {@code Repository} is not {@code CRAN}, and any {@code Remote*} field, which is how renv
- * records where a non-repository package came from. Top-level sections other than {@code R}
+ * {@code Repository} is not CRAN, and any {@code Remote*} field, which is how renv
+ * records where a non-repository package came from. CRAN is {@code CRAN} or one of the names
+ * Posit's package manager writes for its copy of CRAN ({@code RSPM}, {@code P3M}, {@code PPM}):
+ * a publisher may have resolved the lock there (user, 2026-10-18: Skald itself uses no Posit
+ * product, publishers may), and every package is still restored from the server's own mirror,
+ * so the name only says which index the version was chosen from. Top-level sections other than {@code R}
  * and {@code Packages} ({@code Bioconductor}, {@code Python}) are refused, not skipped.
  *
  * <p><b>What is dropped.</b> renv 1.x copies a package's whole DESCRIPTION into its record
@@ -85,6 +89,8 @@ public final class RenvLockPolicy {
     private static final Pattern VERSION = Pattern.compile("[0-9]+(?:[.-][0-9]+)+");
     private static final Set<String> TOP_LEVEL = Set.of("R", "Packages");
     private static final Set<String> R_SECTION = Set.of("Version", "Repositories");
+    /** The Repository names that mean CRAN (see the class comment). */
+    static final Set<String> CRAN_REPOSITORIES = Set.of("CRAN", "RSPM", "P3M", "PPM");
 
     private static final ObjectMapper STRICT = strictMapper();
     private static final ObjectMapper RENDER = new ObjectMapper()
@@ -216,7 +222,7 @@ public final class RenvLockPolicy {
                     + BundleRejection.quote(source) + ": only CRAN packages are accepted");
         }
         String repository = text(record.get("Repository"), where + ".Repository");
-        if (!repository.equals("CRAN")) {
+        if (!CRAN_REPOSITORIES.contains(repository)) {
             throw new LockRejection(Reason.NOT_FROM_REPOSITORY, where + " comes from repository "
                     + BundleRejection.quote(repository) + ": only CRAN packages are accepted");
         }
