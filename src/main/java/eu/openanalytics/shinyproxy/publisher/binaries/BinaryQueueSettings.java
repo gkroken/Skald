@@ -29,9 +29,11 @@ import java.util.Map;
 import java.util.TreeSet;
 
 /**
- * The binary queue's timing and limits ({@code skald.builds.binaries.*}): a 60 s lease renewed
- * every 20 s, as for app builds; a 60-minute deadline, since one large package (arrow, duckdb)
- * can compile for half an hour on its own; ONE compile at a time beside the app builds; and
+ * The binary queue's timing and limits ({@code skald.builds.binaries.*}): a 300 s lease renewed
+ * every 30 s, as for app builds (see {@link eu.openanalytics.shinyproxy.publisher.build.CoordinatorSettings} for why a holder must survive a
+ * stalled host); a 180-minute deadline, since one large package compiles for a long time on its
+ * own (duckdb about two hours on a busy 2026 dev host); ONE compile at a time beside the app
+ * builds; and
  * two claims per phase before a row is FAILED, so a package that never builds stops costing
  * CPU and its apps keep restoring it from source.
  */
@@ -39,7 +41,7 @@ public record BinaryQueueSettings(Duration lease, Duration renewEvery, Duration 
                                   int maxRunning, int maxAttempts) {
 
     public static final BinaryQueueSettings DEFAULTS = new BinaryQueueSettings(
-            Duration.ofSeconds(60), Duration.ofSeconds(20), Duration.ofMinutes(60), 1, 2);
+            Duration.ofSeconds(300), Duration.ofSeconds(30), Duration.ofMinutes(180), 1, 2);
 
     public BinaryQueueSettings {
         if (lease.isNegative() || lease.isZero() || renewEvery.isNegative() || renewEvery.isZero()

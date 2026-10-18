@@ -30,15 +30,21 @@ import java.util.TreeSet;
 
 /**
  * The coordinator's timing and concurrency (WORKPLAN-BUNDLES.md T6, decisions 2 and 4 of
- * 2026-10-01): lease 60 s renewed every 20 s, one running build at a time, and the plan's
+ * 2026-10-01): lease 300 s renewed every 30 s, one running build at a time, and the plan's
  * 20-minute wall deadline. Configurable, positive only, with renewal well inside the lease --
  * a renewal interval at or above the lease would let every healthy build expire.
+ *
+ * <p>The lease was 60 s renewed every 20 s until 2026-10-18. On a busy host the whole JVM went
+ * unscheduled for up to 129 s at a time, and the reaper, starved with it, ran before the
+ * renewals and expired three healthy package compiles at once, duckdb twice. A holder now
+ * survives a stall of 270 s (the lease less one renewal interval); the cost is that an
+ * instance that really died holds its build that much longer before it is INTERRUPTED.
  */
 public record CoordinatorSettings(Duration lease, Duration renewEvery, Duration deadline,
                                   int maxRunning) {
 
     public static final CoordinatorSettings DEFAULTS = new CoordinatorSettings(
-            Duration.ofSeconds(60), Duration.ofSeconds(20), Duration.ofMinutes(20), 1);
+            Duration.ofSeconds(300), Duration.ofSeconds(30), Duration.ofMinutes(20), 1);
 
     public CoordinatorSettings {
         if (lease.isNegative() || lease.isZero() || renewEvery.isNegative() || renewEvery.isZero()

@@ -139,7 +139,8 @@ public class BuildCoordinatorTest {
         assertEquals("node-1", row.get("lease_owner"));
         double leaseLeft = ((Number) row.get("lease_left")).doubleValue();
         double deadlineLeft = ((Number) row.get("deadline_left")).doubleValue();
-        assertTrue(leaseLeft > 50 && leaseLeft <= 60, "lease " + leaseLeft);
+        long lease = ONE.lease().toSeconds();
+        assertTrue(leaseLeft > lease - 10 && leaseLeft <= lease, "lease " + leaseLeft);
         assertTrue(deadlineLeft > 1190 && deadlineLeft <= 1200, "deadline " + deadlineLeft);
         assertEquals(Map.of("r", "1"), claimed.recipe());
     }
@@ -919,11 +920,19 @@ public class BuildCoordinatorTest {
         assertEquals(Duration.ofSeconds(30), CoordinatorSettings.fromOverrides(
             Map.of("lease-seconds", "30", "renew_every_seconds", "10")).lease());
         assertThrows(IllegalArgumentException.class,
-            () -> CoordinatorSettings.fromOverrides(Map.of("renew_every_seconds", "40")),
+            () -> CoordinatorSettings.fromOverrides(Map.of("renew_every_seconds", "160")),
             "renewal slower than half the lease");
         assertThrows(IllegalArgumentException.class,
             () -> CoordinatorSettings.fromOverrides(Map.of("max_running", "0")));
         assertThrows(IllegalArgumentException.class,
             () -> CoordinatorSettings.fromOverrides(Map.of("lease_secs", "30")), "a typo");
+    }
+
+    @Test
+    public void theDefaultLeaseSurvivesAStalledHost() {
+        // A busy host stalled the whole JVM for 129 s and its reaper expired healthy holders
+        // before they could renew (2026-10-18). The defaults must outlast twice that.
+        assertTrue(CoordinatorSettings.DEFAULTS.lease().minus(CoordinatorSettings.DEFAULTS.renewEvery())
+            .compareTo(Duration.ofMinutes(4)) >= 0, CoordinatorSettings.DEFAULTS.toString());
     }
 }

@@ -1912,7 +1912,9 @@ below are marked passed by this planning document.
          fencing generation per build, which stays correct with several instances.
       4. A lease that expires makes the build INTERRUPTED. No automatic retry: retries are
          new attempts a user starts (decision 4). Lease 60 s, renewed every 20 s,
-         configurable.
+         configurable. (Amended 2026-10-18, user: 300 s renewed every 30 s, for app builds
+         and package compiles alike, after a stalled host let the reaper expire healthy
+         compiles; package deadline 180 min, for duckdb.)
       5. Idempotency keys are kept for the life of the build row (unique per content), never
          expired, so a late HTTP retry behaves exactly like an early one.
 

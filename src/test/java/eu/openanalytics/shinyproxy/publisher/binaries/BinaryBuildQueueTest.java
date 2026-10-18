@@ -965,6 +965,15 @@ public class BinaryBuildQueueTest {
     }
 
     @Test
+    public void theDefaultsOutlastAStalledHostAndALargeCompile() {
+        // 2026-10-18: a 129 s stall of the whole JVM let the reaper expire healthy compiles,
+        // and duckdb compiles for about two hours on a busy host.
+        BinaryQueueSettings d = BinaryQueueSettings.DEFAULTS;
+        assertTrue(d.lease().minus(d.renewEvery()).compareTo(Duration.ofMinutes(4)) >= 0, d.toString());
+        assertTrue(d.deadline().compareTo(Duration.ofHours(3)) >= 0, d.toString());
+    }
+
+    @Test
     public void theApplicationBindsTheSettingsAndStopsOnATypo() {
         ApplicationContextRunner context = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(ConfigurationPropertiesAutoConfiguration.class))
