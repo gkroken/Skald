@@ -61,7 +61,12 @@ import java.util.regex.Pattern;
  * Posit's package manager writes for its copy of CRAN ({@code RSPM}, {@code P3M}, {@code PPM}):
  * a publisher may have resolved the lock there (user, 2026-10-18: Skald itself uses no Posit
  * product, publishers may), and every package is still restored from the server's own mirror,
- * so the name only says which index the version was chosen from. Top-level sections other than {@code R}
+ * so the name only says which index the version was chosen from. One consequence
+ * (cf2ff8a N1): an organisation's own package manager stamps RSPM on its internal packages
+ * too, and such a package is looked up by name and version on the server's CRAN mirror. It is
+ * usually absent there and the restore fails; if a public package of that name and version
+ * exists, the app gets the public one. The supported path for a private package is forge's
+ * hosted member, which shadows the public package of the same name in the group. Top-level sections other than {@code R}
  * and {@code Packages} ({@code Bioconductor}, {@code Python}) are refused, not skipped.
  *
  * <p><b>What is dropped.</b> renv 1.x copies a package's whole DESCRIPTION into its record
