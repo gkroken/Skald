@@ -365,6 +365,49 @@ public class PackageBuildDriverTest {
         assertNothingLeft(c);
     }
 
+    @Test
+    @Timeout(value = 15, unit = java.util.concurrent.TimeUnit.MINUTES)
+    public void aClientStalledDuringTheCompileStillExportsTheBinary() throws Exception {
+        // 2026-10-18: duckdb compiled for about 90 minutes on a stalled host, twice, and each
+        // time the export failed with "no active session": BuildKit 0.33 drops a session after
+        // two missed 15 s health checks, and only the export needs one. A 45 s pause of the
+        // client during the RUN misses those checks the same way.
+        byte[] prebuilt = installed("foo", "1.0");
+        byte[] source = "source".getBytes(StandardCharsets.UTF_8);
+        BuildClaim c = claim("foo", List.of(), source);
+        String clientName = DockerWorkerLauncher.handle(PackageBuildDriver.attemptId(c)).client();
+        java.util.concurrent.atomic.AtomicBoolean paused = new java.util.concurrent.atomic.AtomicBoolean();
+        Thread staller = new Thread(() -> {
+            try {
+                while (true) {
+                    try {
+                        if (docker.inspectContainer(clientName).state().running()) {
+                            break;
+                        }
+                    } catch (Exception e) {
+                        // not created yet
+                    }
+                    Thread.sleep(500);
+                }
+                Thread.sleep(15_000);
+                docker.pauseContainer(clientName);
+                paused.set(true);
+                Thread.sleep(45_000);
+                docker.unpauseContainer(clientName);
+            } catch (Exception e) {
+                // the assertions below report it
+            }
+        });
+        staller.start();
+        PackageBuildDriver.Result r = driver(handIn(source, Map.of(), Map.of()),
+            standIn(prebuilt, "sleep 90;", false, "binary.tar.gz")).run(c, () -> false);
+        staller.join(120_000);
+        assertTrue(paused.get(), "the client was paused during the RUN");
+        PackageBuildDriver.Built built = assertInstanceOf(PackageBuildDriver.Built.class, r, r.toString());
+        assertArrayEquals(prebuilt, built.binary());
+        assertNothingLeft(c);
+    }
+
     // ------------------------------------------------------------------ before any Docker call
 
     @Test

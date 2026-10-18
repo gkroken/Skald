@@ -558,24 +558,30 @@ public final class BuildKitClient {
 
     /**
      * The local-output client's entrypoint: the credential written as for a push (the worker
-     * pulls the base with it), then buildctl; no metadata is printed, since nothing is pushed.
+     * pulls the base with it), then buildctl twice; no metadata is printed, since nothing is
+     * pushed. The first solve builds with no output; the second is the same solve, a cache
+     * hit, exporting to {@link #OUTPUT_MOUNT}. Only an export needs the client's session, and
+     * BuildKit 0.33 drops a session after two missed 15 s health checks: a compile that runs
+     * for an hour on a busy host would otherwise reach its export with no session (duckdb,
+     * twice, 2026-10-18). The second solve starts a fresh one.
      */
     static final List<String> LOCAL_ENTRYPOINT = List.of("sh", "-c",
             "umask 077 && mkdir /tmp/cfg && printf %s \"$SKALD_DOCKER_CONFIG\" > /tmp/cfg/config.json"
-                    + " && unset SKALD_DOCKER_CONFIG && DOCKER_CONFIG=/tmp/cfg \"$@\"",
+                    + " && unset SKALD_DOCKER_CONFIG && DOCKER_CONFIG=/tmp/cfg \"$@\""
+                    + " && DOCKER_CONFIG=/tmp/cfg \"$@\" --output type=local,dest=" + OUTPUT_MOUNT,
             "sh");
 
     /**
-     * buildctl for a build whose result is FILES, not an image (a package's binary): the
-     * final stage's files exported to {@link #OUTPUT_MOUNT}. No proxy build arguments (the
-     * recipe's RUN steps have no network; the daemon pulls the base through the gateway
-     * itself), no attestation (no image), no cache.
+     * buildctl for a build whose result is FILES, not an image (a package's binary), without
+     * its output: {@link #LOCAL_ENTRYPOINT} runs it, then runs it again exporting the final
+     * stage's files to {@link #OUTPUT_MOUNT}. No proxy build arguments (the recipe's RUN steps
+     * have no network; the daemon pulls the base through the gateway itself), no attestation
+     * (no image), no cache.
      */
     static List<String> buildctlLocal() {
         return List.of("buildctl", "--addr", DockerWorkerLauncher.SOCKET_ADDRESS,
                 "build", "--progress", "plain", "--frontend", "dockerfile.v0",
-                "--local", "context=" + CONTEXT_MOUNT + "/ctx", "--local", "dockerfile=" + CONTEXT_MOUNT + "/df",
-                "--output", "type=local,dest=" + OUTPUT_MOUNT);
+                "--local", "context=" + CONTEXT_MOUNT + "/ctx", "--local", "dockerfile=" + CONTEXT_MOUNT + "/df");
     }
 
     /**
