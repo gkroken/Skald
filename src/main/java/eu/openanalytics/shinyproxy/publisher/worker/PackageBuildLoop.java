@@ -168,6 +168,8 @@ public final class PackageBuildLoop {
             return false;
         }
         BuildClaim claim = claimed.get();
+        // Alive here until the finally: this process's reaper leaves the lease's expiry alone.
+        BinaryBuildQueue.Holding holding = queue.hold(claim.lease());
         AtomicBoolean lost = new AtomicBoolean();
         long every = settings.renewEvery().toMillis();
         ScheduledFuture<?> renewal = renewals.scheduleAtFixedRate(() -> {
@@ -205,6 +207,7 @@ public final class PackageBuildLoop {
             return true;
         } finally {
             renewal.cancel(false);
+            holding.close();
         }
     }
 

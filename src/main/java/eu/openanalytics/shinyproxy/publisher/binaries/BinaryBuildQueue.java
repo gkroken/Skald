@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -63,7 +64,12 @@ import java.util.regex.Pattern;
  *
  * <p>Every holder's write is one UPDATE fenced by row, generation, owner, state, an unexpired
  * lease and an unpassed deadline; zero rows means the row is no longer the caller's, and
- * {@link Fenced} is thrown.
+ * {@link Fenced} is thrown. The renewal alone does not require an unexpired lease: a lease
+ * nobody has reaped is still the holder's (the generation proves no one claimed the row
+ * since), so a holder whose process stalled past its expiry takes it back on its next renewal
+ * unless a reaper got there first. This process's reaper never does for a holder that is still
+ * alive here ({@link #hold}); another instance's reaper does, which is how a dead instance's
+ * rows are recovered (d6fbcde N1).
  */
 public final class BinaryBuildQueue {
 
@@ -126,12 +132,23 @@ public final class BinaryBuildQueue {
     private static final Pattern MD5 = Pattern.compile("[0-9a-f]{32}");
     private static final String FENCE = " WHERE id = ? AND lease_generation = ? AND lease_owner = ?"
             + " AND lease_expires_at > now() AND deadline_at > now()";
+    // The renewal's fence: FENCE without the expiry (see the class comment).
+    private static final String RENEW_FENCE = " WHERE id = ? AND lease_generation = ? AND lease_owner = ?"
+            + " AND deadline_at > now()";
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate tx;
     private final BinaryQueueSettings settings;
     private final CoordinatorSettings apps;
     private final ObjectMapper json = new ObjectMapper();
+    // The leases a live holder in this process holds, as "row:generation" (d6fbcde N1).
+    private final Set<String> held = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** A live holder's registration; closing it ends the holding. */
+    public interface Holding extends AutoCloseable {
+        @Override
+        void close();
+    }
 
     public BinaryBuildQueue(JdbcTemplate jdbc, BinaryQueueSettings settings, CoordinatorSettings apps) {
         this.jdbc = jdbc;
@@ -368,10 +385,26 @@ public final class BinaryBuildQueue {
         });
     }
 
-    /** Extends a live lease of either phase. False when it is no longer the caller's: stop. */
+    /**
+     * Registers a holder of {@code lease} that is alive in this process, until the holding is
+     * closed: {@link #reap} leaves its expiry alone, so a stall of this whole process cannot
+     * make its own reaper take the row from its own live holder (2026-10-18: a stalled host,
+     * the reaper ran before the renewals and expired three healthy compiles). Its deadline
+     * still applies.
+     */
+    public Holding hold(BinaryLease lease) {
+        String key = lease.rowId() + ":" + lease.generation();
+        held.add(key);
+        return () -> held.remove(key);
+    }
+
+    /**
+     * Extends the lease of either phase, expired or not, while no one has reaped it. False
+     * when it is no longer the caller's: stop.
+     */
     public boolean renew(BinaryLease lease) {
         return jdbc.update("UPDATE skald.binary_build SET lease_expires_at = now()"
-                + " + make_interval(secs => ?), updated_at = now()" + FENCE
+                + " + make_interval(secs => ?), updated_at = now()" + RENEW_FENCE
                 + " AND state IN ('VERIFYING', 'RUNNING')", settings.lease().toSeconds(),
                 lease.rowId(), lease.generation(), lease.owner()) == 1;
     }
@@ -619,8 +652,10 @@ public final class BinaryBuildQueue {
 
     /**
      * What a lost holder left: a row whose lease expired or whose deadline passed goes back to
-     * its phase's waiting state, or FAILED once its attempts are used up. Then the rows a
-     * dependency can no longer satisfy are refused. Idempotent; every instance may run it.
+     * its phase's waiting state, or FAILED once its attempts are used up. An expired lease a
+     * live holder in this process holds ({@link #hold}) is not lost and is left alone; its
+     * passed deadline is not. Then the rows a dependency can no longer satisfy are refused.
+     * Idempotent; every instance may run it.
      *
      * @return how many leased rows were settled
      */
@@ -630,8 +665,9 @@ public final class BinaryBuildQueue {
                     + " error_code = CASE WHEN deadline_at <= now() THEN 'DEADLINE_EXCEEDED'"
                     + "   ELSE 'LEASE_EXPIRED' END, error_detail = NULL"
                     + " WHERE state IN ('VERIFYING', 'RUNNING')"
-                    + " AND (lease_expires_at <= now() OR deadline_at <= now()) RETURNING id",
-                    UUID.class, settings.maxAttempts(), settings.maxAttempts());
+                    + " AND (deadline_at <= now() OR (lease_expires_at <= now()"
+                    + "   AND NOT (id::text || ':' || lease_generation) = ANY(?::text[]))) RETURNING id",
+                    UUID.class, settings.maxAttempts(), settings.maxAttempts(), held.toArray(String[]::new));
             for (UUID id : settled) {
                 audit("queue", "binary.reaped", id, Map.of());
             }

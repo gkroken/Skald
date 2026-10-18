@@ -510,16 +510,52 @@ public class BinaryBuildQueueTest {
     // ------------------------------------------------------------------ fencing
 
     @Test
-    public void anExpiredLeaseIsFenced() {
+    public void anExpiredLeaseIsFencedAndOnceReapedCannotBeRenewed() {
         BinaryBuildQueue q = queue();
         UUID a = verified(q, "aaa");
         BuildClaim c = q.claimBuild("b").orElseThrow();
         expire(a);
-        assertFalse(q.renew(c.lease()));
         assertThrows(Fenced.class, () -> q.intendUpload(c.lease(), SHA, PROVENANCE));
         assertThrows(Fenced.class, () -> q.uploaded(c.lease(), SHA));
         assertEquals("RUNNING", state(a));
         assertNull(row(a).get("binary_sha256"));
+        // No live holder here: the reaper takes it, and the late holder's renewal is refused.
+        assertEquals(1, q.reap());
+        assertEquals("QUEUED", state(a));
+        assertFalse(q.renew(c.lease()));
+    }
+
+    @Test
+    public void aStalledLiveHolderKeepsItsExpiredLeaseUntilItsDeadline() {
+        // d6fbcde N1: a stall of the whole process expires the lease, and this process's reaper
+        // may run before the holder's renewal. A holder alive here keeps the row; its renewal
+        // takes the lease back; its writes then succeed.
+        BinaryBuildQueue q = queue();
+        UUID a = verified(q, "aaa");
+        BuildClaim c = q.claimBuild("b").orElseThrow();
+        try (BinaryBuildQueue.Holding holding = q.hold(c.lease())) {
+            expire(a);
+            assertEquals(0, q.reap(), "a live holder's expired lease is not reaped");
+            assertEquals("RUNNING", state(a));
+            assertTrue(q.renew(c.lease()), "the holder takes its lease back");
+            q.intendUpload(c.lease(), SHA, PROVENANCE);
+            // Its deadline still applies.
+            jdbc.update("UPDATE skald.binary_build SET deadline_at = now() - interval '1 second' WHERE id = ?", a);
+            assertEquals(1, q.reap(), "a passed deadline is reaped, held or not");
+            assertFalse(q.renew(c.lease()));
+        }
+        // Another generation of the same row is not held by that holding.
+        BuildClaim d = q.claimBuild("b").orElseThrow();
+        try (BinaryBuildQueue.Holding stale = q.hold(new BinaryLease(d.rowId(), d.lease().generation() - 1, "b"))) {
+            expire(d.rowId());
+            assertEquals(1, q.reap(), "only the held generation is spared");
+        }
+        // A closed holding spares nothing.
+        verified(q, "eee");
+        BuildClaim f = q.claimBuild("b").orElseThrow();
+        q.hold(f.lease()).close();
+        expire(f.rowId());
+        assertEquals(1, q.reap());
     }
 
     @Test

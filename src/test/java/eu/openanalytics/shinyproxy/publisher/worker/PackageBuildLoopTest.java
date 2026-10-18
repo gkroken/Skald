@@ -262,6 +262,26 @@ public class PackageBuildLoopTest {
     }
 
     @Test
+    public void aCompileThisProcessHoldsSurvivesItsOwnReaperAfterAStall() throws Exception {
+        // d6fbcde N1: the whole process stalls past the lease, and its reaper runs before the
+        // renewal. The compile is alive here, so the row stays its own and the upload lands.
+        BinaryBuildQueue q = queue(BinaryQueueSettings.DEFAULTS);
+        UUID id = queued(q);
+        int[] reaped = {-1};
+        boolean[] renewed = {false};
+        loop(q, BinaryQueueSettings.DEFAULTS, (c, stop) -> {
+            jdbc.update("UPDATE skald.binary_build SET lease_expires_at = now() - interval '1 second' WHERE id = ?", id);
+            reaped[0] = q.reap();
+            // Then the renewal, late: it takes the lease back.
+            renewed[0] = q.renew(c.lease());
+            return built(c);
+        }).compileOnce();
+        assertEquals(0, reaped[0], "the reaper left the live compile's row alone");
+        assertTrue(renewed[0]);
+        assertEquals("UPLOADED", row(id).get("state"));
+    }
+
+    @Test
     public void aLostLeaseIsTheSandboxsStopSignalAndNothingIsWritten() throws Exception {
         BinaryBuildQueue q = queue(SHORT);
         UUID id = queued(q);

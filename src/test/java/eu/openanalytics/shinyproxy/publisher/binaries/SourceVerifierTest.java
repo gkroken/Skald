@@ -559,6 +559,38 @@ public class SourceVerifierTest {
     }
 
     @Test
+    public void aVerificationThisProcessHoldsSurvivesItsOwnReaperAfterAStall() {
+        // d6fbcde N1: the lease expires during the transfer and this process's reaper runs
+        // first; the verification is alive here, so its next renewal takes the lease back.
+        BinaryBuildQueue q = queue();
+        publish("aaa", "1.0", "");
+        UUID id = enqueue(q, "aaa", "1.0", Map.of());
+        // Renewals every 2 s: none lands between the expiry and the reap (milliseconds apart),
+        // and one lands in the 2.5 s after, before the source is recorded.
+        BinaryQueueSettings every2s = new BinaryQueueSettings(Duration.ofSeconds(60), Duration.ofSeconds(2),
+            Duration.ofMinutes(60), 1, 2);
+        int[] reaped = {-1};
+        SourceFetcher stalled = uri -> {
+            InputStream body = new HttpSourceFetcher(Duration.ofSeconds(5)).open(uri);
+            if (uri.getPath().endsWith(".tar.gz")) {
+                jdbc.update("UPDATE skald.binary_build SET lease_expires_at = now() - interval '1 second' WHERE id = ?", id);
+                reaped[0] = q.reap();
+                try {
+                    Thread.sleep(2500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return body;
+        };
+        SourceVerifier v = new SourceVerifier(q, stalled, new SourceSettings(repository, 1 << 20, 1 << 20, 1 << 24,
+            Duration.ofSeconds(5), Duration.ofMinutes(1), Duration.ofMinutes(5)), every2s);
+        assertEquals("QUEUED", v.verifyNext("v").orElseThrow().outcome());
+        assertEquals(0, reaped[0], "the reaper left the live verification's row alone");
+        assertEquals("QUEUED", row(id).get("state"));
+    }
+
+    @Test
     public void aLeaseLostDuringTheTransferRecordsNothing() {
         BinaryBuildQueue q = queue();
         publish("aaa", "1.0", "");
@@ -568,7 +600,10 @@ public class SourceVerifierTest {
         SourceFetcher expiring = uri -> {
             InputStream body = new HttpSourceFetcher(Duration.ofSeconds(5)).open(uri);
             if (uri.getPath().endsWith(".tar.gz")) {
-                jdbc.update("UPDATE skald.binary_build SET lease_expires_at = now() - interval '1 second' WHERE id = ?", id);
+                // Another instance reaped the row and claimed it: a new generation, its owner.
+                // (An expiry alone is not a loss while no one reaps it, d6fbcde N1.)
+                jdbc.update("UPDATE skald.binary_build SET lease_generation = lease_generation + 1,"
+                    + " lease_owner = 'other' WHERE id = ?", id);
             }
             return body;
         };
@@ -576,7 +611,8 @@ public class SourceVerifierTest {
             Duration.ofSeconds(5), Duration.ofMinutes(1), Duration.ofMinutes(5)), everyRead);
         assertEquals("FENCED", v.verifyNext("v").orElseThrow().outcome());
         Map<String, Object> r = row(id);
-        assertEquals("VERIFYING", r.get("state"), "left to the reaper");
+        assertEquals("VERIFYING", r.get("state"), "the other holder's");
+        assertEquals("other", r.get("lease_owner"));
         assertNull(r.get("source_sha256"));
     }
 

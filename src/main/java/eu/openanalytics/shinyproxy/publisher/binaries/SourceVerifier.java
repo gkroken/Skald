@@ -131,7 +131,8 @@ public final class SourceVerifier implements AutoCloseable {
         }
         BinaryBuildQueue.SourceClaim claim = claimed.get();
         String what = claim.pkg() + " " + claim.version() + " (" + claim.platformKey() + ")";
-        try {
+        // Alive here until the end: this process's reaper leaves the lease's expiry alone.
+        try (BinaryBuildQueue.Holding holding = queue.hold(claim.lease())) {
             Checked checked = check(claim);
             BinaryBuildQueue.Recorded recorded = queue.recordSource(claim.lease(), checked.read().sha256(),
                     checked.read().md5(), checked.kind(), checked.dependencies());
