@@ -2678,10 +2678,22 @@ below are marked passed by this planning document.
       ranges 31-153 s and 31-122 s. The gap to 50.6 s is the push to the local registry
       on this WSL host, whose spread a single C sample cannot resolve; the 60 s target is
       unchanged and the row stays red until a remeasure on a quieter host says otherwise.
-      The 40-package drain took 6758 s with no package lease lost (d6fbcde, 4219fc0) and
-      no "no active session" in any log (91908cd, 0a9386d); the run's four reaps are the
-      app builds A-D, each reaped INTERRUPTED one lease (now 300 s) after PUBLISHING, as
-      designed until T9. The host after the probe and after the A/B: nothing of the run's
+      The 40-package drain took 6758 s with no package lease lost (d6fbcde, 4219fc0); the
+      run's four reaps are the app builds A-D, each reaped INTERRUPTED one lease (now
+      300 s) after PUBLISHING, as designed until T9. The session was NOT always kept
+      (2b9902b-F1): jsonlite 2.0.0's attempt 2 failed after a 804.8 s build with
+      "failed to solve: DeadlineExceeded: no active session for val03nrits62l2cjmn94h294g:
+      context deadline exceeded", and magrittr 2.0.5's attempt 2, ending 4 s later after
+      432.8 s, with "failed to solve: Canceled: rpc error: code = Canceled desc = context
+      canceled" (2b9902b N1); both uploaded on attempt 3. Both builds spanned a stall of
+      the whole host: the 5-minute housekeeping sweep logged nothing from 01:03:21 to
+      01:13:31 (and from 00:46 to 00:57, 01:25 to 01:36), a pool entry's warm took 803.8 s,
+      and both attempts ended as it came back. The failure is kept only in the row's
+      error_detail, so no log showed it; which of the two solves lost the session is not
+      in the run's artefacts (package build logs go with the teardown). The probe now
+      judges a row "session kept" over every row snapshot's error_detail, the app builds
+      and every log, and lists each failed attempt (red on this run's results.json; green
+      with the rows' details removed). The host after the probe and after the A/B: nothing of the run's
       left, the A/B's test edits restored and checked by sha256.
       **Carried on:** the security review T7b requires before binaries are enabled in any
       deployment (integrity then rests on forge and the uploader); the HTTP re-open endpoint
@@ -2692,7 +2704,13 @@ below are marked passed by this planning document.
       attempts) before it is FAILED, blocking the other compiles at max-running 1
       (d6fbcde N2), and a package holder that hangs inside its own process is recovered at
       its deadline, not after its lease, since this process's reaper spares its live
-      holders (4219fc0 N2).
+      holders (4219fc0 N2). And an open exposure (2b9902b-F1): the two solves (91908cd,
+      0a9386d) keep the session through a long RUN with the client stalled, but a stall
+      of the whole host still lost a package attempt to "no active session", and one more
+      to "context canceled"; a package that loses both its attempts that way is FAILED
+      until it is re-opened. To establish before binaries are enabled: which solve, and
+      what in it, still needs the client's session (candidates: the context or Dockerfile
+      read lazily, the base's registry auth through the session, the export).
 
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus

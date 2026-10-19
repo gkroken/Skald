@@ -365,7 +365,37 @@ def judge_mutant(r, admin):
     sandbox_rows(admin)
 
 
+SESSION_LOST = "no active session"
+
+
+def session_kept(r):
+    """No build lost BuildKit's session (91908cd, 0a9386d). A package attempt's failure is kept
+    only in its row's error_detail, never in a log file, so every row snapshot is read as well
+    as the app builds' details and every log (2b9902b-F1). Each failed attempt is listed."""
+    lost, failed = [], []
+    for key in ("rows_after_drain", "rows_final", "remote_rows", "rows_added_by_D"):
+        for x in r.get(key, []) or []:
+            detail = x.get("error_detail") or ""
+            if not detail:
+                continue
+            what = "%s %s: %s" % (x.get("package"), x.get("version"), detail[:90])
+            if what not in failed:
+                failed.append(what)
+                if SESSION_LOST in detail:
+                    lost.append("%s %s" % (x.get("package"), x.get("version")))
+    for name, b in sorted((r.get("builds") or {}).items()):
+        if SESSION_LOST in json.dumps(b):
+            lost.append("build " + name)
+    for log in sorted(OUT.glob("*.log*")):
+        if SESSION_LOST in log.read_text(errors="replace"):
+            lost.append(log.name)
+    record("session kept", not lost,
+           ("no build lost its session" if not lost else "lost: " + ", ".join(lost))
+           + ("; failed attempts: " + " | ".join(failed) if failed else ""))
+
+
 def judge(r, admin):
+    session_kept(r)
     builds = r.get("builds", {})
     for name in ("A", "B", "C"):
         b = builds.get(name, {})
