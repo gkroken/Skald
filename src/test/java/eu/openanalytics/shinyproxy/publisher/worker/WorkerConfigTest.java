@@ -129,8 +129,28 @@ public class WorkerConfigTest {
         assertTrue(only(badApi).contains("is not http(s)://host[:port]"), only(badApi));
 
         WorkerConfig tinyQuota = valid(dir);
-        tinyQuota.setQuotaMegabytes(512);
-        assertTrue(only(tinyQuota).contains("below 1024"), only(tinyQuota));
+        tinyQuota.setQuota("512MB");
+        assertTrue(only(tinyQuota).contains("quota 512MB is below 1GB"), only(tinyQuota));
+    }
+
+    @Test
+    public void aBareDurationIsSecondsAndTheQuotaIsASizeWithItsUnit() {
+        // T7c 0a: under skald.* a bare duration is seconds, not Spring's milliseconds, and a
+        // size always carries its unit (c0c7145 N1).
+        WorkerConfig c = bind(Map.of("skald.builds.worker.poll", "2", "skald.builds.worker.quota", "6GB"));
+        assertEquals(java.time.Duration.ofSeconds(2), c.poll());
+        assertEquals(6144, c.quotaMegabytes());
+        assertEquals(java.time.Duration.ofMillis(250), bind(Map.of("skald.builds.worker.poll", "250ms")).poll());
+        Exception e = org.junit.jupiter.api.Assertions.assertThrows(Exception.class,
+                () -> bind(Map.of("skald.builds.worker.quota", "8192")));
+        assertTrue(rootMessage(e).contains("'skald.builds.worker.quota' has no unit"), rootMessage(e));
+    }
+
+    private static WorkerConfig bind(Map<String, String> properties) {
+        return new org.springframework.boot.context.properties.bind.Binder(
+                new org.springframework.boot.context.properties.source.MapConfigurationPropertySource(properties))
+                .bind("skald.builds.worker", org.springframework.boot.context.properties.bind.Bindable
+                        .ofInstance(new WorkerConfig())).get();
     }
 
     private static String only(WorkerConfig c) {

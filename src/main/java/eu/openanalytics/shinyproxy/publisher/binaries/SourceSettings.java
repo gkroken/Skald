@@ -90,8 +90,8 @@ public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceB
     }
 
     /**
-     * The {@code source-} keys of {@code skald.builds.binaries}: sizes with a unit ("64MB"; a
-     * bare number is bytes), durations in whole seconds ("30s", "48h"; a bare number is seconds).
+     * The {@code source-} keys of {@code skald.builds.binaries}: sizes with their unit ("64MB"),
+     * durations in whole seconds ("30s", "48h"; a bare number is seconds).
      */
     public static final List<String> KEYS = List.of("source-repository", "source-max-index-size", "source-max-size",
             "source-max-expanded-size", "source-fetch-timeout", "source-transfer-deadline", "source-index-ttl",

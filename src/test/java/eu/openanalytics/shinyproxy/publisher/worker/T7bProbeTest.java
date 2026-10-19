@@ -150,7 +150,7 @@ public class T7bProbeTest {
                 "skald.builds.worker.published-bases=" + System.getProperty("skald.t7b.published-bases"),
                 "skald.builds.worker.workspace=" + workspace.toAbsolutePath(),
                 // The shared binaries (T7b): the trusted side reaches forge on the host.
-                "skald.builds.binaries-enabled=true",
+                "skald.builds.binaries.enabled=true",
                 "skald.builds.binaries.forge-url=" + FORGE,
                 "skald.builds.binaries.forge-token=" + System.getenv("SKALD_T7B_FORGE_TOKEN"),
                 "skald.builds.binaries.forge-registration-ttl=5s",

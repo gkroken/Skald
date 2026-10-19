@@ -25,6 +25,7 @@ package eu.openanalytics.shinyproxy.publisher.build;
 import eu.openanalytics.shinyproxy.publisher.binaries.BinaryQueueSettings;
 import eu.openanalytics.shinyproxy.publisher.binaries.ForgeSettings;
 import eu.openanalytics.shinyproxy.publisher.binaries.SourceSettings;
+import eu.openanalytics.shinyproxy.publisher.config.Settings;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -100,7 +101,16 @@ public class BuildsConfig {
     /** Validated at startup; the queue itself is wired with the builder (T7b step 2e). */
     @Bean
     public BinaryQueueSettings binaryQueueSettings() {
-        return BinaryQueueSettings.fromOverrides(partition(k -> !SourceSettings.owns(k) && !ForgeSettings.owns(k)));
+        Map<String, String> switched = partition(BuildsConfig::isEnabledKey);
+        // skald.builds.binaries.enabled switches BinariesConfig on (its condition reads it);
+        // checked here so a value other than true or false stops startup, not reads as off.
+        switched.forEach((k, v) -> Settings.bool("skald.builds.binaries.enabled", v));
+        return BinaryQueueSettings.fromOverrides(partition(k -> !isEnabledKey(k) && !SourceSettings.owns(k)
+                && !ForgeSettings.owns(k)));
+    }
+
+    private static boolean isEnabledKey(String key) {
+        return key != null && key.trim().equalsIgnoreCase("enabled");
     }
 
     /** The {@code skald.builds.binaries.forge-*} keys; the token is a secret, never logged. */

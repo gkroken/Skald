@@ -416,9 +416,11 @@ public class SourceReadersTest {
                 Map.of("source-repository", bad)), bad);
         }
         assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-max-siz", "1")));
-        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-max-size", "0")));
-        assertEquals(1234, SourceSettings.fromOverrides(Map.of("source-max-size", "1234")).maxSourceBytes(),
-            "a bare number is bytes");
+        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-max-size", "0B")));
+        assertEquals(1234, SourceSettings.fromOverrides(Map.of("source-max-size", "1234B")).maxSourceBytes());
+        IllegalArgumentException bare = assertThrows(IllegalArgumentException.class,
+            () -> SourceSettings.fromOverrides(Map.of("source-max-size", "64")), "a size carries its unit (c0c7145 N1)");
+        assertTrue(bare.getMessage().contains("'skald.builds.binaries.source-max-size' has no unit"), bare.getMessage());
         assertEquals(64L << 20, SourceSettings.fromOverrides(Map.of("source-max-index-size", "64MB")).maxIndexBytes());
         assertEquals(2L << 30, SourceSettings.fromOverrides(Map.of("source-max-expanded-size", "2GB"))
             .maxExpandedBytes());

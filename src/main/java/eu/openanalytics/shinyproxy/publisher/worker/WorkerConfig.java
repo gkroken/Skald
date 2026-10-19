@@ -43,6 +43,7 @@ import org.mandas.docker.client.builder.jersey.JerseyDockerClientBuilder;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.convert.DurationUnit;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -52,6 +53,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -104,21 +106,28 @@ public class WorkerConfig {
     private String workspace;
     private String architecture = "amd64";
     /**
-     * The workspace quota, MiB. 8 GiB: a cold R build holds the extracted base (about 1.5
+     * The workspace quota ({@code quota}, a size with its unit, such as 8GB). 8 GiB: a cold R build holds the extracted base (about 1.5
      * GiB for rocker/r-ver), BuildKit's snapshots of each step and the compiled library;
      * the 4 GiB the probes used is enough for the fixture apps and too tight for a real
      * dependency tree. T5 F6 carry (3) left the production number to this track.
      */
     private int quotaMegabytes = 8192;
+    // The durations: a bare number is seconds, as everywhere under skald.* (T7c 0a), not
+    // Spring's milliseconds.
+    @DurationUnit(ChronoUnit.SECONDS)
     private Duration poll = Duration.ofSeconds(1);
+    @DurationUnit(ChronoUnit.SECONDS)
     private Duration settle = Duration.ofSeconds(30);
+    @DurationUnit(ChronoUnit.SECONDS)
     private Duration idlePause = Duration.ofSeconds(2);
     /** How often the reconciliation sweep runs after its first run at startup. */
+    @DurationUnit(ChronoUnit.SECONDS)
     private Duration sweepPeriod = Duration.ofMinutes(10);
     /**
      * How long after a build finishes the sweep still leaves its attempt alone: its work
      * thread may outlive the driver's settle in a daemon call (2fc53d9-F1).
      */
+    @DurationUnit(ChronoUnit.SECONDS)
     private Duration sweepGrace = Duration.ofMinutes(15);
     /**
      * Ready workers per published base (T7b, the fixed cost): launched and warmed with the base
@@ -132,6 +141,7 @@ public class WorkerConfig {
      */
     private int poolSize = 1;
     /** How long a ready worker is kept before it is replaced by a fresh one. */
+    @DurationUnit(ChronoUnit.SECONDS)
     private Duration poolTtl = Duration.ofMinutes(30);
     private String bundleBucket = "skald-bundles";
     private String logBucket = "skald-logs";
@@ -220,7 +230,7 @@ public class WorkerConfig {
         Mirrors mirrors = new Mirrors(URI.create(cranMirror), URI.create(pypiMirror), cranLinuxBinaries);
         BundleContextSource source = new BundleContextSource(new BundleWriter(objects, bundleBucket), objects,
                 bundleBucket, limits, Path.of(workspace), catalog, mirrors, architecture)
-                // T7b: present only with skald.builds.binaries-enabled (BinariesConfig).
+                // T7b: present only with skald.builds.binaries.enabled (BinariesConfig).
                 .withBinaryHook(binaryHook.getIfAvailable());
         BuildLogWriter logWriter = new BuildLogWriter(objects, logBucket);
         Egress egress = new Egress(outerNetworks, registry, repos, privateMirrors, List.of(), List.of());
@@ -359,7 +369,7 @@ public class WorkerConfig {
             problems.add("registry-api " + registryApi + " is not http(s)://host[:port]");
         }
         if (quotaMegabytes < 1024) {
-            problems.add("quota-megabytes " + quotaMegabytes + " is below 1024: no base fits");
+            problems.add("quota " + quotaMegabytes + "MB is below 1GB: no base fits");
         }
         return problems;
     }
@@ -435,8 +445,10 @@ public class WorkerConfig {
         this.architecture = architecture;
     }
 
-    public void setQuotaMegabytes(int quotaMegabytes) {
-        this.quotaMegabytes = quotaMegabytes;
+    /** {@code skald.builds.worker.quota}: a size with its unit, kept in whole megabytes. */
+    public void setQuota(String quota) {
+        this.quotaMegabytes = Math.toIntExact(eu.openanalytics.shinyproxy.publisher.config.Settings
+                .size("skald.builds.worker.quota", quota).toMegabytes());
     }
 
     public void setPoll(Duration poll) {

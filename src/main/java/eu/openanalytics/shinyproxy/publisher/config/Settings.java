@@ -24,15 +24,14 @@ package eu.openanalytics.shinyproxy.publisher.config;
 
 import org.springframework.boot.convert.DurationStyle;
 import org.springframework.util.unit.DataSize;
-import org.springframework.util.unit.DataUnit;
 
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 
 /**
  * How a {@code skald.*} value is read (T7c step 0a). A duration carries its unit ("300s",
- * "20m", "3h", or ISO-8601 "PT5M"); a bare number is seconds. A size carries its unit ("64MB",
- * "1GB"); a bare number is bytes. A count is a whole number. Each error names the full key and
+ * "20m", "3h", or ISO-8601 "PT5M"); a bare number is seconds. A size must carry its unit
+ * ("64MB", "1GB", "512B"). A count is a whole number. Each error names the full key and
  * the value as given, so an operator can find it in the file.
  */
 public final class Settings {
@@ -65,8 +64,14 @@ public final class Settings {
 
     public static DataSize size(String key, Object value) {
         String text = text(key, value);
+        if (text.matches("[0-9]+")) {
+            // A bare number reads as bytes, and "64" for a limit meant in megabytes would be a
+            // silent 64-byte limit (c0c7145 N1): a size always carries its unit.
+            throw new IllegalArgumentException("'" + key + "' has no unit: '" + text
+                    + "' (write it with a unit, such as 64MB, 1GB or " + text + "B)");
+        }
         try {
-            return DataSize.parse(text, DataUnit.BYTES);
+            return DataSize.parse(text);
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("'" + key + "' is not a size: '" + text
                     + "' (write it with a unit, such as 64MB or 1GB)");

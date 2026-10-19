@@ -2750,7 +2750,12 @@ below are marked passed by this planning document.
             unknown key and names the known ones, which Spring's binder reports less
             usefully; what changes is the values (durations and sizes with units, through
             one shared `publisher.config.Settings`), kebab-case names and full key paths in
-            every error.
+            every error. Durations: a bare number is seconds everywhere (the worker's too,
+            not Spring's milliseconds), and leases, deadlines and timers must be whole
+            seconds; sizes always carry their unit. One exception: `skald.bundle.limits.*`
+            keep `spec/extraction-limits-v1.json`'s names and units (`max-file-bytes`,
+            `extraction-deadline-seconds`), which the T5 gate's corpus and oracle are
+            written against; the reference documents them as they are.
          b. Unknown keys under `skald.*` refused at startup (Spring ignores them, so a
             mistyped `pool-sise` is silently the default today), every problem reported at
             once with its path.

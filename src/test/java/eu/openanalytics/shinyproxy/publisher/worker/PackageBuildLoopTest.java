@@ -408,6 +408,25 @@ public class PackageBuildLoopTest {
         new org.springframework.boot.test.context.runner.ApplicationContextRunner()
             .withUserConfiguration(BinariesConfig.class)
             .withPropertyValues("skald.builds.worker.enabled=true")
-            .run(ctx -> assertTrue(ctx.getBeansOfType(PackageBuildLoop.class).isEmpty(), "off without binaries-enabled"));
+            .run(ctx -> assertTrue(ctx.getBeansOfType(PackageBuildLoop.class).isEmpty(), "off without binaries.enabled"));
+    }
+
+    @Test
+    public void theBinariesSwitchIsStrictAndItsOldNameIsNotItsNewOne() {
+        org.springframework.boot.test.context.runner.ApplicationContextRunner runner =
+            new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withConfiguration(org.springframework.boot.autoconfigure.AutoConfigurations.of(
+                    org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration.class))
+                .withUserConfiguration(eu.openanalytics.shinyproxy.publisher.build.BuildsConfig.class);
+        runner.withPropertyValues("skald.builds.binaries.enabled=false")
+            .run(ctx -> assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure())));
+        runner.withPropertyValues("skald.builds.binaries.enabled=yes")
+            .run(ctx -> assertTrue(String.valueOf(ctx.getStartupFailure()).contains("skald.builds.binaries.enabled"),
+                "neither true nor false stops startup: " + ctx.getStartupFailure()));
+        // The condition reads the new name only: the old one switches nothing on.
+        new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+            .withUserConfiguration(BinariesConfig.class)
+            .withPropertyValues("skald.builds.worker.enabled=true", "skald.builds.binaries-enabled=true")
+            .run(ctx -> assertTrue(ctx.getBeansOfType(PackageBuildLoop.class).isEmpty(), "the old name is not read"));
     }
 }

@@ -59,7 +59,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * The shared binaries, wired (T7b step 2e, part 1b): only with {@code skald.builds.binaries-enabled=true}
+ * The shared binaries, wired (T7b step 2e, part 1b): only with {@code skald.builds.binaries.enabled=true}
  * beside an enabled worker -- OFF by default, and to be enabled per deployment only after
  * T7b's security review (WORKPLAN-BUNDLES T7b step 2, point 7).
  *
@@ -70,7 +70,7 @@ import java.util.Set;
  * hand-in) is created once here (a5b8816 N2).
  */
 @Configuration
-@ConditionalOnProperty(name = {"skald.builds.worker.enabled", "skald.builds.binaries-enabled"}, havingValue = "true")
+@ConditionalOnProperty(name = {"skald.builds.worker.enabled", "skald.builds.binaries.enabled"}, havingValue = "true")
 public class BinariesConfig {
 
     private BaseCatalog catalog;
