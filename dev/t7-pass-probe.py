@@ -374,7 +374,13 @@ def main(argv):
         built = []
         if test != "restart":
             print("== the wired worker (T7PassProbeTest) ==")
-            code, summary = maven(test, password, published)
+            extra = {}
+            # T7c: several builds per instance, and N builds admitted at once to measure them.
+            if "--parallel" in argv:
+                extra["skald.t7probe.parallel"] = argv[argv.index("--parallel") + 1]
+            if "--concurrent" in argv:
+                extra["skald.t7probe.concurrent"] = argv[argv.index("--concurrent") + 1]
+            code, summary = maven(test, password, published, extra_props=extra)
             record("java", code == 0, summary)
             report = OUT / "results.json"
             built = json.loads(report.read_text()) if report.exists() else []
@@ -389,6 +395,18 @@ def main(argv):
                        "restore %s, key %s..., %ss, imported %s" % (
                            c.get("restore"), (c.get("key") or "")[:12], str(b.get("seconds"))[:6],
                            ",".join(r.rsplit("/", 1)[-1][:22] for r in c.get("imported") or []) or "none"))
+        concurrent = [b for b in built if b["case"] == "concurrent"]
+        if concurrent:
+            print("== concurrent builds (T7c) ==")
+            for b in concurrent:
+                ph = b.get("phases") or {}
+                record("concurrent/%s" % b["build_id"][:8], b.get("state") == "PUBLISHING",
+                       "parallel %s: %.1fs from admission, attempt %.1fs, launch.setup %.1fs" % (
+                           b.get("parallel"), float(b.get("since_admission") or -1), float(ph.get("total", -1)),
+                           float(ph.get("launch.setup", -1))))
+            done = sorted(float(b.get("since_admission") or 0) for b in concurrent)
+            print("  last outcome %.1fs after admission; setups %s" % (done[-1], sorted(
+                round(float((b.get("phases") or {}).get("launch.setup", -1)), 1) for b in concurrent)))
         print("== injected failures (judged by the Java half) ==")
         for b in built:
             if b["case"].startswith("inject-"):

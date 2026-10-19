@@ -178,6 +178,12 @@ public class T7PassProbeTest {
                 "skald.builds.worker.pypi-mirror=http://forge/repository/pypi-public/simple/",
                 "skald.builds.worker.published-bases=" + System.getProperty("skald.t7probe.published-bases"),
                 "skald.builds.worker.workspace=" + workspace.toAbsolutePath()));
+        // T7c: the pass probe with several builds per instance (-Dskald.t7probe.parallel=N).
+        String parallel = System.getProperty("skald.t7probe.parallel");
+        if (parallel != null) {
+            p.add("skald.builds.max-running=" + parallel);
+            p.add("skald.builds.worker.parallel=" + parallel);
+        }
         p.addAll(List.of(overrides));
         return new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(ConfigurationPropertiesAutoConfiguration.class,
@@ -570,6 +576,46 @@ public class T7PassProbeTest {
                             "the R restore used forge's Linux binary tree");
                     assertEquals(true, prov.path("dependencies").path("mirrors").path("cran_linux_binaries").asBoolean());
                 }
+            }
+        });
+    }
+
+    /**
+     * T7c's measurement: N builds admitted at once (-Dskald.t7probe.concurrent=N), each a cold
+     * build of its own content item, with each build's phases and its time from admission to
+     * outcome; run once with parallel 1 (today's serial loop) and once with parallel N.
+     */
+    @Test
+    @EnabledIfSystemProperty(named = "skald.t7probe.concurrent", matches = "[1-9][0-9]?")
+    public void concurrentBuildsAreMeasuredPerPhase() {
+        int n = Integer.getInteger("skald.t7probe.concurrent");
+        application().run(ctx -> {
+            assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+            JdbcTemplate jdbc = ctx.getBean(JdbcTemplate.class);
+            List<UUID> builds = new ArrayList<>();
+            List<UUID[]> items = new ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                items.add(store(ctx, PY, payload(PY)));
+            }
+            for (int i = 0; i < n; i++) {
+                builds.add(ctx.getBean(BuildAdmission.class).request(items.get(i)[0], "probe", "concurrent-" + i,
+                        new BuildAdmission.Inputs(items.get(i)[1], Map.of())).buildId());
+            }
+            long until = System.nanoTime() + Duration.ofMinutes(60).toNanos();
+            for (UUID build : builds) {
+                Map<String, Object> row;
+                do {
+                    Thread.sleep(2000);
+                    row = jdbc.queryForMap("SELECT id, content_id, state, error_code, error_detail, output_image,"
+                            + " provenance::text AS provenance, effective_limits::text AS limits, log_complete,"
+                            + " extract(epoch FROM (coalesce(finished_at, publishing_at, now()) - started_at)) AS seconds,"
+                            + " extract(epoch FROM (coalesce(finished_at, publishing_at, now()) - created_at))"
+                            + " AS since_admission FROM skald.build WHERE id = ?", build);
+                } while (!settled(row) && System.nanoTime() < until);
+                ObjectNode r = result(ctx, "concurrent", PY, row);
+                r.put("since_admission", String.valueOf(row.get("since_admission")))
+                        .put("parallel", System.getProperty("skald.t7probe.parallel", "1"));
+                assertEquals("PUBLISHING", row.get("state"), r.toString());
             }
         });
     }
