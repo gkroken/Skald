@@ -38,7 +38,7 @@ RUN printf 'options(download.file.method = "libcurl")\n' > /usr/local/lib/R/etc/
 # archive drops superseded versions and a pin would only make the base unbuildable later --
 # the catalog records the NAMES, and bases-probe checks each is installed in the built image.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends cmake libcurl4-openssl-dev libfontconfig1-dev \
+ && apt-get install -y --no-install-recommends cmake curl libcurl4-openssl-dev libfontconfig1-dev \
       libfreetype-dev libfribidi-dev libgdal-dev libgeos-dev libharfbuzz-dev libicu-dev \
       libjpeg-dev libpng-dev libproj-dev libsqlite3-dev libssl-dev libtiff-dev \
       libudunits2-dev libuv1-dev libxml2-dev pkg-config xz-utils zlib1g-dev \

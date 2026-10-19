@@ -3,12 +3,12 @@
   "layout_version": 1,
   "bases": [
     {
-      "id": "r-shiny-4.6.1-amd64-r2",
+      "id": "r-shiny-4.6.1-amd64-r3",
       "type": "shiny",
       "language": "r",
       "version": "4.6.1",
       "architecture": "amd64",
-      "recipe_revision": 2,
+      "recipe_revision": 3,
       "dockerfile": "images/r-shiny/Dockerfile",
       "upstream": "rocker/r-ver@sha256:4e6e6696ff54a86625c7f80046478e67014a2184e942b85eeff43db7b992d93e",
       "upstream_tag": "rocker/r-ver:4.6.1",
@@ -31,7 +31,7 @@
         "renv": "c6dd55e6ad50e846bb91e2d2ced99b32c08a110dc9f5337cb7ea29749f049c5f"
       },
       "system_packages": [
-        "cmake", "libcurl4-openssl-dev", "libfontconfig1-dev", "libfreetype-dev", "libfribidi-dev",
+        "cmake", "curl", "libcurl4-openssl-dev", "libfontconfig1-dev", "libfreetype-dev", "libfribidi-dev",
         "libgdal-dev", "libgeos-dev", "libharfbuzz-dev", "libicu-dev", "libjpeg-dev", "libpng-dev",
         "libproj-dev", "libsqlite3-dev", "libssl-dev", "libtiff-dev", "libudunits2-dev",
         "libuv1-dev", "libxml2-dev", "pkg-config", "xz-utils", "zlib1g-dev"
@@ -80,6 +80,7 @@
         "autotools-dev": "GPL-3+ with the Autoconf exception (config.guess/config.sub)",
         "cmake": "Apache-2.0, BSD-0-Clause, BSD-2-Clause, BSD-3-clause, BSD-3-Clause, BSD-4-Clause, Expat, FSFAP, and 4 more",
         "cmake-data": "Apache-2.0, BSD-0-Clause, BSD-2-Clause, BSD-3-clause, BSD-3-Clause, BSD-4-Clause, Expat, FSFAP, and 4 more",
+        "curl": "BSD-3-clause, BSD-3-Clause, BSD-4-Clause-UC, curl, FSFULLR, GPL-2+, GPL-3+, ISC, and 2 more",
         "default-libmysqlclient-dev": "GPL-2+",
         "gdal-data": "Apache-2.0, Base64, BSD-3-Clause, cpl-mem-cache, Expat, fontconfig, GPL-3+, HPND-3i, and 15 more",
         "gdal-plugins": "Apache-2.0, Base64, BSD-3-Clause, cpl-mem-cache, Expat, fontconfig, GPL-3+, HPND-3i, and 15 more",

@@ -81,7 +81,7 @@ MAVEN_NAME = PREFIX + "-maven"
 OUT = REPO / "target/t7b"
 DATA = OUT / "upstream"
 PACKAGES = REPO / "dev/fixtures/t7b/packages"
-R_BASE = "r-shiny-4.6.1-amd64-r2"
+R_BASE = "r-shiny-4.6.1-amd64-r3"
 KEY = "noble-x86_64/4.6"
 HOSTED_ONLY = ("skald.private",)
 
