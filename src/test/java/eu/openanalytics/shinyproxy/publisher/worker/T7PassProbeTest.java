@@ -183,13 +183,18 @@ public class T7PassProbeTest {
         if (parallel != null) {
             p.add("skald.builds.max-running=" + parallel);
             p.add("skald.builds.worker.parallel=" + parallel);
+            // Until T9 a built attempt stays PUBLISHING, unfinished, until a lease passes, so a
+            // probe that builds this fast as one publisher meets the per-publisher limit of 3:
+            // raised here for the probe; the product's default is untouched.
+            p.add("skald.builds.admission.per-publisher-active=10");
         }
         // N builds admitted at once by one publisher: the probe raises admission's limits to N
         // (e641f9e N1); the product's defaults (3 per publisher, 10 queued) are untouched.
         String concurrent = System.getProperty("skald.t7probe.concurrent");
         if (concurrent != null) {
+            p.removeIf(k -> k.startsWith("skald.builds.admission.per-publisher-active="));
             int n = Integer.parseInt(concurrent);
-            p.add("skald.builds.admission.per-publisher-active=" + Math.max(3, n));
+            p.add("skald.builds.admission.per-publisher-active=" + Math.max(10, n));
             p.add("skald.builds.admission.queue-capacity=" + Math.max(10, n));
         }
         p.addAll(List.of(overrides));
@@ -471,7 +476,8 @@ public class T7PassProbeTest {
 
     /** The registry cache refs the build imported, from its log. */
     static List<String> imported(Path log) throws Exception {
-        List<String> refs = new ArrayList<>();
+        // Each ref once: a build solves twice (0a9386d), and both solves import the same cache.
+        java.util.Set<String> refs = new java.util.LinkedHashSet<>();
         for (String l : Files.readAllLines(log)) {
             var m = java.util.regex.Pattern.compile("^#\\d+ importing cache manifest from (\\S+)$")
                     .matcher(JSON.readTree(l).path("t").asText());
@@ -479,7 +485,7 @@ public class T7PassProbeTest {
                 refs.add(m.group(1));
             }
         }
-        return refs;
+        return List.copyOf(refs);
     }
 
     /** The digest the registry serves for a content item's cache ref, or null if there is none. */
@@ -1010,15 +1016,16 @@ public class T7PassProbeTest {
                 trees = s.filter(f -> f.getFileName().toString().startsWith("extract-")).toList();
             }
             assertTrue(!trees.isEmpty(), "the dead process left its extraction tree");
-            // sweep-grace one minute (above the 30 s settle), a sweep every 30 s, so the
-            // backstop comes within minutes rather than the defaults' 25.
-            application("skald.builds.worker.sweep-period=30s", "skald.builds.worker.sweep-grace=1m").run(ctx -> {
+            // sweep-grace four minutes (above the 30 s settle and the disposal's 3-minute close
+            // wait, bc66e6f N1, which refuses less), a sweep every 30 s, so the backstop comes
+            // within minutes rather than the defaults' 25.
+            application("skald.builds.worker.sweep-period=30s", "skald.builds.worker.sweep-grace=4m").run(ctx -> {
                 assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
                 for (Path tree : trees) {
                     assertTrue(!Files.exists(tree), "the new process removed the dead one's tree: " + tree);
                 }
                 long started = System.nanoTime();
-                Map<String, Object> row = settleWithLog(ctx, build, Duration.ofMinutes(8));
+                Map<String, Object> row = settleWithLog(ctx, build, Duration.ofMinutes(15));
                 double settled = (System.nanoTime() - started) / 1e9;
                 ObjectNode r = injected(ctx, docker, "restart-crashed", PY, row, "INTERRUPTED", null,
                         "(?m)^#\\d+ \\[\\d+/\\d+\\] RUN .*\"pip\",\"install\"");
