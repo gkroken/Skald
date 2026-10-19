@@ -2712,6 +2712,92 @@ below are marked passed by this planning document.
       what in it, still needs the client's session (candidates: the context or Dockerfile
       read lazily, the base's registry auth through the session, the export).
 
+- [ ] **T7c. Configuration as code, then build concurrency: several builds per instance,
+      a pool bounded by capacity.** Depends T7b. Placed before T8 (user, 2026-10-16). Today
+      app builds run one at a time in the whole deployment:
+      `skald.builds.coordinator.max_running` (`skald.builds.max-running` after step 0)
+      defaults to 1 and is counted across instances, and each instance has ONE build-loop
+      thread, so raising it helps only with more instances. The package queue already runs
+      `max_running` compile threads, but its pools refill beside running builds and fight
+      them for the host (T7b probe: the setup helper's median 43 s at three in parallel,
+      3.9 s idle).
+      *Best practice checked first (user, 2026-10-16):* GitLab Runner separates one process's
+      capacity (`concurrent`) from a narrower cap (`limit`); job queues on Postgres scale by
+      claiming with SKIP LOCKED, no coordination between processes; ARC sizes runners as a
+      warm floor ON TOP OF demand (minRunners plus the jobs assigned); GitLab's `idle_count`
+      keeps instances free for future demand beside the busy ones, and a warm floor must never
+      hold up a job (GitLab's preemptive-mode pitfall: Skald already launches cold when the
+      pool is empty); an EC2 warm pool's cap counts instances still starting. One fresh,
+      discarded sandbox per job is the norm for untrusted code (Netlify, firerunner), so a
+      shared long-lived builder is not a scaling route; the build cache stays in the registry
+      (`--import-cache`/`--export-cache type=registry`, as T7 does), so fresh workers lose no
+      cache. This changed two points of the first plan: concurrency is two settings, not
+      one, and the pool is a spare floor bounded by the host's capacity, refilled at once,
+      not "pool = max_running, refilled when the queue is empty" (which would leave it empty
+      exactly when busy).
+      0. Configuration an admin keeps as code, first, since steps 1-3 add settings (user,
+         2026-10-16). *Best practice checked:* Spring Boot's externalized config (kebab-case
+         canonical form, relaxed binding to environment variables, ${VAR} placeholders,
+         `configtree:` for mounted secrets); yaml-language-server `$schema` modelines for
+         editor completion and validation; Helm's values.schema.json; `promtool check
+         config` and `alloy validate` (exit 0/1 with diagnostics).
+         a. One style: every `skald.*` section typed `@ConfigurationProperties`, kebab-case;
+            the map sections (admission, coordinator, binaries) become typed. Concurrency
+            grouped: `skald.builds.max-running` (deployment), `skald.builds.worker.parallel`
+            (instance), `pool-size`, `binaries.max-running`. Nothing has shipped, so keys are
+            renamed outright, with no aliases.
+         b. Unknown keys under `skald.*` refused at startup (Spring ignores them, so a
+            mistyped `pool-sise` is silently the default today), every problem reported at
+            once with its path.
+         c. One source: `spec/configuration-v1.json` (key, type, default, bounds, secret flag,
+            description). A test holds the Java classes to it (every field there, defaults
+            equal); generated from it and drift-checked: `schema/skald-config.schema.json`
+            (the `skald:` section, for editors, CI and later a Helm values schema) and
+            `docs/CONFIGURATION.md`.
+         d. A validate mode (`--validate-config`): loads the configuration exactly as startup
+            does, runs the static checks only (no database, Docker or network), prints every
+            problem with its key path, exits 0 or 1, for CI and pre-deploy.
+         e. Secrets never in the file: `${VAR}` or `configtree:`; the reference marks secret
+            keys and the example uses placeholders.
+         f. `config/application.example.yml`: complete, commented, every `skald` key at its
+            default, with the schema modeline; a test loads it and asserts no problems.
+            `dev/application-dev.yml` overrides only what the dev stack needs; sizing
+            profiles (one host; several instances) in `docs/CONFIGURATION.md`.
+         Scope: the `skald:` section; upstream's `proxy:` section stays as upstream documents it.
+      1. `skald.builds.worker.parallel` (default 1): how many builds THIS instance's Docker
+         host takes; the build loop runs that many claim-and-build threads.
+         `max-running` stays the deployment-wide cap; the startup checks report a `parallel`
+         above it (threads that could never claim). Each thread keeps the loop's lease,
+         stop, settle and sweep behaviour; the stop and disposal paths already handle
+         concurrent attempts per instance.
+      2. The pools replace a taken entry at once, but an instance's running attempts, its
+         warming entries and its ready entries together never exceed `parallel` +
+         `pool-size` (per driver: the app loop's, and each package platform's with the
+         queue's `max_running`); a refill waits for a slot instead of competing with a
+         running build. A cold launch is never held up by the pool.
+      3. A package attempt's disposal leaves the compile slot (measured 2026-10-18, 63 ICES
+         package attempts on a loaded host: compile 6440 s in all, sandbox disposal 5650 s,
+         cold launch 3950 s; median attempt 219 s against a median compile of 63 s). Today
+         it is inline before the driver returns (bc66e6f-F1: the grace-less package sweep
+         must never race it). It moves off the slot with a disposing marker the package
+         sweep skips while it exists, as the taken-entry markers work, and a disposing
+         sandbox counts against the capacity bound of step 2 until it is gone, so freeing
+         the slot sooner never adds load the host has no room for.
+      **Pass:** for step 0, a test per refusal (an unknown key, a bad bound, a secret in
+      plain text where the reference forbids it) with a mutant each, the generated schema
+      and reference drift-checked, the example file loading clean, and `--validate-config`
+      exiting 1 with every problem listed on a broken file; for steps 1-3, unit tests for
+      the thread count, the capacity bound (a refill held while the host is full, released
+      when a slot frees) and the startup check, each with a mutant
+      that turns it red; the pass probe green with `parallel=3`; three concurrent builds
+      measured per phase (launch.setup and time to outcome) against today's serial run; the
+      T7b probe's package phases measured against 4160e3a's (setup median 43 s); a package's
+      slot time measured with its disposal moved off it (a disposal racing the sweep: a test
+      and a mutant); host clean.
+      **Not here:** time-windowed pool sizes (GitLab's policy windows; small, later), several
+      Docker hosts with a capacity each and a Kubernetes runtime (the later multi-host
+      track), microVM isolation (needs KVM; this host has none).
+
 - [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus
       through HTTP. Real OIDC Alice allow/Bob deny/signed-out deny for every endpoint,
