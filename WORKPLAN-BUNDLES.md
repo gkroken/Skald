@@ -2758,7 +2758,15 @@ below are marked passed by this planning document.
             written against; the reference documents them as they are.
          b. Unknown keys under `skald.*` refused at startup (Spring ignores them, so a
             mistyped `pool-sise` is silently the default today), every problem reported at
-            once with its path.
+            once with its path. *As built:* an EnvironmentPostProcessor
+            (`publisher.config.ConfigurationCheck`) checks every name against
+            `ConfigurationSpec` and every set value against its type and bounds before any
+            bean exists, naming the source, a rename's new key or a likely key. Sources
+            (8144a20 N1): in the sections the spec owns (`storage`, `dispatcher`, `builds`,
+            `bundle`) an unknown name is refused from any source, environment and system
+            properties included; any other `skald.*` name is refused in files and on the
+            command line but only warned about in the environment and system properties,
+            whose names tools share (`SKALD_DOCKER_CONFIG`, the probes' `skald.t7b.*`).
          c. One source: `spec/configuration-v1.json` (key, type, default, bounds, secret flag,
             description). A test holds the Java classes to it (every field there, defaults
             equal); generated from it and drift-checked: `schema/skald-config.schema.json`

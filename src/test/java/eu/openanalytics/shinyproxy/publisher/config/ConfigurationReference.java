@@ -163,6 +163,9 @@ final class ConfigurationReference {
                         .append(notes.replace("|", "\\|")).append(" |\n");
             }
         }
+        b.append("\n## Renamed keys\n\n").append(spec.conventions().path("renamed").asText()).append("\n\n");
+        b.append("| Old key | New key |\n|---|---|\n");
+        spec.renamed().forEach((from, to) -> b.append("| `").append(from).append("` | `").append(to).append("` |\n"));
         JsonNode bounds = extractionSpec(new ObjectMapper()).path("bounds");
         for (ConfigurationSpec.Included inc : spec.included()) {
             b.append("\n## ").append(inc.prefix(), 0, inc.prefix().length() - 1).append("\n\n")

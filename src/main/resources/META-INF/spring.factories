@@ -1,0 +1,4 @@
+# Skald (T7c step 0b): the skald: configuration section is checked against
+# spec/configuration-v1.json before any bean exists.
+org.springframework.boot.env.EnvironmentPostProcessor=\
+eu.openanalytics.shinyproxy.publisher.config.SkaldConfigurationPostProcessor

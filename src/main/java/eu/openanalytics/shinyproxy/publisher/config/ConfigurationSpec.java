@@ -30,8 +30,11 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -64,6 +67,7 @@ public final class ConfigurationSpec {
     private final JsonNode root;
     private final List<Key> keys;
     private final List<Included> included;
+    private final Map<String, String> renamed;
 
     private ConfigurationSpec(JsonNode root) {
         this.root = root;
@@ -79,6 +83,11 @@ public final class ConfigurationSpec {
             i.add(new Included(n.path("prefix").asText(), n.path("spec").asText(), n.path("parser").asText(),
                     n.path("scope").asText(), n.path("description").asText()));
         }
+        Map<String, String> r = new LinkedHashMap<>();
+        for (JsonNode n : root.path("renamed")) {
+            r.put(n.path("from").asText(), n.path("to").asText());
+        }
+        this.renamed = Collections.unmodifiableMap(r);
         this.keys = List.copyOf(k);
         this.included = List.copyOf(i);
     }
@@ -100,6 +109,16 @@ public final class ConfigurationSpec {
 
     public List<Included> included() {
         return included;
+    }
+
+    /** Old names (before T7c) to their new ones; an old name is refused, naming the new. */
+    public Map<String, String> renamed() {
+        return renamed;
+    }
+
+    /** The key, if listed; the included bundle limits are not. */
+    public java.util.Optional<Key> key(String name) {
+        return keys.stream().filter(k -> k.key().equals(name)).findFirst();
     }
 
     /** The file's conventions: what a duration, a size and a secret are. */

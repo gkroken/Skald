@@ -26,6 +26,7 @@ validation in VS Code, IntelliJ, Neovim or Zed.
 - **size**: A size with its unit: 64MB, 2GB, 512B. A bare number is refused: '64' meant as megabytes would otherwise be 64 bytes.
 - **secret**: A secret is never written into the file: give it as ${VARIABLE} from the environment, or through Spring's configtree: import of mounted files (/run/secrets). It is never logged; an error about it never repeats its value.
 - **scope**: deployment: every instance must agree (a shared database counts it); instance: this process and its Docker host only.
+- **renamed**: Keys renamed in T7c (2026-10-19) before anything shipped, with no aliases: an old name stops startup and the error names the new one; a key whose unit changed also changed its name, so an old value is never read in a new unit.
 - **parsers**: settings / settings-seconds: publisher.config.Settings inside a section parser that refuses unknown keys; spring: Spring's binder on a typed class; value: a single @Value or Environment read; extraction-limits: spec/extraction-limits-v1.json's own parser.
 
 ## skald.storage
@@ -124,6 +125,34 @@ validation in VS Code, IntelliJ, Neovim or Zed.
 | `pool-ttl` | duration | `30m` | instance | How long a ready worker is kept before a fresh one replaces it. |
 | `bundle-bucket` | string | `skald-bundles` | deployment | The object store bucket holding bundles. |
 | `log-bucket` | string | `skald-logs` | deployment | The object store bucket holding build logs. |
+
+## Renamed keys
+
+Keys renamed in T7c (2026-10-19) before anything shipped, with no aliases: an old name stops startup and the error names the new one; a key whose unit changed also changed its name, so an old value is never read in a new unit.
+
+| Old key | New key |
+|---|---|
+| `skald.builds.coordinator.max-running` | `skald.builds.max-running` |
+| `skald.builds.coordinator.lease-seconds` | `skald.builds.coordinator.lease` |
+| `skald.builds.coordinator.renew-every-seconds` | `skald.builds.coordinator.renew-every` |
+| `skald.builds.coordinator.deadline-minutes` | `skald.builds.coordinator.deadline` |
+| `skald.builds.binaries-enabled` | `skald.builds.binaries.enabled` |
+| `skald.builds.binaries.lease-seconds` | `skald.builds.binaries.lease` |
+| `skald.builds.binaries.renew-every-seconds` | `skald.builds.binaries.renew-every` |
+| `skald.builds.binaries.deadline-minutes` | `skald.builds.binaries.deadline` |
+| `skald.builds.binaries.forge-registration-ttl-seconds` | `skald.builds.binaries.forge-registration-ttl` |
+| `skald.builds.binaries.forge-timeout-seconds` | `skald.builds.binaries.forge-timeout` |
+| `skald.builds.binaries.forge-upload-deadline-seconds` | `skald.builds.binaries.forge-upload-deadline` |
+| `skald.builds.binaries.source-max-index-bytes` | `skald.builds.binaries.source-max-index-size` |
+| `skald.builds.binaries.source-max-bytes` | `skald.builds.binaries.source-max-size` |
+| `skald.builds.binaries.source-max-expanded-bytes` | `skald.builds.binaries.source-max-expanded-size` |
+| `skald.builds.binaries.source-fetch-timeout-seconds` | `skald.builds.binaries.source-fetch-timeout` |
+| `skald.builds.binaries.source-transfer-deadline-seconds` | `skald.builds.binaries.source-transfer-deadline` |
+| `skald.builds.binaries.source-index-ttl-seconds` | `skald.builds.binaries.source-index-ttl` |
+| `skald.builds.binaries.source-behind-retry-seconds` | `skald.builds.binaries.source-behind-retry` |
+| `skald.builds.binaries.source-behind-max-retry-seconds` | `skald.builds.binaries.source-behind-max-retry` |
+| `skald.builds.binaries.source-behind-bound-hours` | `skald.builds.binaries.source-behind-bound` |
+| `skald.builds.worker.quota-megabytes` | `skald.builds.worker.quota` |
 
 ## skald.bundle.limits
 

@@ -172,8 +172,10 @@ public class ConfigurationSpecTest {
 
     @Test
     public void everyKeyTheSourcesNameIsInTheSpec() throws Exception {
-        // A key added in code without the spec fails here, not in an operator's file.
-        Pattern literal = Pattern.compile("\"(skald\\.(?:storage|dispatcher|builds|bundle\\.limits)\\.[a-z0-9.-]*[a-z0-9])\"");
+        // A key added in code without the spec fails here, not in an operator's file: any
+        // "skald.<x>" string literal, ${skald.<x>} placeholder or @ConfigurationProperties
+        // prefix, in any namespace (c07ba8f N1), must be a key or the prefix of keys.
+        Pattern literal = Pattern.compile("(?:\"|\\$\\{)(skald\\.[a-z][a-z0-9.-]*[a-z0-9])(?:\"|[:}])");
         Set<String> missing = new TreeSet<>();
         Set<String> all = SPEC.allKeys();
         try (Stream<Path> files = Files.walk(Path.of("src/main/java"))) {
@@ -188,6 +190,9 @@ public class ConfigurationSpecTest {
             }
         }
         assertEquals(Set.of(), missing);
+        for (Map.Entry<String, String> r : SPEC.renamed().entrySet()) {
+            assertTrue(!all.contains(r.getKey()) && all.contains(r.getValue()), "renamed: " + r);
+        }
         for (ConfigurationSpec.Key k : SPEC.keys()) {
             assertTrue(Set.of("integer", "boolean", "duration", "size", "list", "url", "string", "image", "path")
                     .contains(k.type()), k.key() + ": " + k.type());

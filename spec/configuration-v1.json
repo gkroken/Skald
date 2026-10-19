@@ -8,6 +8,7 @@
     "size": "A size with its unit: 64MB, 2GB, 512B. A bare number is refused: '64' meant as megabytes would otherwise be 64 bytes.",
     "secret": "A secret is never written into the file: give it as ${VARIABLE} from the environment, or through Spring's configtree: import of mounted files (/run/secrets). It is never logged; an error about it never repeats its value.",
     "scope": "deployment: every instance must agree (a shared database counts it); instance: this process and its Docker host only.",
+    "renamed": "Keys renamed in T7c (2026-10-19) before anything shipped, with no aliases: an old name stops startup and the error names the new one; a key whose unit changed also changed its name, so an old value is never read in a new unit.",
     "parsers": "settings / settings-seconds: publisher.config.Settings inside a section parser that refuses unknown keys; spring: Spring's binder on a typed class; value: a single @Value or Environment read; extraction-limits: spec/extraction-limits-v1.json's own parser."
   },
 
@@ -142,6 +143,30 @@
      "description": "The object store bucket holding bundles."},
     {"key": "skald.builds.worker.log-bucket", "type": "string", "default": "skald-logs", "parser": "spring", "scope": "deployment",
      "description": "The object store bucket holding build logs."}
+  ],
+
+  "renamed": [
+    {"from": "skald.builds.coordinator.max-running", "to": "skald.builds.max-running"},
+    {"from": "skald.builds.coordinator.lease-seconds", "to": "skald.builds.coordinator.lease"},
+    {"from": "skald.builds.coordinator.renew-every-seconds", "to": "skald.builds.coordinator.renew-every"},
+    {"from": "skald.builds.coordinator.deadline-minutes", "to": "skald.builds.coordinator.deadline"},
+    {"from": "skald.builds.binaries-enabled", "to": "skald.builds.binaries.enabled"},
+    {"from": "skald.builds.binaries.lease-seconds", "to": "skald.builds.binaries.lease"},
+    {"from": "skald.builds.binaries.renew-every-seconds", "to": "skald.builds.binaries.renew-every"},
+    {"from": "skald.builds.binaries.deadline-minutes", "to": "skald.builds.binaries.deadline"},
+    {"from": "skald.builds.binaries.forge-registration-ttl-seconds", "to": "skald.builds.binaries.forge-registration-ttl"},
+    {"from": "skald.builds.binaries.forge-timeout-seconds", "to": "skald.builds.binaries.forge-timeout"},
+    {"from": "skald.builds.binaries.forge-upload-deadline-seconds", "to": "skald.builds.binaries.forge-upload-deadline"},
+    {"from": "skald.builds.binaries.source-max-index-bytes", "to": "skald.builds.binaries.source-max-index-size"},
+    {"from": "skald.builds.binaries.source-max-bytes", "to": "skald.builds.binaries.source-max-size"},
+    {"from": "skald.builds.binaries.source-max-expanded-bytes", "to": "skald.builds.binaries.source-max-expanded-size"},
+    {"from": "skald.builds.binaries.source-fetch-timeout-seconds", "to": "skald.builds.binaries.source-fetch-timeout"},
+    {"from": "skald.builds.binaries.source-transfer-deadline-seconds", "to": "skald.builds.binaries.source-transfer-deadline"},
+    {"from": "skald.builds.binaries.source-index-ttl-seconds", "to": "skald.builds.binaries.source-index-ttl"},
+    {"from": "skald.builds.binaries.source-behind-retry-seconds", "to": "skald.builds.binaries.source-behind-retry"},
+    {"from": "skald.builds.binaries.source-behind-max-retry-seconds", "to": "skald.builds.binaries.source-behind-max-retry"},
+    {"from": "skald.builds.binaries.source-behind-bound-hours", "to": "skald.builds.binaries.source-behind-bound"},
+    {"from": "skald.builds.worker.quota-megabytes", "to": "skald.builds.worker.quota"}
   ],
 
   "included": [
