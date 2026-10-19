@@ -134,6 +134,9 @@ public final class WorkerPool {
     private volatile boolean stopping;
     /** Entries this pool tried to make, for tests. */
     final java.util.concurrent.atomic.AtomicInteger fills = new java.util.concurrent.atomic.AtomicInteger();
+    /** Rounds completed; for tests that must observe a round's end rather than guess its length. */
+    final java.util.concurrent.atomic.AtomicInteger rounds = new java.util.concurrent.atomic.AtomicInteger();
+    private volatile HostCapacity capacity;
     /** When the stale sweep last ran (epoch seconds). Pool thread only. */
     private long lastSweep = Long.MIN_VALUE;
     private Thread thread;
@@ -257,6 +260,7 @@ public final class WorkerPool {
             while (running) {
                 try {
                     tick();
+                    rounds.incrementAndGet();
                 } catch (InterruptedException e) {
                     break;
                 } catch (Throwable t) {
@@ -281,6 +285,20 @@ public final class WorkerPool {
                 disposeQuietly(entry, "pool stopping");
             }
         }
+    }
+
+    /**
+     * Makes each refill wait for a free slot of the host's capacity, and wakes this pool's
+     * loop as soon as one is released rather than at its next round (T7c step 2).
+     */
+    public WorkerPool withCapacity(HostCapacity capacity) {
+        this.capacity = capacity;
+        capacity.onFree(this::wake);
+        return this;
+    }
+
+    private synchronized void wake() {
+        notifyAll();
     }
 
     /** One round: expire, sweep, refill. Package-visible for tests. */
@@ -308,9 +326,18 @@ public final class WorkerPool {
         for (String base : bases) {
             while (!stopping && takeable(base) < settings.size()
                     && epochSeconds.getAsLong() >= notBefore.getOrDefault(base, 0L)) {
+                // A warm-up only while the host has a slot free (T7c step 2); otherwise the
+                // refill waits, and the capacity wakes this pool when a slot is released.
+                HostCapacity c = capacity;
+                Optional<HostCapacity.Slot> slot = c == null ? Optional.of(() -> { }) : c.warmUp();
+                if (slot.isEmpty()) {
+                    return;
+                }
                 String entry = DockerWorkerLauncher.poolEntryId(epochSeconds.getAsLong(), random);
-                if (!fill(base, entry)) {
-                    notBefore.put(base, epochSeconds.getAsLong() + BACKOFF.toSeconds());
+                try (HostCapacity.Slot held = slot.get()) {
+                    if (!fill(base, entry)) {
+                        notBefore.put(base, epochSeconds.getAsLong() + BACKOFF.toSeconds());
+                    }
                 }
             }
         }

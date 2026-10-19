@@ -1193,6 +1193,20 @@ public class BuildKitDriverTest {
     }
 
     @Test
+    public void anAttemptHoldsAHostSlotUntilItEnds() throws Exception {
+        // T7c step 2: the pools' refills wait on the slots running attempts hold.
+        HostCapacity capacity = new HostCapacity(1);
+        AtomicInteger during = new AtomicInteger(-1);
+        Outcome outcome = driver(Settings.defaults(), build -> {
+            during.set(capacity.running());
+            throw new IllegalStateException("no such bundle");
+        }).withCapacity(capacity).run(claimed(), () -> false);
+        assertEquals(new Failed("CONTEXT", "no such bundle"), outcome);
+        assertEquals(1, during.get(), "held while the attempt ran");
+        assertEquals(0, capacity.running(), "released when it ended");
+    }
+
+    @Test
     public void aContextThatCannotBePreparedLaunchesNothing() throws Exception {
         Claimed c = claimed();
         Outcome outcome = driver(Settings.defaults(), build -> {

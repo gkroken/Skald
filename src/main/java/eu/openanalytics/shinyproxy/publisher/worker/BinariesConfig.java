@@ -160,7 +160,7 @@ public class BinariesConfig {
     public PackageBuildLoop packageBuildLoop(WorkerConfig worker, DockerClient skaldWorkerDocker,
                                              BinaryBuildQueue queue, SourceVerifier verifier, BinaryUploader uploader,
                                              BinaryGate gate, ForgeHandIn handIn, BinaryQueueSettings queueSettings,
-                                             WorkerPool.Group binaryWorkerPools)
+                                             WorkerPool.Group binaryWorkerPools, HostCapacity skaldHostCapacity)
             throws Exception {
         Images images = Images.of(worker.workerImage(), worker.gatewayImage());
         DockerWorkerLauncher launcher = new DockerWorkerLauncher(skaldWorkerDocker,
@@ -184,13 +184,14 @@ public class BinariesConfig {
             // narrower egress and its output volume.
             WorkerPool pool = worker.poolSize() == 0 ? null : new WorkerPool(launcher, client,
                     id -> new DockerWorkerLauncher.Request(id, Settings.defaults(), worker.quotaMegabytes(), egress, true),
-                    List.of(base.reference()), worker.registry(), worker.credential(), worker.poolSettings());
+                    List.of(base.reference()), worker.registry(), worker.credential(), worker.poolSettings())
+                    .withCapacity(skaldHostCapacity);
             PackageBuildDriver driver = new PackageBuildDriver(skaldWorkerDocker, launcher, client, handIn,
                     (s, d) -> PackageRecipe.render(base, s, d),
                     new PackageBuildDriver.Config(Settings.defaults(), worker.quotaMegabytes(), egress,
                             worker.credential(), worker.poll(), worker.settle(), e.version(), e.rPlatform(),
                             BinaryArchive.Limits.DEFAULTS),
-                    pool, pool == null ? null : base.reference());
+                    pool, pool == null ? null : base.reference()).withCapacity(skaldHostCapacity);
             if (pool != null) {
                 binaryWorkerPools.start(pool);
             }

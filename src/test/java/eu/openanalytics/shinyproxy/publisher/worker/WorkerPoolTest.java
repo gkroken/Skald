@@ -126,6 +126,35 @@ public class WorkerPoolTest {
     }
 
     @Test
+    public void aRefillWaitsWhileTheHostIsFullAndStartsAsSoonAsASlotFrees() throws Exception {
+        // T7c step 2: a running build holds the host's one slot, so the pool makes no entry;
+        // its round period is ten minutes, so only the released slot's wake-up can start the
+        // refill within seconds.
+        HostCapacity capacity = new HostCapacity(1);
+        HostCapacity.Slot build = capacity.attempt();
+        WorkerPool pool = new WorkerPool(launcher, client, WorkerPoolTest::request, List.of(registry.baseByDigest()),
+                registry.name, TestRegistry.CRED, new WorkerPool.Settings(1, Duration.ofMinutes(30),
+                Duration.ofMinutes(5), Duration.ofMinutes(10))).withCapacity(capacity);
+        pool.start();
+        try {
+            long first = System.nanoTime() + Duration.ofMinutes(2).toNanos();
+            while (pool.rounds.get() == 0 && System.nanoTime() < first) {
+                Thread.sleep(100);
+            }
+            assertEquals(1, pool.rounds.get(), "the first round ran (its stale sweep included)");
+            assertEquals(0, pool.fills.get(), "no refill beside the running build");
+            build.close();
+            long until = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+            while (pool.fills.get() == 0 && System.nanoTime() < until) {
+                Thread.sleep(100);
+            }
+            assertEquals(1, pool.fills.get(), "the refill started once the slot was free");
+        } finally {
+            pool.stop();
+        }
+    }
+
+    @Test
     public void aTakenEntryBuildsWithoutPullingItsBaseAndItsAttemptsDisposalReachesIt(@TempDir Path dir)
             throws Exception {
         // The control first: a freshly launched worker pulls and extracts the base, and the log

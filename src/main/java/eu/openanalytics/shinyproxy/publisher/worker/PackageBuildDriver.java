@@ -120,6 +120,7 @@ public final class PackageBuildDriver {
     private final Config config;
     /** Ready sandboxes warmed with {@link #base}, or null: every attempt launches its own. */
     private final WorkerPool pool;
+    private volatile HostCapacity capacity;
     private final String base;
 
     public PackageBuildDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
@@ -165,6 +166,22 @@ public final class PackageBuildDriver {
     }
 
     public Result run(BuildClaim claim, BooleanSupplier stop) throws InterruptedException {
+        HostCapacity c = capacity;
+        if (c == null) {
+            return counted(claim, stop);
+        }
+        try (HostCapacity.Slot slot = c.attempt()) {
+            return counted(claim, stop);
+        }
+    }
+
+    /** Counts each attempt against the host's capacity, which the pools' refills wait on (T7c step 2). */
+    public PackageBuildDriver withCapacity(HostCapacity capacity) {
+        this.capacity = capacity;
+        return this;
+    }
+
+    private Result counted(BuildClaim claim, BooleanSupplier stop) throws InterruptedException {
         Handle h = DockerWorkerLauncher.handle(attemptId(claim));
         AtomicBoolean aborted = new AtomicBoolean();
         AtomicReference<Result> result = new AtomicReference<>();

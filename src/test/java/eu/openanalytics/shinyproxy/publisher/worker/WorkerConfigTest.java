@@ -160,6 +160,15 @@ public class WorkerConfigTest {
                         .ofInstance(new WorkerConfig())).get();
     }
 
+    @Test
+    public void theHostsSlotsAreItsParallelBuildsAndItsCompilesWhenBinariesAreOn() {
+        // T7c step 2: one count for the whole Docker host (8144a20 N3).
+        eu.openanalytics.shinyproxy.publisher.binaries.BinaryQueueSettings two =
+                eu.openanalytics.shinyproxy.publisher.binaries.BinaryQueueSettings.fromOverrides(Map.of("max-running", "2"));
+        assertEquals(5, WorkerConfig.slots(3, two, true));
+        assertEquals(3, WorkerConfig.slots(3, two, false), "no compiles without binaries");
+    }
+
     private static String only(WorkerConfig c) {
         List<String> p = c.problems(DEFAULTS);
         assertEquals(1, p.size(), p.toString());

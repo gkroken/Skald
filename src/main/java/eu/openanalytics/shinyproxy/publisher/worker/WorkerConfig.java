@@ -22,6 +22,7 @@
  */
 package eu.openanalytics.shinyproxy.publisher.worker;
 
+import eu.openanalytics.shinyproxy.publisher.binaries.BinaryQueueSettings;
 import eu.openanalytics.shinyproxy.publisher.build.BuildCoordinator;
 import eu.openanalytics.shinyproxy.publisher.build.BuildLoop;
 import eu.openanalytics.shinyproxy.publisher.build.BuildRunner;
@@ -41,6 +42,7 @@ import eu.openanalytics.shinyproxy.publisher.worker.WorkerProfile.Settings;
 import org.mandas.docker.client.DockerClient;
 import org.mandas.docker.client.builder.jersey.JerseyDockerClientBuilder;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.convert.DurationUnit;
@@ -157,6 +159,22 @@ public class WorkerConfig {
      * Docker client closes (this depends on it: the pool thread's last act is its disposals,
      * which failed on a closed client and left every ready entry, in the first pass probe run).
      */
+    /**
+     * What this host runs at once (T7c step 2): the build loop's parallel builds plus, with
+     * shared binaries on, their compiles; the app and package pools' refills wait on it.
+     */
+    @Bean
+    public HostCapacity skaldHostCapacity(ObjectProvider<BinaryQueueSettings> binaries,
+                                          @Value("${skald.builds.binaries.enabled:false}") String binariesEnabled) {
+        return new HostCapacity(slots(parallel, binaries.getIfAvailable(() -> BinaryQueueSettings.DEFAULTS),
+                "true".equals(binariesEnabled)));
+    }
+
+    /** The host's slots: its parallel builds, and the package compiles when binaries are on. */
+    static int slots(int parallel, BinaryQueueSettings binaries, boolean binariesEnabled) {
+        return parallel + (binariesEnabled ? binaries.maxRunning() : 0);
+    }
+
     @Bean(destroyMethod = "stop")
     public WorkerPool.Group skaldWorkerPools(DockerClient skaldWorkerDocker) {
         return new WorkerPool.Group();
@@ -196,7 +214,8 @@ public class WorkerConfig {
                                     CoordinatorSettings settings, ObjectProvider<ObjectStore> store,
                                     ExtractionLimits limits,
                                     ObjectProvider<eu.openanalytics.shinyproxy.publisher.binaries.BinaryHook> binaryHook,
-                                    WorkerPool.Group skaldWorkerPools, Disposer skaldDisposer)
+                                    WorkerPool.Group skaldWorkerPools, Disposer skaldDisposer,
+                                    HostCapacity skaldHostCapacity)
             throws Exception {
         List<String> problems = problems(settings);
         if (coordinator.getIfAvailable() == null) {
@@ -231,7 +250,8 @@ public class WorkerConfig {
         Egress egress = new Egress(outerNetworks, registry, repos, privateMirrors, List.of(), List.of());
         WorkerPool pool = poolSize == 0 ? null : new WorkerPool(launcher, client,
                 id -> new Request(id, Settings.defaults(), quotaMegabytes, egress), publishedReferences(catalog),
-                registry, new Credential(registryUsername, registryPassword), poolSettings());
+                registry, new Credential(registryUsername, registryPassword), poolSettings())
+                .withCapacity(skaldHostCapacity);
         BuildKitDriver driver = new BuildKitDriver(skaldWorkerDocker, launcher, client, source,
                 logWriter,
                 new BuildKitDriver.Config(Settings.defaults(), quotaMegabytes, egress,
@@ -239,7 +259,8 @@ public class WorkerConfig {
                 pool, skaldDisposer)
                 // 3d18996-F1: the base's blobs mounted, not uploaded again by every first push.
                 .withBlobMounter(new BlobMounter(URI.create(registryApi), registry, architecture,
-                        new Credential(registryUsername, registryPassword)));
+                        new Credential(registryUsername, registryPassword)))
+                .withCapacity(skaldHostCapacity);
         if (pool != null) {
             // Only now: every startup check passed, so no worker is launched for a refused start.
             skaldWorkerPools.start(pool);

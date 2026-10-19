@@ -411,6 +411,21 @@ public class PackageBuildDriverTest {
     // ------------------------------------------------------------------ before any Docker call
 
     @Test
+    public void anAttemptHoldsAHostSlotUntilItEnds() throws Exception {
+        // T7c step 2, as for app builds: the package sandbox's attempt holds a host slot.
+        byte[] source = "source".getBytes(StandardCharsets.UTF_8);
+        BuildClaim c = claim("foo", List.of(), source);
+        HostCapacity capacity = new HostCapacity(1);
+        java.util.concurrent.atomic.AtomicInteger during = new java.util.concurrent.atomic.AtomicInteger(-1);
+        driver(handIn(source, Map.of(), Map.of()), (s, deps) -> {
+            during.set(capacity.running());
+            throw new IllegalStateException("not rendered");
+        }).withCapacity(capacity).run(c, () -> false);
+        assertEquals(1, during.get(), "held while the attempt ran");
+        assertEquals(0, capacity.running(), "released when it ended");
+    }
+
+    @Test
     public void aHandedInFileThatIsNotTheRecordedOneIsRefusedBeforeAnyWorker() throws Exception {
         byte[] source = "source".getBytes(StandardCharsets.UTF_8);
         byte[] dep = installed("bar", "2.0");

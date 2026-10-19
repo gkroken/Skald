@@ -152,6 +152,7 @@ public final class BuildKitDriver implements BuildDriver {
     private final Disposer disposer;
     /** Mounts the base's blobs into the push's repositories before the build, or null: the push uploads them. */
     private volatile BlobMounter mounter;
+    private volatile HostCapacity capacity;
     /** The last attempt's disposal on the disposer, so a test can wait for it. */
     volatile java.util.concurrent.Future<?> lastDisposal;
     /** The last attempt's work thread, so a test can wait for its own disposal. */
@@ -195,6 +196,12 @@ public final class BuildKitDriver implements BuildDriver {
         return this;
     }
 
+    /** Counts each attempt against the host's capacity, which the pools' refills wait on (T7c step 2). */
+    public BuildKitDriver withCapacity(HostCapacity capacity) {
+        this.capacity = capacity;
+        return this;
+    }
+
     /** The attempt id the launcher names every object by: the build id's 32 hex digits. */
     static String attemptId(Claimed build) {
         return build.buildId().toString().replace("-", "");
@@ -202,6 +209,16 @@ public final class BuildKitDriver implements BuildDriver {
 
     @Override
     public Outcome run(Claimed build, BooleanSupplier cancelRequested) throws Exception {
+        HostCapacity c = capacity;
+        if (c == null) {
+            return counted(build, cancelRequested);
+        }
+        try (HostCapacity.Slot slot = c.attempt()) {
+            return counted(build, cancelRequested);
+        }
+    }
+
+    private Outcome counted(Claimed build, BooleanSupplier cancelRequested) throws Exception {
         Handle h = DockerWorkerLauncher.handle(attemptId(build));
         HeadTailLog buildLog = new HeadTailLog(logs, build.contentId(), build.buildId(), build.lease().generation(),
                 config.logLimits());

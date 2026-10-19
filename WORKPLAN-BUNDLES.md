@@ -2823,7 +2823,16 @@ below are marked passed by this planning document.
          warming entries and its ready entries together never exceed `parallel` +
          `pool-size` (per driver: the app loop's, and each package platform's with the
          queue's `max_running`); a refill waits for a slot instead of competing with a
-         running build. A cold launch is never held up by the pool.
+         running build. A cold launch is never held up by the pool. *As built (a change
+         from the formula above, with its reason):* pools are per base, so "running +
+         warming + ready <= parallel + pool-size" either never binds or caps ready entries
+         below pool-size per base; and the measured harm was warm-ups competing with running
+         builds, app and package alike, on one Docker host (8144a20 N3). So one
+         `HostCapacity` per instance, of `parallel` + (binaries on) `binaries.max-running`
+         slots: every running attempt of either driver holds one and is never refused, a
+         pool entry holds one while it is launched and warmed, and a refill waits for a free
+         slot, the pool woken the moment one is released; an idle ready entry holds none
+         (memory and disk, no CPU). Step 3's disposing sandboxes will hold one too.
       3. A package attempt's disposal leaves the compile slot (measured 2026-10-18, 63 ICES
          package attempts on a loaded host: compile 6440 s in all, sandbox disposal 5650 s,
          cold launch 3950 s; median attempt 219 s against a median compile of 63 s). Today
