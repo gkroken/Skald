@@ -136,6 +136,78 @@ public class BinaryEnqueuerTest {
         assertEquals(2, queued().size(), "a version already queued is one row");
     }
 
+    private static String state(String pkg) {
+        return jdbc.queryForObject("SELECT state FROM skald.binary_build WHERE package = ? AND platform_key = ?",
+            String.class, pkg, KEY);
+    }
+
+    private static void failed(String pkg) {
+        jdbc.update("UPDATE skald.binary_build SET state = 'FAILED', finished_at = now(), error_code = 'BUILD_FAILED'"
+            + " WHERE package = ?", pkg);
+    }
+
+    @Test
+    public void aBuiltAppReopensTheFailedRowsItsLockNamesAndNothingElse() {
+        // T7c step 4: the build installed each version and succeeded, so a FAILED row it names
+        // goes back to the queue. Never a REFUSED row (843ad74 N1), nor one its lock does not name.
+        enqueuer().built(UUID.randomUUID(), rBase(), Map.of("shiny", "1.9.1", "later", "1.3.2", "other", "2.0",
+            "refused", "1.0"));
+        failed("shiny");
+        failed("other");
+        jdbc.update("UPDATE skald.binary_build SET state = 'REFUSED', finished_at = now(), refusal_code = 'SOURCE_DIGEST',"
+            + " refusal_detail = 'x' WHERE package = 'refused'");
+        UUID build = UUID.randomUUID();
+        enqueuer().built(build, rBase(), Map.of("shiny", "1.9.1", "later", "1.3.2", "refused", "1.0"));
+        assertEquals("PENDING_SOURCE", state("shiny"), "named and FAILED: back to the queue, verified again");
+        assertEquals("FAILED", state("other"), "not in this build's lock");
+        assertEquals("REFUSED", state("refused"), "an integrity refusal is never undone by a lock");
+        assertEquals("PENDING_SOURCE", state("later"), "untouched");
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.audit_event WHERE action = 'binary.reopened'"
+            + " AND actor = ?", Integer.class, "build " + build), "audited as the build, once (843ad74 N5)");
+    }
+
+    @Test
+    public void aFailedRowOfAnotherPlatformIsNotReopened() {
+        BinaryBuildQueue q = new BinaryBuildQueue(jdbc, BinaryQueueSettings.DEFAULTS, CoordinatorSettings.DEFAULTS);
+        UUID elsewhere = q.enqueue("jammy-x86_64/4.6", "shiny", "1.9.1", UUID.randomUUID());
+        jdbc.update("UPDATE skald.binary_build SET state = 'FAILED', finished_at = now(), error_code = 'BUILD_FAILED'"
+            + " WHERE id = ?", elsewhere);
+        enqueuer().built(UUID.randomUUID(), rBase(), Map.of("shiny", "1.9.1"));
+        assertEquals("FAILED", jdbc.queryForObject("SELECT state FROM skald.binary_build WHERE id = ?", String.class,
+            elsewhere), "another platform's binary is another base's");
+    }
+
+    @Test
+    public void twoBuildsReopeningOneRowAtOnceReopenItOnceAndNeitherFails() throws Exception {
+        // 843ad74 N2: the second finds it no longer FAILED, and that is done, not an error.
+        BinaryBuildQueue q = new BinaryBuildQueue(jdbc, BinaryQueueSettings.DEFAULTS, CoordinatorSettings.DEFAULTS);
+        UUID row = q.enqueue(KEY, "shiny", "1.9.1", UUID.randomUUID());
+        failed("shiny");
+        java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.ExecutorService two = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            List<java.util.concurrent.Future<java.util.Optional<BinaryBuildQueue.Reopened>>> results = new java.util.ArrayList<>();
+            for (int i = 0; i < 2; i++) {
+                String actor = "build " + i;
+                results.add(two.submit(() -> {
+                    go.await();
+                    return q.reopenFailed(row, actor);
+                }));
+            }
+            go.countDown();
+            int reopened = 0;
+            for (var r : results) {
+                reopened += r.get().isPresent() ? 1 : 0;
+            }
+            assertEquals(1, reopened);
+        } finally {
+            two.shutdownNow();
+        }
+        assertEquals("PENDING_SOURCE", state("shiny"));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.audit_event WHERE action = 'binary.reopened'"
+            + " AND actor IN ('build 0', 'build 1')", Integer.class));
+    }
+
     @Test
     public void builtDoesNotAskForgeAgain() {
         // a16cf2a N2: built() runs only for a build whose prepare-time decision was on; the

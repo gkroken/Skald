@@ -2864,7 +2864,16 @@ below are marked passed by this planning document.
          app builds, so it never loops, with no timer. Publishing never waits on the queue:
          a package without a binary is compiled inside the app's own build, as today, and
          fails that publish if it cannot build, as Connect does. A new base revision already
-         starts every package fresh (binaries are keyed on the builder image).
+         starts every package fresh (binaries are keyed on the builder image). *As built:*
+         in `BinaryEnqueuer.built`, the hook BuildKitDriver runs off the build's thread once
+         its outcome is Built (image built and pushed: what proves the packages compiled; the
+         row turns PUBLISHING right after, and a build that is not Built never calls it); the
+         rows are those of the build's platform key, which is how rows are keyed;
+         `BinaryBuildQueue.reopenFailed` re-opens under the row lock only from FAILED and
+         returns empty otherwise (843ad74 N1, N2); audited as "build <id>" (N5). What it
+         cannot prove (N3, N4) is in its javadoc: a binary-only failure may fail again, up to
+         max-attempts compiles per published build naming it; a row FAILED by a lost last
+         upload has Skald's own binary in forge, so its re-open is a retry that ends UPLOADED.
       **Pass:** for step 0, a test per refusal (an unknown key, a bad bound, a secret in
       plain text where the reference forbids it) with a mutant each, the generated schema
       and reference drift-checked, the example file loading clean, and `--validate-config`

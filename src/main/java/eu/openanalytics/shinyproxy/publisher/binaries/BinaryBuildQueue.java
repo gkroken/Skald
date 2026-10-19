@@ -611,6 +611,30 @@ public final class BinaryBuildQueue {
      * @throws IllegalStateException the row is not one a re-open applies to
      */
     public Reopened reopen(UUID rowId, String actor, boolean forgeNoLongerHoldsIt) {
+        return reopen(rowId, actor, forgeNoLongerHoldsIt, false);
+    }
+
+    /**
+     * The automatic re-open (T7c step 4): {@code rowId} back to the queue exactly as
+     * {@link #reopen} does, but only if it is FAILED when its lock is taken -- never a REFUSED
+     * row (an integrity refusal is not undone by any publisher's lock, 843ad74 N1) nor a
+     * PRESENT_FOREIGN one. Empty, and nothing changed, when it is anything else: another build
+     * re-opened it first (843ad74 N2), and that is done, not an error.
+     */
+    public Optional<Reopened> reopenFailed(UUID rowId, String actor) {
+        return Optional.ofNullable(reopen(rowId, actor, false, true));
+    }
+
+    /** The FAILED rows of {@code platformKey} among {@code versions} (package -> version). */
+    public List<UUID> failed(String platformKey, Map<String, String> versions) {
+        List<UUID> out = new ArrayList<>();
+        versions.forEach((pkg, version) -> out.addAll(jdbc.queryForList("SELECT id FROM skald.binary_build"
+                + " WHERE platform_key = ? AND package = ? AND version = ? AND state = 'FAILED'", UUID.class,
+                platformKey, pkg, version)));
+        return out;
+    }
+
+    private Reopened reopen(UUID rowId, String actor, boolean forgeNoLongerHoldsIt, boolean onlyFailed) {
         return tx.execute(status -> {
             List<Map<String, Object>> rows = jdbc.queryForList("SELECT state FROM skald.binary_build"
                     + " WHERE id = ? FOR UPDATE", rowId);
@@ -618,6 +642,9 @@ public final class BinaryBuildQueue {
                 throw new IllegalStateException("no binary row " + rowId);
             }
             String from = (String) rows.get(0).get("state");
+            if (onlyFailed && !from.equals("FAILED")) {
+                return null;
+            }
             if (!List.of("FAILED", "REFUSED", "PRESENT_FOREIGN").contains(from)) {
                 throw new IllegalStateException("binary row " + rowId + " is " + from + "; only FAILED, REFUSED or"
                         + " PRESENT_FOREIGN rows are re-opened");

@@ -65,6 +65,46 @@ public final class BinaryEnqueuer implements BinaryHook {
         return d;
     }
 
+    /**
+     * T7c step 4 (user, 2026-10-19): every FAILED row of this platform that the published build's
+     * lock names goes back to the queue. The build installed each such version and succeeded,
+     * so it compiles on this base; a temporary failure (a lost BuildKit session, a stalled host)
+     * no longer costs a package its binary for good, and a package that is really broken also
+     * fails the app builds, so it is never re-opened by one. Only FAILED rows, never a REFUSED
+     * or PRESENT_FOREIGN one (843ad74 N1); a row another build re-opened first is done, not an
+     * error (N2); called after the build's outcome is settled, off its thread, outside its
+     * transaction (BinaryHook). The audit names the build, whose row names its publisher (N5).
+     *
+     * <p>What it does not prove (N3, N4): a failure the app build cannot share -- the binary
+     * path's own hand-in or dependency closure -- may fail again, up to max-attempts compiles
+     * per published build that names the version, bounded by the publish rate; and a row
+     * FAILED by a lost upload write on its last attempt (932cbd1 N1) has Skald's own binary in
+     * forge, which this build may have installed instead of compiling: its re-open is then a
+     * retry whose upload's 409 matches the row's own intent, and the row becomes UPLOADED.
+     */
+    private void reopenFailed(UUID buildId, String key, Map<String, String> lock, Map<String, String> library) {
+        Map<String, String> asked = new java.util.TreeMap<>();
+        lock.forEach((pkg, version) -> {
+            if (!version.equals(library.get(pkg))) {
+                asked.put(pkg, version);
+            }
+        });
+        int reopened = 0;
+        for (UUID row : queue.failed(key, asked)) {
+            try {
+                if (queue.reopenFailed(row, "build " + buildId).isPresent()) {
+                    reopened++;
+                }
+            } catch (RuntimeException e) {
+                log.warn("build {}: FAILED binary row {} not re-opened: {}", buildId, row, e.getMessage());
+            }
+        }
+        if (reopened > 0) {
+            log.info("build {}: {} FAILED binary row(s) back to the queue on {}: this build installed them",
+                    buildId, reopened, key);
+        }
+    }
+
     @Override
     public void built(UUID buildId, BaseCatalog.Resolved base, Map<String, String> lock) {
         try {
@@ -88,6 +128,7 @@ public final class BinaryEnqueuer implements BinaryHook {
                 }
             }
             log.info("build {}: {} package version(s) asked for shared binaries on {}", buildId, queued, key.get());
+            reopenFailed(buildId, key.get(), lock, library);
         } catch (RuntimeException e) {
             log.warn("build {}: queueing shared binaries failed; the build is unaffected", buildId, e);
         }
