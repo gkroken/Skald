@@ -36,6 +36,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * The {@code skald:} section checked as a whole before anything starts (T7c step 0b): every
@@ -107,7 +109,7 @@ public final class ConfigurationCheck {
             for (String name : names.getPropertyNames()) {
                 String key = env ? fromEnvironment(name) : normal(name);
                 if (key != null && !secretsAllowed && uniformSecrets.contains(uniform(key))
-                        && !isPlaceholder(source.getProperty(name))) {
+                        && !keptOut(environment, source.getProperty(name), 0)) {
                     // As written, before ${} resolution (8144a20 N2); the value is never shown.
                     problems.add(key + " (" + where(source) + "): a secret written in plain text; give it as"
                             + " ${VARIABLE} from the environment, with no default, or through configtree:");
@@ -187,10 +189,30 @@ public final class ConfigurationCheck {
      * placeholder, with no default -- "${TOKEN:abc123}" writes the secret into the file after
      * all -- or an empty default, which leaves the secret unset; an empty value is unset too.
      */
-    private static boolean isPlaceholder(Object raw) {
+    private static boolean keptOut(ConfigurableEnvironment environment, Object raw, int depth) {
         // Empty is unset, not a secret.
-        return raw == null || raw.toString().isBlank() || raw.toString().trim().matches("\\$\\{[^:}\\s]+:?}");
+        if (raw == null || raw.toString().isBlank()) {
+            return true;
+        }
+        Matcher m = PLACEHOLDER.matcher(raw.toString().trim());
+        if (!m.matches() || depth > 8) {
+            return false;
+        }
+        // Where the placeholder's name is supplied (462322d N1): the environment or a mounted
+        // file, or a further placeholder that is; ${my.token} with my.token: abc123 in the same
+        // file is the secret in the file after all. A name nothing supplies is unset (empty
+        // default) or reported as unresolved by the value check.
+        for (PropertySource<?> source : environment.getPropertySources()) {
+            if (source.getName().equals("configurationProperties") || !source.containsProperty(m.group(1))) {
+                continue;
+            }
+            return source instanceof SystemEnvironmentPropertySource || source instanceof ConfigTreePropertySource
+                    || keptOut(environment, source.getProperty(m.group(1)), depth + 1);
+        }
+        return true;
     }
+
+    private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\{([^:}\\s]+):?}");
 
     /** The element after "skald.": the section a key belongs to. */
     private static String section(String key) {

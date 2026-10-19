@@ -216,6 +216,16 @@ public class ConfigurationCheckTest {
                 "skald.builds.binaries.forge-token (/opt/skald/application.yml): a secret written in plain text; give"
                 + " it as ${VARIABLE} from the environment, with no default, or through configtree:"), r.problems());
         assertFalse(r.message().contains("t0k3n") || r.message().contains("sys-s3cret"), r.message());
+
+        // 462322d N1: the placeholder is followed to whatever supplies it.
+        String plain = "a secret written in plain text";
+        assertTrue(CHECK.check(environment(Map.of("skald.builds.binaries.forge-token", "${my.token}",
+                "my.token", "in-the-file"), env, Map.of())).message().contains("forge-token (/opt/skald/application.yml): "
+                + plain), "a placeholder for another property of the file");
+        assertEquals(List.of(), CHECK.check(environment(Map.of("skald.builds.binaries.forge-token", "${my.token}",
+                "my.token", "${FORGE_TOKEN}"), env, Map.of())).problems(), "a chain that ends in the environment");
+        assertTrue(CHECK.check(environment(Map.of("skald.builds.binaries.forge-token", "${my.token}"), env,
+                Map.of("my.token", "on-a-command-line"))).message().contains(plain), "one that ends in a system property");
     }
 
     @Configuration(proxyBeanMethods = false)
