@@ -130,6 +130,53 @@ public class ConfigurationCheckTest {
     }
 
     @Test
+    public void aRenamedKeyGivenAsAnEnvironmentVariableNamesItsNewName() {
+        // e195a86 N2.
+        assertEquals(List.of("skald.builds.worker.quota-megabytes (the environment variable"
+                + " SKALD_BUILDS_WORKER_QUOTA_MEGABYTES): unknown key; it was renamed to skald.builds.worker.quota"),
+                CHECK.check(environment(Map.of(), Map.of("SKALD_BUILDS_WORKER_QUOTA_MEGABYTES", "4096"), Map.of()))
+                        .problems());
+    }
+
+    @Test
+    public void everySpellingTheCheckAcceptsIsTheKeyTheSectionsRead() {
+        // e195a86 N1: the map sections bind names as written -- an environment variable's
+        // queuecapacity or queue.capacity, a file's queueCapacity -- and must read each as the
+        // key the check accepted, not refuse it afterwards under a name nobody wrote.
+        Map<String, Object> env = Map.of("SKALD_BUILDS_ADMISSION_QUEUECAPACITY", "5",
+                "SKALD_BUILDS_ADMISSION_PER_PUBLISHER_ACTIVE", "4", "SKALD_BUILDS_COORDINATOR_RENEW_EVERY", "20s",
+                "SKALD_BUILDS_BINARIES_FORGE_TIMEOUT", "45s", "SKALD_BUILDS_BINARIES_SOURCEMAXSIZE", "1MB");
+        Map<String, Object> file = Map.of("skald.builds.coordinator.deadLine", "2h",
+                "skald.builds.binaries.maxAttempts", "3", "skald.builds.binaries.source_archived", "true");
+        new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withConfiguration(org.springframework.boot.autoconfigure.AutoConfigurations.of(
+                        org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration.class))
+                .withInitializer(ctx -> {
+                    MutablePropertySources s = ctx.getEnvironment().getPropertySources();
+                    s.addFirst(new SystemEnvironmentPropertySource("test-systemEnvironment", env));
+                    s.addFirst(new MapPropertySource("Config resource 'file [application.yml]'", file));
+                })
+                .withUserConfiguration(eu.openanalytics.shinyproxy.publisher.build.BuildsConfig.class)
+                .run(ctx -> {
+                    assertEquals(null, ctx.getStartupFailure());
+                    assertEquals(List.of(), CHECK.check(ctx.getEnvironment()).problems());
+                    var admission = ctx.getBean(eu.openanalytics.shinyproxy.publisher.build.AdmissionLimits.class);
+                    assertEquals(5, admission.queueCapacity());
+                    assertEquals(4, admission.perPublisherActive());
+                    var coordinator = ctx.getBean(eu.openanalytics.shinyproxy.publisher.build.CoordinatorSettings.class);
+                    assertEquals(java.time.Duration.ofSeconds(20), coordinator.renewEvery());
+                    assertEquals(java.time.Duration.ofHours(2), coordinator.deadline());
+                    assertEquals(java.time.Duration.ofSeconds(45), ctx.getBean(
+                            eu.openanalytics.shinyproxy.publisher.binaries.ForgeSettings.class).timeout());
+                    assertEquals(3, ctx.getBean(eu.openanalytics.shinyproxy.publisher.binaries.BinaryQueueSettings.class)
+                            .maxAttempts());
+                    var source = ctx.getBean(eu.openanalytics.shinyproxy.publisher.binaries.SourceSettings.class);
+                    assertEquals(1L << 20, source.maxSourceBytes());
+                    assertTrue(source.archived());
+                });
+    }
+
+    @Test
     public void aSecretIsNeverPrintedNorItsUnresolvedPlaceholderValue() {
         ConfigurationCheck.Result r = file("skald.builds.binaries.forge-token", "s3cret-value",
                 "skald.builds.worker.registry-password", "${NO_SUCH_VARIABLE_HERE}",

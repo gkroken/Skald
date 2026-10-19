@@ -77,12 +77,14 @@ public final class ConfigurationCheck {
     private final ConfigurationSpec spec;
     private final Set<String> known;
     private final Set<String> owned = new TreeSet<>();
+    private final Set<String> uniformKnown = new java.util.HashSet<>();
 
     public ConfigurationCheck(ConfigurationSpec spec) {
         this.spec = spec;
         this.known = spec.allKeys();
         for (String k : known) {
             owned.add(section(k));
+            uniformKnown.add(uniform(k));
         }
     }
 
@@ -97,7 +99,7 @@ public final class ConfigurationCheck {
             boolean shared = env || source.getName().equals(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME);
             for (String name : names.getPropertyNames()) {
                 String key = env ? fromEnvironment(name) : normal(name);
-                if (key == null || known.contains(key)) {
+                if (key == null || uniformKnown.contains(uniform(key))) {
                     continue;
                 }
                 String where = env ? "the environment variable " + name : where(source);
@@ -158,6 +160,15 @@ public final class ConfigurationCheck {
         }
     }
 
+    /**
+     * A name compared as Spring's relaxed binding and the map sections' parsers compare it
+     * (e195a86 N1): case, dashes and underscores ignored within each element, so every name
+     * that one of them reads as a key is that key here too.
+     */
+    private static String uniform(String name) {
+        return name.toLowerCase(Locale.ROOT).replaceAll("[-_]", "");
+    }
+
     /** The element after "skald.": the section a key belongs to. */
     private static String section(String key) {
         String[] parts = key.split("\\.");
@@ -183,7 +194,10 @@ public final class ConfigurationCheck {
             return null;
         }
         String v = variable.replaceAll("_[0-9]+_?$", "");
-        for (String k : known) {
+        // A renamed key's old name is matched too, so its refusal names the new one (e195a86 N2).
+        Set<String> names = new LinkedHashSet<>(known);
+        names.addAll(spec.renamed().keySet());
+        for (String k : names) {
             String upper = k.toUpperCase(Locale.ROOT).replace('.', '_');
             if (v.equals(upper.replace("-", "")) || v.equals(upper.replace('-', '_'))) {
                 return k;

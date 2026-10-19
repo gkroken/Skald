@@ -32,7 +32,9 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -90,12 +92,13 @@ public class BuildsConfig {
 
     @Bean
     public AdmissionLimits admissionLimits() {
-        return AdmissionLimits.fromOverrides(admission);
+        return AdmissionLimits.fromOverrides(Settings.canonical(admission, AdmissionLimits.KEYS));
     }
 
     @Bean
     public CoordinatorSettings coordinatorSettings() {
-        return CoordinatorSettings.fromOverrides(coordinator, maxRunning);
+        return CoordinatorSettings.fromOverrides(Settings.canonical(coordinator, CoordinatorSettings.KEYS),
+                maxRunning);
     }
 
     /** Validated at startup; the queue itself is wired with the builder (T7b step 2e). */
@@ -127,7 +130,11 @@ public class BuildsConfig {
 
     private Map<String, String> partition(java.util.function.Predicate<String> owns) {
         Map<String, String> out = new LinkedHashMap<>();
-        binaries.forEach((k, v) -> {
+        List<String> keys = new ArrayList<>(List.of("enabled"));
+        keys.addAll(BinaryQueueSettings.KEYS);
+        keys.addAll(ForgeSettings.KEYS);
+        keys.addAll(SourceSettings.KEYS);
+        Settings.canonical(binaries, keys).forEach((k, v) -> {
             if (owns.test(k)) {
                 out.put(k, v);
             }

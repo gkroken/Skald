@@ -27,6 +27,10 @@ import org.springframework.util.unit.DataSize;
 
 import java.time.Duration;
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * How a {@code skald.*} value is read (T7c step 0a). A duration carries its unit ("300s",
@@ -93,6 +97,28 @@ public final class Settings {
             return Boolean.parseBoolean(text);
         }
         throw new IllegalArgumentException("'" + key + "' is not true or false: '" + text + "'");
+    }
+
+    /**
+     * A map section's names as its parser knows them (e195a86 N1). Spring binds a map's keys
+     * as written: a file's {@code queueCapacity} or {@code queue_capacity}, and an environment
+     * variable's {@code queuecapacity} (SKALD_..._QUEUECAPACITY) or {@code queue.capacity}
+     * (SKALD_..._QUEUE_CAPACITY). Each is renamed to the known kebab-case key it spells,
+     * ignoring case, dashes, underscores and dots, so every spelling ConfigurationCheck accepts
+     * is the key the parser reads; a name that spells no known key is kept as written, for the
+     * parser to refuse.
+     */
+    public static Map<String, String> canonical(Map<String, String> section, List<String> keys) {
+        Map<String, String> out = new LinkedHashMap<>();
+        section.forEach((name, value) -> {
+            String uniform = uniform(name);
+            out.put(keys.stream().filter(k -> uniform(k).equals(uniform)).findFirst().orElse(name), value);
+        });
+        return out;
+    }
+
+    private static String uniform(String name) {
+        return name == null ? "" : name.trim().toLowerCase(Locale.ROOT).replaceAll("[-_.]", "");
     }
 
     private static String text(String key, Object value) {

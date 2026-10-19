@@ -21,7 +21,7 @@ validation in VS Code, IntelliJ, Neovim or Zed.
 
 ## Conventions
 
-- **names**: kebab-case. Spring's relaxed binding also accepts an environment variable (SKALD_BUILDS_MAX_RUNNING) and, inside the map sections, snake_case for the same key.
+- **names**: kebab-case. Every key may also be given as an environment variable (SKALD_BUILDS_MAX_RUNNING or SKALD_BUILDS_MAXRUNNING), and within each element case, dashes and underscores are ignored (maxRunning, max_running), as Spring's relaxed binding reads them; the startup check and the sections read the same names.
 - **duration**: A duration with its unit: 300s, 20m, 3h, or ISO-8601 PT5M. A bare number is SECONDS everywhere under skald.*, including the worker's durations, where Spring alone would read milliseconds. parser settings-seconds: whole seconds only (a lease or deadline is kept to the second); parser spring: Spring's converter, sub-second values allowed.
 - **size**: A size with its unit: 64MB, 2GB, 512B. A bare number is refused: '64' meant as megabytes would otherwise be 64 bytes.
 - **secret**: A secret is never written into the file: give it as ${VARIABLE} from the environment, or through Spring's configtree: import of mounted files (/run/secrets). It is never logged; an error about it never repeats its value.
