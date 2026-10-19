@@ -2162,7 +2162,8 @@ below are marked passed by this planning document.
       app's cold restore compiles every package from source (330-590 s measured in T7's
       pass probe). Target, measured per phase in the pass probe: a source-only republish
       under 30 s, a small first publish under 60 s, and an R first publish whose packages
-      all have binaries close to the Python one.
+      all have binaries close to the Python one. **Accepted (user, 2026-10-19): about 70 s
+      for that R first publish on this host; the probe holds it to 75 s** (59e8619 N1).
       **Shared binaries, built once per server (option 3b, user 2026-10-10).** forge now
       serves Linux binaries for CRAN packages (`.../cran-public/__linux__/<distro>/latest`;
       renv sends R's version and CPU, forge answers with a binary for that platform or the
@@ -2697,8 +2698,11 @@ below are marked passed by this planning document.
       with the rows' details removed). The host after the probe and after the A/B: nothing of the run's
       left, the A/B's test edits restored and checked by sha256.
       **Carried on:** the security review T7b requires before binaries are enabled in any
-      deployment (integrity then rests on forge and the uploader); the HTTP re-open endpoint
-      (waits for the user's sign-off on its API shape); the release notes' note that
+      deployment (integrity then rests on forge and the uploader); the HTTP re-open endpoint,
+      now needed only for PRESENT_FOREIGN (a person removes forge's foreign binary first),
+      since a FAILED row goes back to the queue by itself (T7c step 4, user 2026-10-19); its
+      shape still waits for the user's sign-off, proposed for T8 as
+      `POST /admin/binaries/{id}/reopen` (JSON only, under /admin's existing admin gate); the release notes' note that
       pool-size defaults to 1 (an idle worker, gateway, loop device and quota image per
       published base, bc66e6f N3); and two more for the release notes (2026-10-19): a package
       that never builds can hold a compile slot for up to 6 h (180-minute deadline, two
@@ -2807,6 +2811,19 @@ below are marked passed by this planning document.
          sweep skips while it exists, as the taken-entry markers work, and a disposing
          sandbox counts against the capacity bound of step 2 until it is gone, so freeing
          the slot sooner never adds load the host has no room for.
+      4. A FAILED binary goes back to the queue when an app build has compiled that package
+         itself (user, 2026-10-19). Today a row FAILED after its two attempts stays FAILED
+         until an operator re-opens it, so two temporary failures -- jsonlite's lost session
+         and magrittr's cancel during the 2026-10-19 host stall -- would have cost a good
+         package its binary for good. Instead, when an app build reaches PUBLISHING, every
+         FAILED row of that build's builder image whose package and version are in its lock
+         is re-opened through `BinaryBuildQueue.reopen` (actor: the build), as an operator's
+         re-open does, dependents refused because of it included. A successful build proves
+         the package compiles on that base; a package that is really broken also fails the
+         app builds, so it never loops, with no timer. Publishing never waits on the queue:
+         a package without a binary is compiled inside the app's own build, as today, and
+         fails that publish if it cannot build, as Connect does. A new base revision already
+         starts every package fresh (binaries are keyed on the builder image).
       **Pass:** for step 0, a test per refusal (an unknown key, a bad bound, a secret in
       plain text where the reference forbids it) with a mutant each, the generated schema
       and reference drift-checked, the example file loading clean, and `--validate-config`
@@ -2817,7 +2834,9 @@ below are marked passed by this planning document.
       measured per phase (launch.setup and time to outcome) against today's serial run; the
       T7b probe's package phases measured against 4160e3a's (setup median 43 s); a package's
       slot time measured with its disposal moved off it (a disposal racing the sweep: a test
-      and a mutant); host clean.
+      and a mutant); for step 4, a FAILED row re-opened by a published build of its lock and
+      left FAILED by a failed one, by another base's build and by a lock without it, each
+      with a mutant; host clean.
       **Not here:** time-windowed pool sizes (GitLab's policy windows; small, later), several
       Docker hosts with a capacity each and a Kubernetes runtime (the later multi-host
       track), microVM isolation (needs KVM; this host has none).
