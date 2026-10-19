@@ -318,6 +318,27 @@ public class WorkerConfig {
         return problems;
     }
 
+    /**
+     * A URL as a refusal may print it (d8f6bcf N1): without its user information and query,
+     * where credentials go, since --validate-config's output is meant to be pasted into a
+     * ticket; a value that is not a URL is not shown at all.
+     */
+    static String shown(String url) {
+        try {
+            URI u = URI.create(url);
+            if (u.getRawUserInfo() == null && u.getRawQuery() == null && u.getRawFragment() == null) {
+                return url;
+            }
+            if (u.getScheme() == null || u.getHost() == null) {
+                return "(a value not shown: it may hold a secret)";
+            }
+            return u.getScheme() + "://" + u.getHost() + (u.getPort() < 0 ? "" : ":" + u.getPort())
+                    + (u.getRawPath() == null ? "" : u.getRawPath()) + " (credentials or query not shown)";
+        } catch (IllegalArgumentException e) {
+            return "(a value that is not a URL, not shown: it may hold a secret)";
+        }
+    }
+
     /** Every refusal that needs no Docker, catalog or bean: the configuration itself. */
     List<String> problems(CoordinatorSettings settings) {
         List<String> problems = new ArrayList<>();
@@ -362,11 +383,12 @@ public class WorkerConfig {
             if (mirror == null || mirror.isBlank()) {
                 continue;
             }
+            String shown = shown(mirror);
             try {
                 URI uri = URI.create(mirror);
                 String host = uri.getHost();
                 if (host == null || !allowed.contains(host)) {
-                    problems.add("mirror " + mirror + ": its host is not in repos or private-mirrors, so the"
+                    problems.add("mirror " + shown + ": its host is not in repos or private-mirrors, so the"
                             + " gateway would refuse every restore");
                 }
                 // What the gateway the launcher ships lets through (4b8c6f8-F1): plain http to a
@@ -377,17 +399,18 @@ public class WorkerConfig {
                 int port = uri.getPort() >= 0 ? uri.getPort() : https ? 443 : 80;
                 List<Integer> served = https ? List.of(443) : GatewayConfig.REPO_PORTS;
                 if (!served.contains(port)) {
-                    problems.add("mirror " + mirror + ": port " + port + ", but the gateway serves "
+                    problems.add("mirror " + shown + ": port " + port + ", but the gateway serves "
                             + uri.getScheme() + " repositories on " + served + " only");
                 }
                 new Mirrors(URI.create(mirror), URI.create(mirror));
             } catch (IllegalArgumentException e) {
-                problems.add("mirror " + mirror + ": " + e.getMessage());
+                // The parsers' own messages may quote the URL as given.
+                problems.add("mirror " + shown + ": " + String.valueOf(e.getMessage()).replace(mirror, shown));
             }
         }
         if (registryApi != null && !registryApi.isBlank()
                 && !registryApi.matches("https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?")) {
-            problems.add("registry-api " + registryApi + " is not http(s)://host[:port]");
+            problems.add("registry-api " + shown(registryApi) + " is not http(s)://host[:port]");
         }
         if (quotaMegabytes < 1024) {
             problems.add("quota " + quotaMegabytes + "MB is below 1GB: no base fits");

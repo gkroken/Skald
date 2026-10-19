@@ -134,6 +134,53 @@ public class ConfigurationValidatorTest {
     }
 
     @Test
+    public void onlyTheCommandLineCanAskToValidate() {
+        // d8f6bcf-F1: read from every source, a VALIDATE_CONFIG in the environment, a system
+        // property or a file entry would turn a server start into "valid, exit 0".
+        SkaldConfigurationPostProcessor.exit = c -> {
+            throw new Exited();
+        };
+        List<java.util.function.Consumer<SpringApplication>> elsewhere = List.of(
+                app -> {
+                    StandardEnvironment e = new StandardEnvironment();
+                    e.getPropertySources().addFirst(new org.springframework.core.env.SystemEnvironmentPropertySource(
+                            "test-systemEnvironment", Map.of("VALIDATE_CONFIG", "1", "VALIDATECONFIG", "x")));
+                    app.setEnvironment(e);
+                },
+                app -> {
+                    StandardEnvironment e = new StandardEnvironment();
+                    e.getPropertySources().replace(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME,
+                            new MapPropertySource(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME,
+                                    Map.of("validate-config", "true")));
+                    app.setEnvironment(e);
+                },
+                app -> app.setDefaultProperties(Map.of("validate-config", "true")));
+        for (var source : elsewhere) {
+            SpringApplication app = new SpringApplication(Empty.class);
+            app.setWebApplicationType(WebApplicationType.NONE);
+            source.accept(app);
+            app.run().close();
+        }
+        SpringApplication app = new SpringApplication(Empty.class);
+        app.setWebApplicationType(WebApplicationType.NONE);
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> app.run("--validate-config=false"));
+        assertTrue(e.getMessage().contains("--validate-config takes no value"), e.getMessage());
+        AtomicInteger code = new AtomicInteger(-1);
+        assertEquals("Skald's configuration is valid.", run(code, "--validate-config=true").strip());
+        assertEquals(0, code.get());
+    }
+
+    @Test
+    public void aMirrorsCredentialsAreNeverPrinted(@TempDir Path dir) {
+        // d8f6bcf N1: the output is meant to be pasted into a ticket.
+        String all = String.join("\n", validate("skald.builds.worker.enabled", "true",
+                "skald.builds.worker.cran-mirror", "https://skald:t0ken@forge.example/repository/cran/?k=q4ery",
+                "skald.builds.worker.registry-api", "https://u:p4ss@registry.example").problems());
+        assertTrue(all.contains("mirror https://forge.example/repository/cran/ (credentials or query not shown)"), all);
+        assertFalse(all.contains("t0ken") || all.contains("q4ery") || all.contains("p4ss"), all);
+    }
+
+    @Test
     public void theFlagPrintsEveryProblemAndExitsOneOrPrintsValidAndExitsZero() {
         AtomicInteger code = new AtomicInteger(-1);
         String bad = run(code, "--validate-config", "--skald.builds.max-runing=3",

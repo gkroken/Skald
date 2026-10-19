@@ -27,7 +27,9 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.env.EnvironmentPostProcessor;
 import org.springframework.boot.logging.DeferredLogFactory;
 import org.springframework.core.Ordered;
+import org.springframework.core.env.CommandLinePropertySource;
 import org.springframework.core.env.ConfigurableEnvironment;
+import org.springframework.core.env.PropertySource;
 
 import java.io.PrintStream;
 import java.util.function.IntConsumer;
@@ -54,7 +56,7 @@ public class SkaldConfigurationPostProcessor implements EnvironmentPostProcessor
 
     @Override
     public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
-        if (environment.containsProperty(VALIDATE)) {
+        if (validating(environment)) {
             // java -jar skald.jar --validate-config: every static check, printed, then exit 0
             // or 1 before anything starts -- no database, Docker or network is touched.
             ConfigurationCheck.Result result = ConfigurationValidator.validate(environment);
@@ -69,6 +71,28 @@ public class SkaldConfigurationPostProcessor implements EnvironmentPostProcessor
         if (!result.ok()) {
             throw new IllegalStateException(result.message());
         }
+    }
+
+    /**
+     * Whether this run validates (d8f6bcf-F1): only the command line can ask, and only as
+     * {@code --validate-config} or {@code --validate-config=true}. Read from every source, an
+     * environment variable VALIDATE_CONFIG, a system property or a file entry -- even one set
+     * to false -- would turn a server start into "valid, exit 0", and a restart-on-failure
+     * policy would leave the server down. Any other value on the command line is refused.
+     */
+    static boolean validating(ConfigurableEnvironment environment) {
+        PropertySource<?> args = environment.getPropertySources()
+                .get(CommandLinePropertySource.COMMAND_LINE_PROPERTY_SOURCE_NAME);
+        if (args == null || !args.containsProperty(VALIDATE)) {
+            return false;
+        }
+        Object value = args.getProperty(VALIDATE);
+        String text = value == null ? "" : value.toString().trim();
+        if (text.isEmpty() || text.equals("true")) {
+            return true;
+        }
+        throw new IllegalStateException("--" + VALIDATE + " takes no value (or true); leave it out to start the"
+                + " server, not --" + VALIDATE + "=" + text);
     }
 
     @Override
