@@ -2667,6 +2667,22 @@ below are marked passed by this planning document.
       code took 86.9 s (no wait) and 102.6 s (right after the 40-package drain): a first
       publish that lands while the package queue drains takes well over a minute on this
       host. T7c's capacity-bounded pool is where that case belongs.
+      **Remeasured (2026-10-19, 2c7fb45, R base r3; 4f218cd N1, 0a9386d N2, 2c7fb45 N1).**
+      With the app build's two solves (0a9386d) the full probe is 25 of 26 green; row C
+      took 71.0 s against 60 s, after a 320 s wait for a settled host: client.start 3.6 s,
+      build 63.2 s (restore 20.9 s with 41 packages downloaded in 0.6 s, the second solve
+      all CACHED, then layers exported in 8.3 s and pushed in 36.7 s while the cache export
+      ran 28.9 s beside it). The second solve is not where the time went: an A/B of six
+      app builds each (80 MB layer, the probe's worker defaults, interleaved on this host)
+      gave a minimum of 31.4 s with two solves and 30.8 s with one, medians 53 s and 64 s,
+      ranges 31-153 s and 31-122 s. The gap to 50.6 s is the push to the local registry
+      on this WSL host, whose spread a single C sample cannot resolve; the 60 s target is
+      unchanged and the row stays red until a remeasure on a quieter host says otherwise.
+      The 40-package drain took 6758 s with no package lease lost (d6fbcde, 4219fc0) and
+      no "no active session" in any log (91908cd, 0a9386d); the run's four reaps are the
+      app builds A-D, each reaped INTERRUPTED one lease (now 300 s) after PUBLISHING, as
+      designed until T9. The host after the probe and after the A/B: nothing of the run's
+      left, the A/B's test edits restored and checked by sha256.
       **Carried on:** the security review T7b requires before binaries are enabled in any
       deployment (integrity then rests on forge and the uploader); the HTTP re-open endpoint
       (waits for the user's sign-off on its API shape); the release notes' note that
