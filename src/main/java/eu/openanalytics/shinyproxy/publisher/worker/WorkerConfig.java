@@ -106,10 +106,10 @@ public class WorkerConfig {
     private String workspace;
     private String architecture = "amd64";
     /**
-     * The workspace quota ({@code quota}, a size with its unit, such as 8GB). 8 GiB: a cold R build holds the extracted base (about 1.5
-     * GiB for rocker/r-ver), BuildKit's snapshots of each step and the compiled library;
-     * the 4 GiB the probes used is enough for the fixture apps and too tight for a real
-     * dependency tree. T5 F6 carry (3) left the production number to this track.
+     * The workspace quota ({@code quota}, a size with its unit, such as 8GB). 8 GiB: a cold R
+     * build holds the extracted base (about 1.5 GiB for rocker/r-ver), BuildKit's snapshots of
+     * each step and the compiled library; the 4 GiB the probes used is enough for the fixture
+     * apps and too tight for a real dependency tree. T5 F6 carry (3) left the production number to this track.
      */
     private int quotaMegabytes = 8192;
     // The durations: a bare number is seconds, as everywhere under skald.* (T7c 0a), not

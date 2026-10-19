@@ -2763,7 +2763,12 @@ below are marked passed by this planning document.
             description). A test holds the Java classes to it (every field there, defaults
             equal); generated from it and drift-checked: `schema/skald-config.schema.json`
             (the `skald:` section, for editors, CI and later a Helm values schema) and
-            `docs/CONFIGURATION.md`.
+            `docs/CONFIGURATION.md`. *As built:* the schema is
+            `schemas/config/skald-config.schema.json`, beside `schemas/manifest`; the
+            generator is test code (no new dependency), and the test's
+            `-Dskald.regenerate=true` rewrites both; the spec also records which parser
+            reads each key and the worker's required keys, and a source scan fails on a
+            `skald.*` literal the spec lacks.
          d. A validate mode (`--validate-config`): loads the configuration exactly as startup
             does, runs the static checks only (no database, Docker or network), prints every
             problem with its key path, exits 0 or 1, for CI and pre-deploy.

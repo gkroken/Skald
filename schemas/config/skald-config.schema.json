@@ -1,0 +1,588 @@
+{
+  "$schema" : "https://json-schema.org/draft/2020-12/schema",
+  "$id" : "https://skald.invalid/schemas/config/skald-config.schema.json",
+  "title" : "Skald configuration",
+  "description" : "The skald: section of application.yml, generated from spec/configuration-v1.json. Other sections (proxy:, spring:) are left open.",
+  "type" : "object",
+  "properties" : {
+    "skald" : {
+      "type" : "object",
+      "additionalProperties" : false,
+      "properties" : {
+        "storage" : {
+          "type" : "object",
+          "additionalProperties" : false,
+          "properties" : {
+            "endpoint" : {
+              "type" : "string",
+              "format" : "uri",
+              "description" : "The S3-compatible object store (MinIO, Ceph, AWS S3) holding bundles and build logs. Unset: the publishing layer's storage is off and the application boots as upstream."
+            },
+            "region" : {
+              "type" : "string",
+              "default" : "us-east-1",
+              "description" : "The store's region; most self-hosted stores accept any value."
+            },
+            "access-key" : {
+              "type" : "string",
+              "writeOnly" : true,
+              "description" : "SECRET: give it as ${VARIABLE} or through configtree:, never in the file. The store's access key id. Required with endpoint."
+            },
+            "secret-key" : {
+              "type" : "string",
+              "writeOnly" : true,
+              "description" : "SECRET: give it as ${VARIABLE} or through configtree:, never in the file. The store's secret key. Required with endpoint."
+            },
+            "path-style" : {
+              "type" : "boolean",
+              "default" : true,
+              "description" : "Path-style bucket addressing. On by default, unlike the SDK: a self-hosted store behind one hostname has no wildcard DNS. Turn off for AWS S3."
+            }
+          }
+        },
+        "dispatcher" : {
+          "type" : "object",
+          "additionalProperties" : false,
+          "properties" : {
+            "require-override" : {
+              "type" : "boolean",
+              "default" : true,
+              "description" : "Refuse to start when the dispatcher override that runtime-added content needs could not be installed. false starts anyway, and content published at run time will not open."
+            }
+          }
+        },
+        "builds" : {
+          "type" : "object",
+          "additionalProperties" : false,
+          "properties" : {
+            "max-running" : {
+              "type" : "integer",
+              "minimum" : 1,
+              "default" : 1,
+              "description" : "App builds running at once across the whole deployment, counted in the database."
+            },
+            "admission" : {
+              "type" : "object",
+              "additionalProperties" : false,
+              "properties" : {
+                "queue-capacity" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "default" : 10,
+                  "description" : "Builds that may wait (QUEUED) across every content item. May be raised, never removed."
+                },
+                "per-publisher-active" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "default" : 3,
+                  "description" : "Queued, running and publishing builds one publisher may hold at once."
+                }
+              }
+            },
+            "coordinator" : {
+              "type" : "object",
+              "additionalProperties" : false,
+              "properties" : {
+                "lease" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "300s",
+                  "description" : "How long a build's claim lasts without renewal before the reaper interrupts it. Long enough to outlast a stalled host: a holder survives a stall of lease minus renew-every."
+                },
+                "renew-every" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "30s",
+                  "description" : "How often a running build renews its claim; at most half the lease."
+                },
+                "deadline" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "20m",
+                  "description" : "A build's wall-clock deadline; past it the build is TIMED_OUT."
+                }
+              }
+            },
+            "binaries" : {
+              "type" : "object",
+              "additionalProperties" : false,
+              "properties" : {
+                "enabled" : {
+                  "type" : "boolean",
+                  "default" : false,
+                  "description" : "Shared Linux binaries for R packages: compile each package once in a sandbox and serve it from forge. Off until the deployment's security review (WORKPLAN T7b); needs the worker and forge-url."
+                },
+                "max-running" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "default" : 1,
+                  "description" : "Package compiles running at once, beside the app builds."
+                },
+                "max-attempts" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "default" : 2,
+                  "description" : "Claims per package before it is FAILED and its apps keep restoring it from source."
+                },
+                "lease" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "300s",
+                  "description" : "How long a compile's claim lasts without renewal."
+                },
+                "renew-every" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "30s",
+                  "description" : "How often a compile renews its claim; at most half the lease."
+                },
+                "deadline" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "3h",
+                  "description" : "One compile's wall-clock deadline. Large packages (duckdb) compile for well over an hour on a busy host."
+                },
+                "forge-url" : {
+                  "type" : "string",
+                  "format" : "uri",
+                  "description" : "forge's base URL, ending in /. Unset: shared binaries are off. No credentials, query or fragment in it."
+                },
+                "forge-binary-repository" : {
+                  "type" : "string",
+                  "default" : "cran-linux",
+                  "description" : "forge's repository for the binaries."
+                },
+                "forge-token" : {
+                  "type" : "string",
+                  "writeOnly" : true,
+                  "description" : "SECRET: give it as ${VARIABLE} or through configtree:, never in the file. forge's write token, scoped to bin/linux/<codename>-<arch>/contrib/<rminor>/** of the binary repository. Required with forge-url. Never handed to any container."
+                },
+                "forge-registration-ttl" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "60s",
+                  "description" : "How long forge's platform registration is trusted before it is read again."
+                },
+                "forge-timeout" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "30s",
+                  "description" : "Connecting to forge and each small exchange."
+                },
+                "forge-upload-deadline" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "10m",
+                  "description" : "One binary's upload, which grows with the binary."
+                },
+                "source-repository" : {
+                  "type" : "string",
+                  "format" : "uri",
+                  "description" : "forge's CRAN proxy member (never the group, which also serves hosted packages), ending in /, from which sources are verified against the public index. Unset: nothing is verified."
+                },
+                "source-max-index-size" : {
+                  "type" : "string",
+                  "pattern" : "^[0-9]+(B|KB|MB|GB|TB)$",
+                  "default" : "64MB",
+                  "description" : "The largest package index read."
+                },
+                "source-max-size" : {
+                  "type" : "string",
+                  "pattern" : "^[0-9]+(B|KB|MB|GB|TB)$",
+                  "default" : "256MB",
+                  "description" : "The largest source tarball read."
+                },
+                "source-max-expanded-size" : {
+                  "type" : "string",
+                  "pattern" : "^[0-9]+(B|KB|MB|GB|TB)$",
+                  "default" : "2GB",
+                  "description" : "A source tarball's largest expanded size."
+                },
+                "source-fetch-timeout" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "30s",
+                  "description" : "Connecting to the source repository."
+                },
+                "source-transfer-deadline" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "10m",
+                  "description" : "One source or index transfer."
+                },
+                "source-index-ttl" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "5m",
+                  "description" : "How long a fetched index is reused."
+                },
+                "source-behind-retry" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "5m",
+                  "description" : "When the index is behind the lock, the first retry; it doubles from there."
+                },
+                "source-behind-max-retry" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "6h",
+                  "description" : "The longest wait between retries of an index behind the lock."
+                },
+                "source-behind-bound" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "48h",
+                  "description" : "How long after the first try a package whose index stays behind is refused INDEX_BEHIND; forge caches a proxy's index for 24 hours by default."
+                },
+                "source-archived" : {
+                  "type" : "boolean",
+                  "default" : false,
+                  "description" : "Also build archived versions the index no longer lists, trusting their first fetch (its SHA-256 is recorded and never changes)."
+                }
+              }
+            },
+            "worker" : {
+              "type" : "object",
+              "additionalProperties" : false,
+              "properties" : {
+                "enabled" : {
+                  "type" : "boolean",
+                  "default" : false,
+                  "description" : "Run builds on this instance's Docker host. Needs a database, object storage and every key the worker marks required."
+                },
+                "owner" : {
+                  "type" : "string",
+                  "description" : "This instance's name on the builds it claims. Unset: the host name."
+                },
+                "worker-image" : {
+                  "type" : "string",
+                  "description" : "The build worker image (images/buildkit-worker), by digest."
+                },
+                "gateway-image" : {
+                  "type" : "string",
+                  "description" : "The egress gateway image (images/egress-gateway), by digest."
+                },
+                "registry" : {
+                  "type" : "string",
+                  "description" : "The registry's host name as the worker reaches it (port 5000); built images and the published bases live there."
+                },
+                "registry-api" : {
+                  "type" : "string",
+                  "format" : "uri",
+                  "description" : "The registry as this instance reaches it, http(s)://host[:port], for publication's digest check. The credential travels in a Basic header: prefer https or an address on this host."
+                },
+                "registry-username" : {
+                  "type" : "string",
+                  "description" : "The registry user builds push as."
+                },
+                "registry-password" : {
+                  "type" : "string",
+                  "writeOnly" : true,
+                  "description" : "SECRET: give it as ${VARIABLE} or through configtree:, never in the file. That user's password."
+                },
+                "outer-networks" : {
+                  "type" : "array",
+                  "items" : {
+                    "type" : "string"
+                  },
+                  "default" : [ ],
+                  "description" : "Docker networks the gateway joins to reach the registry and the mirrors."
+                },
+                "repos" : {
+                  "type" : "array",
+                  "items" : {
+                    "type" : "string"
+                  },
+                  "default" : [ ],
+                  "description" : "Hosts of the package repositories the gateway lets a build reach."
+                },
+                "private-mirrors" : {
+                  "type" : "array",
+                  "items" : {
+                    "type" : "string"
+                  },
+                  "default" : [ ],
+                  "description" : "Hosts of private package mirrors the gateway lets a build reach."
+                },
+                "cran-mirror" : {
+                  "type" : "string",
+                  "format" : "uri",
+                  "description" : "The CRAN mirror R builds restore from (forge's CRAN group); its host must be in repos or private-mirrors."
+                },
+                "pypi-mirror" : {
+                  "type" : "string",
+                  "format" : "uri",
+                  "description" : "The PyPI simple index Python builds install from; its host must be in repos or private-mirrors."
+                },
+                "cran-linux-binaries" : {
+                  "type" : "boolean",
+                  "default" : false,
+                  "description" : "The CRAN mirror has forge's Linux binary layout (<cran-mirror>__linux__/<codename>/latest). Off by default: a mirror without it answers 404 and renv does not fall back to source."
+                },
+                "published-bases" : {
+                  "type" : "string",
+                  "description" : "The published-bases file dev/publish-bases.py wrote: each base's digest in the registry."
+                },
+                "workspace" : {
+                  "type" : "string",
+                  "description" : "A writable directory this instance alone extracts bundles into; locked at startup."
+                },
+                "architecture" : {
+                  "type" : "string",
+                  "default" : "amd64",
+                  "description" : "The architecture this host builds for."
+                },
+                "quota" : {
+                  "type" : "string",
+                  "pattern" : "^[0-9]+(B|KB|MB|GB|TB)$",
+                  "default" : "8GB",
+                  "description" : "Each build's workspace quota. At least 1GB; a cold R build holds the extracted base, BuildKit's snapshots and the compiled library."
+                },
+                "poll" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "1s",
+                  "description" : "How often a running build's stop and log are checked; at most half the coordinator's renew-every."
+                },
+                "settle" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "30s",
+                  "description" : "How long a stopped build is given to wind down before its worker is removed."
+                },
+                "idle-pause" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "2s",
+                  "description" : "The build loop's pause when the queue is empty."
+                },
+                "sweep-period" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "10m",
+                  "description" : "How often the reconciliation sweep removes what no live attempt owns."
+                },
+                "sweep-grace" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "15m",
+                  "description" : "How long after a build ends the sweep leaves its attempt alone; longer than settle and the disposal's close wait."
+                },
+                "pool-size" : {
+                  "type" : "integer",
+                  "minimum" : 0,
+                  "maximum" : 8,
+                  "default" : 1,
+                  "description" : "Ready workers per published base, warmed ahead of any build. 0: every build launches its own. Each idle one holds a worker, a gateway, a loop device and a workspace image."
+                },
+                "pool-ttl" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "30m",
+                  "description" : "How long a ready worker is kept before a fresh one replaces it."
+                },
+                "bundle-bucket" : {
+                  "type" : "string",
+                  "default" : "skald-bundles",
+                  "description" : "The object store bucket holding bundles."
+                },
+                "log-bucket" : {
+                  "type" : "string",
+                  "default" : "skald-logs",
+                  "description" : "The object store bucket holding build logs."
+                }
+              }
+            }
+          }
+        },
+        "bundle" : {
+          "type" : "object",
+          "additionalProperties" : false,
+          "properties" : {
+            "limits" : {
+              "type" : "object",
+              "additionalProperties" : false,
+              "properties" : {
+                "max-compressed-bytes" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 68719476736,
+                  "default" : 268435456,
+                  "description" : "The uploaded archive as it arrived. Checked against the byte count before a single header is parsed, so it is the first bound anything hits. (unit: bytes)"
+                },
+                "max-expanded-bytes" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 274877906944,
+                  "default" : 2147483648,
+                  "description" : "Total bytes written across all members. Counted from bytes actually streamed, not from declared sizes, so a lying header cannot buy room. (unit: bytes)"
+                },
+                "max-file-bytes" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 68719476736,
+                  "default" : 536870912,
+                  "description" : "Any single regular member. (unit: bytes)"
+                },
+                "max-entries" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 5000000,
+                  "default" : 20000,
+                  "description" : "Physical headers, including directories, extended headers and anything else parsed and ignored. Metadata counts: an archive of nothing but ignored headers is still an archive the parser walked. (unit: count)"
+                },
+                "max-manifest-bytes" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 67108864,
+                  "default" : 4194304,
+                  "description" : "The manifest member. Distinct from max_file_bytes and always the smaller of the two in practice, because the manifest is parsed into memory as a document rather than streamed to disk. (unit: bytes)"
+                },
+                "max-extended-header-bytes" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 16777216,
+                  "default" : 65536,
+                  "description" : "One PAX extended header's own payload. tarfile never reports this, which is why the corpus fixture bomb-huge-pax-field is accepted by a library-only extractor. (unit: bytes)"
+                },
+                "max-path-bytes" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 4096,
+                  "default" : 1024,
+                  "description" : "The member path in UTF-8, after any approved PAX override, excluding the extraction root. (unit: bytes)"
+                },
+                "max-segment-bytes" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 255,
+                  "default" : 255,
+                  "description" : "One path segment in UTF-8. (unit: bytes)"
+                },
+                "max-depth" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 256,
+                  "default" : 32,
+                  "description" : "Path segments in a member, counted after validation. (unit: count)"
+                },
+                "extraction-deadline-seconds" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 3600,
+                  "default" : 60,
+                  "description" : "Wall clock for one extraction, enforced by the extractor itself. The corpus oracle applies its own outer deadline on top, because a bound a subject enforces on itself is a bound that has to be checked from outside. (unit: seconds)"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
