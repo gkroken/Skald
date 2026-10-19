@@ -416,21 +416,42 @@ public class T7PassProbeTest {
         for (String l : Files.readAllLines(log)) {
             lines.add(JSON.readTree(l).path("t").asText());
         }
-        // Every restore step: the build solves twice (0a9386d), and the second solve numbers
-        // its steps afresh and reports the restore CACHED on the first solve's own result.
-        List<String> steps = new ArrayList<>();
+        return restore(app.restore(), lines, log.toString());
+    }
+
+    /**
+     * {@link #restore(App, Path)} on a log's lines. The build solves twice (0a9386d) and each
+     * solve numbers its steps afresh, so a step number means nothing across solves: the restore
+     * of one solve may share its number with a step that printed in the other (9cc2d58 N1).
+     * Each solve, from its "#1 [internal] load build definition" on, is read on its own: the
+     * restore RAN if it printed in any solve, and settled if it did in any.
+     */
+    static Restore restore(String marker, List<String> lines, String where) {
+        List<List<String>> solves = new ArrayList<>();
         for (String l : lines) {
-            var m = java.util.regex.Pattern.compile("^(#\\d+) \\[\\d+/\\d+\\] RUN ").matcher(l);
-            if (m.find() && l.contains(app.restore())) {
-                steps.add(m.group(1));
+            if (solves.isEmpty() || l.startsWith("#1 [internal] load build definition")) {
+                solves.add(new ArrayList<>());
+            }
+            solves.get(solves.size() - 1).add(l);
+        }
+        boolean found = false;
+        boolean ran = false;
+        boolean settled = false;
+        for (List<String> solve : solves) {
+            for (String l : solve) {
+                var m = java.util.regex.Pattern.compile("^(#\\d+) \\[\\d+/\\d+\\] RUN ").matcher(l);
+                if (m.find() && l.contains(marker)) {
+                    String id = m.group(1);
+                    found = true;
+                    ran |= solve.stream().anyMatch(o -> o.matches(
+                            java.util.regex.Pattern.quote(id) + " [0-9.]+ .*"));
+                    settled |= solve.stream().anyMatch(o -> o.equals(id + " CACHED")
+                            || o.startsWith(id + " DONE"));
+                }
             }
         }
-        assertTrue(!steps.isEmpty(), "the restore step is in " + log);
-        boolean ran = steps.stream().anyMatch(id -> lines.stream().anyMatch(l -> l.matches(
-                java.util.regex.Pattern.quote(id) + " [0-9.]+ .*")));
-        boolean settled = steps.stream().anyMatch(id -> lines.stream().anyMatch(l -> l.equals(id + " CACHED")
-                || l.startsWith(id + " DONE")));
-        assertTrue(settled, "the restore step settled in " + log);
+        assertTrue(found, "the restore step is in " + where);
+        assertTrue(settled, "the restore step settled in " + where);
         return ran ? Restore.RAN : Restore.REUSED;
     }
 
