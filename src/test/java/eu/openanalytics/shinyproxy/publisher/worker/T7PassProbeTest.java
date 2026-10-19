@@ -184,6 +184,14 @@ public class T7PassProbeTest {
             p.add("skald.builds.max-running=" + parallel);
             p.add("skald.builds.worker.parallel=" + parallel);
         }
+        // N builds admitted at once by one publisher: the probe raises admission's limits to N
+        // (e641f9e N1); the product's defaults (3 per publisher, 10 queued) are untouched.
+        String concurrent = System.getProperty("skald.t7probe.concurrent");
+        if (concurrent != null) {
+            int n = Integer.parseInt(concurrent);
+            p.add("skald.builds.admission.per-publisher-active=" + Math.max(3, n));
+            p.add("skald.builds.admission.queue-capacity=" + Math.max(10, n));
+        }
         p.addAll(List.of(overrides));
         return new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(ConfigurationPropertiesAutoConfiguration.class,
@@ -602,6 +610,7 @@ public class T7PassProbeTest {
                         new BuildAdmission.Inputs(items.get(i)[1], Map.of())).buildId());
             }
             long until = System.nanoTime() + Duration.ofMinutes(60).toNanos();
+            List<ObjectNode> rows = new ArrayList<>();
             for (UUID build : builds) {
                 Map<String, Object> row;
                 do {
@@ -615,7 +624,11 @@ public class T7PassProbeTest {
                 ObjectNode r = result(ctx, "concurrent", PY, row);
                 r.put("since_admission", String.valueOf(row.get("since_admission")))
                         .put("parallel", System.getProperty("skald.t7probe.parallel", "1"));
-                assertEquals("PUBLISHING", row.get("state"), r.toString());
+                rows.add(r);
+            }
+            // Every build recorded first, then judged: one failure keeps the others' timings (N2).
+            for (ObjectNode r : rows) {
+                assertEquals("PUBLISHING", r.path("state").asText(), r.toString());
             }
         });
     }
