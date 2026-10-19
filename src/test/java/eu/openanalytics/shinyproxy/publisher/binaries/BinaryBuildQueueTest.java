@@ -888,6 +888,30 @@ public class BinaryBuildQueueTest {
             List.of()), "a re-verify that reads no cycle queues it, with the same digests");
     }
 
+    @Test
+    public void theAutomaticReopenNeverMovesARefusedOrForeignRow() {
+        // bcc9a74 N1: the guard holds in the race it exists for -- a build read the row FAILED,
+        // another re-opened it and the verifier refused it, then the first takes the lock.
+        BinaryBuildQueue q = queue();
+        verified(q, "aaa", "bbb");
+        UUID refused = id("bbb");
+        assertEquals(Recorded.REFUSED_CYCLE, q.recordSource(claimSourceOf(q, refused).lease(), SHA, MD5,
+            List.of(new Dependency("aaa", "1.0"))));
+        Map<String, Object> before = row(refused);
+        assertTrue(q.reopenFailed(refused, "build x").isEmpty(), "a REFUSED row is not re-opened by a build");
+        assertEquals("REFUSED", state(refused));
+        assertEquals(before.get("refusal_code"), row(refused).get("refusal_code"));
+
+        UUID foreign = q.enqueue(KEY, "ccc", "1.0", null);
+        SourceClaim c = claimSourceOf(q, foreign);
+        assertEquals(BinaryBuildQueue.Present.FOREIGN, q.alreadyPresent(c.lease(), "9".repeat(64), "present"));
+        assertTrue(q.reopenFailed(foreign, "build x").isEmpty(), "nor a PRESENT_FOREIGN one");
+        assertEquals("PRESENT_FOREIGN", state(foreign));
+        assertEquals("9".repeat(64), row(foreign).get("binary_sha256"), "its foreign digest kept");
+        assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM skald.audit_event WHERE action = 'binary.reopened'"
+            + " AND actor = 'build x'", Integer.class));
+    }
+
     private static UUID reopenAndReturn(BinaryBuildQueue q, UUID row) {
         q.reopen(row, "operator", false);
         return row;
