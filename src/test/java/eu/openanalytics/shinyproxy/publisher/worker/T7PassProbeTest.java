@@ -416,17 +416,20 @@ public class T7PassProbeTest {
         for (String l : Files.readAllLines(log)) {
             lines.add(JSON.readTree(l).path("t").asText());
         }
-        String step = null;
+        // Every restore step: the build solves twice (0a9386d), and the second solve numbers
+        // its steps afresh and reports the restore CACHED on the first solve's own result.
+        List<String> steps = new ArrayList<>();
         for (String l : lines) {
             var m = java.util.regex.Pattern.compile("^(#\\d+) \\[\\d+/\\d+\\] RUN ").matcher(l);
             if (m.find() && l.contains(app.restore())) {
-                step = m.group(1);
+                steps.add(m.group(1));
             }
         }
-        assertTrue(step != null, "the restore step is in " + log);
-        String id = step;
-        boolean ran = lines.stream().anyMatch(l -> l.matches(java.util.regex.Pattern.quote(id) + " [0-9.]+ .*"));
-        boolean settled = lines.stream().anyMatch(l -> l.equals(id + " CACHED") || l.startsWith(id + " DONE"));
+        assertTrue(!steps.isEmpty(), "the restore step is in " + log);
+        boolean ran = steps.stream().anyMatch(id -> lines.stream().anyMatch(l -> l.matches(
+                java.util.regex.Pattern.quote(id) + " [0-9.]+ .*")));
+        boolean settled = steps.stream().anyMatch(id -> lines.stream().anyMatch(l -> l.equals(id + " CACHED")
+                || l.startsWith(id + " DONE")));
         assertTrue(settled, "the restore step settled in " + log);
         return ran ? Restore.RAN : Restore.REUSED;
     }

@@ -61,6 +61,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -1065,23 +1066,26 @@ public class BuildKitDriverTest {
     /** Whether the restore step was answered from the cache, read from buildctl's progress. */
     private static boolean restoreWasCached(Claimed c) throws Exception {
         List<String> texts = texts(c);
-        String step = null;
+        // Every step that is the restore: a build solves twice (0a9386d), and the second solve
+        // numbers its steps afresh and reports the restore CACHED -- a hit on the first solve's
+        // own result, not reuse. The step ran if it printed in either.
+        List<String> steps = new ArrayList<>();
         for (String t : texts) {
             var m = java.util.regex.Pattern.compile("^(#\\d+) \\[.*\\] RUN .*echo restoring-dependencies").matcher(t);
             if (m.find()) {
-                step = m.group(1);
+                steps.add(m.group(1));
             }
         }
-        assertNotNull(step, "the restore step is in the log: " + texts);
-        String id = step;
+        assertFalse(steps.isEmpty(), "the restore step is in the log: " + texts);
         // Reused means its command did not run: no "restoring-dependencies" from the step. A hit
         // in the imported registry cache is not always reported as "#N CACHED": when a later
         // step needs the snapshot, BuildKit pulls the cached layer and reports "extracting" and
         // "DONE" instead (seen in the T7 pass probe). The cold build's assertFalse keeps this
         // honest: there the step's own output must appear.
-        boolean ran = texts.stream().anyMatch(t -> t.matches(java.util.regex.Pattern.quote(id)
-                + " [0-9.]+ restoring-dependencies"));
-        boolean settled = texts.stream().anyMatch(t -> t.equals(id + " CACHED") || t.startsWith(id + " DONE"));
+        boolean ran = steps.stream().anyMatch(id -> texts.stream().anyMatch(t -> t.matches(
+                java.util.regex.Pattern.quote(id) + " [0-9.]+ restoring-dependencies")));
+        boolean settled = steps.stream().anyMatch(id -> texts.stream().anyMatch(t -> t.equals(id + " CACHED")
+                || t.startsWith(id + " DONE")));
         return settled && !ran;
     }
 
