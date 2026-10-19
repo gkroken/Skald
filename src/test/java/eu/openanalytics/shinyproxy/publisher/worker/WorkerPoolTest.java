@@ -249,6 +249,47 @@ public class WorkerPoolTest {
     }
 
     @Test
+    public void aStopWaitsForEveryEntrysDisposalAndOneFailureDoesNotEndTheOthers() throws Exception {
+        // The T7c pass probe at parallel 3: the stop's one fixed wait ran out while the pool
+        // thread disposed of its entries in turn (over a minute each on a loaded host), the
+        // context closed the Docker client, and the next entry's disposal failed and ended
+        // the rest. Here each disposal is slowed so two take longer than one entry's wait,
+        // and the first one fails outright; the second must still be gone when stop returns.
+        String base = registry.baseByDigest();
+        WorkerPool pool = new WorkerPool(launcher, client, WorkerPoolTest::request, List.of(base), registry.name,
+                TestRegistry.CRED, new WorkerPool.Settings(2, Duration.ofMinutes(30), Duration.ofMinutes(5),
+                Duration.ofMinutes(10)));
+        pool.stopWaitPerEntry = Duration.ofSeconds(20);
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        pool.disposal = h -> {
+            if (calls.getAndIncrement() == 0) {
+                throw new IllegalStateException("Client instance has been closed.");
+            }
+            Thread.sleep(Duration.ofSeconds(25).toMillis());
+            return launcher.dispose(h);
+        };
+        List<String> made = List.of();
+        pool.start();
+        try {
+            long until = System.nanoTime() + Duration.ofMinutes(4).toNanos();
+            while (pool.rounds.get() == 0 && System.nanoTime() < until) {
+                Thread.sleep(100);
+            }
+            made = pool.ready().get(base);
+            assertEquals(2, made.size(), "two entries ready: " + made);
+            pool.stop();
+            assertEquals(2, calls.get(), "both entries' disposal was tried, the second after the first failed");
+            assertEquals(List.of(), launcher.leftovers(DockerWorkerLauncher.handle(made.get(1))),
+                    "the second entry was gone when stop returned");
+        } finally {
+            pool.stop();
+            for (String entry : made) {
+                launcher.dispose(DockerWorkerLauncher.handle(entry));
+            }
+        }
+    }
+
+    @Test
     public void aFailedWarmUpLeavesNothingAndTheBaseWaits() throws Exception {
         // A base the registry does not hold: the warm-up fails, the entry is disposed of.
         String missing = registry.name + ":5000/base/busybox@sha256:" + "0".repeat(64);

@@ -821,6 +821,17 @@ public class T7PassProbeTest {
         return -1;
     }
 
+    /**
+     * The worker container the attempt builds in: a pool entry's when it took one (the drivers
+     * take OR launch, and with free host slots a warm entry is usually ready), else its own.
+     */
+    private static String workerOf(DockerClient docker, String attempt) throws Exception {
+        List<String> taken = new DockerWorkerLauncher(docker, WorkerProfile.load("runc-rootless"),
+                DockerWorkerLauncher.Images.of("skald-buildkit-worker:test", "skald-egress-gateway:test"))
+                .takenBy(DockerWorkerLauncher.handle(attempt));
+        return DockerWorkerLauncher.handle(taken.isEmpty() ? attempt : taken.get(0)).worker();
+    }
+
     private static String attemptOf(String log) {
         var m = java.util.regex.Pattern.compile("\\[skald\\] attempt ([0-9a-f]{32})").matcher(log);
         assertTrue(m.find(), "the log names its attempt: " + log);
@@ -918,7 +929,7 @@ public class T7PassProbeTest {
                 // The worker dies while the restore runs.
                 ids = store(ctx, PY, py);
                 build = startAndReachRestore(ctx, PY, ids[0], ids[1], "worker-death");
-                docker.killContainer(DockerWorkerLauncher.handle(attemptOf(liveLog(ctx, ids[0], build))).worker());
+                docker.killContainer(workerOf(docker, attemptOf(liveLog(ctx, ids[0], build))));
                 row = settleWithLog(ctx, build, Duration.ofMinutes(5));
                 injected(ctx, docker, "inject-worker-death", PY, row, "FAILED", "WORKER_DIED",
                         "(?m)^\\[skald\\] failed: WORKER_DIED ");

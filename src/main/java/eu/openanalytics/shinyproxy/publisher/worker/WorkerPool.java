@@ -140,6 +140,20 @@ public final class WorkerPool {
     /** When the stale sweep last ran (epoch seconds). Pool thread only. */
     private long lastSweep = Long.MIN_VALUE;
     private Thread thread;
+    /**
+     * How long stop() waits for the pool thread per entry it may still dispose of (each ready
+     * one, plus one in the making): a disposal has no bound of its own, and on a loaded host
+     * one took over a minute, so a single fixed wait let the context close the Docker client
+     * under the rest (T7c pass probe, parallel 3). Package-visible for tests.
+     */
+    Duration stopWaitPerEntry = Duration.ofMinutes(3);
+    /** The disposal of one entry; package-visible so tests can slow or fail it. */
+    Disposal disposal;
+
+    /** Disposes of one entry; returns what is still there. */
+    interface Disposal {
+        List<String> dispose(Handle h) throws InterruptedException;
+    }
 
     /**
      * {@code requestFor} turns an entry id into the launch request an attempt of this driver
@@ -165,6 +179,7 @@ public final class WorkerPool {
         this.credential = credential;
         this.settings = settings;
         this.epochSeconds = epochSeconds;
+        this.disposal = launcher::dispose;
         for (String base : this.bases) {
             ready.put(base, new ArrayDeque<>());
         }
@@ -239,8 +254,16 @@ public final class WorkerPool {
             notifyAll();
         }
         if (t != null) {
+            int entries;
+            synchronized (this) {
+                entries = ready.values().stream().mapToInt(Deque::size).sum() + 1;
+            }
             t.interrupt();
-            t.join(Duration.ofMinutes(3).toMillis());
+            t.join(stopWaitPerEntry.multipliedBy(entries).toMillis());
+            if (t.isAlive()) {
+                log.warn("worker pool: still disposing after {}; its entries are left to the next start's sweep",
+                        stopWaitPerEntry.multipliedBy(entries));
+            }
             return;
         }
         // No pool thread ran (rounds were driven by hand): nothing is in flight, so this thread
@@ -395,13 +418,16 @@ public final class WorkerPool {
 
     private void disposeQuietly(String entry, String why) {
         try {
-            List<String> left = launcher.dispose(DockerWorkerLauncher.handle(entry));
+            List<String> left = disposal.dispose(DockerWorkerLauncher.handle(entry));
             if (!left.isEmpty()) {
                 log.warn("pool entry {} ({}): disposal left {}", entry, why, left);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.warn("pool entry {} ({}): disposal interrupted", entry, why);
+        } catch (RuntimeException e) {
+            // One entry's failure must not end the others' disposal (a stop disposes of them in turn).
+            log.warn("pool entry {} ({}): disposal failed: {}", entry, why, e.toString());
         }
     }
 }
