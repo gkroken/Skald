@@ -2784,7 +2784,13 @@ below are marked passed by this planning document.
             `skald.*` literal the spec lacks.
          d. A validate mode (`--validate-config`): loads the configuration exactly as startup
             does, runs the static checks only (no database, Docker or network), prints every
-            problem with its key path, exits 0 or 1, for CI and pre-deploy.
+            problem with its key path, exits 0 or 1, for CI and pre-deploy. *As built:* the
+            main class is upstream's, so the flag is read by 0b's post-processor, which then
+            runs `ConfigurationValidator` (the key check, each section's own parser for
+            relations a type cannot express, and the worker's own refusals and published
+            bases file when it is enabled; not the images' presence, which needs Docker),
+            prints and exits before any bean exists; a section the key check refused is not
+            parsed again, so each problem is listed once.
          e. Secrets never in the file: `${VAR}` or `configtree:`; the reference marks secret
             keys and the example uses placeholders.
          f. `config/application.example.yml`: complete, commented, every `skald` key at its

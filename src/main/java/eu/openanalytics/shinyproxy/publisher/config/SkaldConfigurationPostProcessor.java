@@ -29,6 +29,9 @@ import org.springframework.boot.logging.DeferredLogFactory;
 import org.springframework.core.Ordered;
 import org.springframework.core.env.ConfigurableEnvironment;
 
+import java.io.PrintStream;
+import java.util.function.IntConsumer;
+
 /**
  * Runs {@link ConfigurationCheck} once the configuration files are read and before any bean
  * exists (T7c step 0b): a refused configuration stops startup listing every problem, and a
@@ -42,8 +45,25 @@ public class SkaldConfigurationPostProcessor implements EnvironmentPostProcessor
         this.log = logs.getLog(SkaldConfigurationPostProcessor.class);
     }
 
+    /** The command-line flag that validates the configuration and exits (T7c step 0d). */
+    public static final String VALIDATE = "validate-config";
+
+    // Replaced by tests, which cannot let the JVM exit.
+    static IntConsumer exit = System::exit;
+    static PrintStream out = System.out;
+
     @Override
     public void postProcessEnvironment(ConfigurableEnvironment environment, SpringApplication application) {
+        if (environment.containsProperty(VALIDATE)) {
+            // java -jar skald.jar --validate-config: every static check, printed, then exit 0
+            // or 1 before anything starts -- no database, Docker or network is touched.
+            ConfigurationCheck.Result result = ConfigurationValidator.validate(environment);
+            result.warnings().forEach(w -> out.println("warning: " + w));
+            out.println(result.ok() ? "Skald's configuration is valid." : result.message());
+            out.flush();
+            exit.accept(result.ok() ? 0 : 1);
+            return;
+        }
         ConfigurationCheck.Result result = new ConfigurationCheck(ConfigurationSpec.load()).check(environment);
         result.warnings().forEach(log::warn);
         if (!result.ok()) {

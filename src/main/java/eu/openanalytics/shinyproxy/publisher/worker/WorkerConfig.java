@@ -199,18 +199,7 @@ public class WorkerConfig {
         if (store.getIfAvailable() == null) {
             problems.add("object storage (skald.storage.endpoint): bundles and logs live there");
         }
-        BaseCatalog catalog = null;
-        if (publishedBases != null && !publishedBases.isBlank()) {
-            try (InputStream in = Files.newInputStream(Path.of(publishedBases))) {
-                catalog = BaseCatalog.load(in);
-                if (registry != null && !(registry + ":5000").equals(catalog.registry())) {
-                    problems.add("the published bases name registry " + catalog.registry() + ", but the worker"
-                            + " reaches " + registry + ":5000; publish them for that registry");
-                }
-            } catch (Exception e) {
-                problems.add("published-bases " + publishedBases + ": " + e.getMessage());
-            }
-        }
+        BaseCatalog catalog = publishedBases(problems);
         if (workerImage != null && gatewayImage != null) {
             for (String image : List.of(workerImage, gatewayImage, Images.HELPER, Images.SETUP)) {
                 try {
@@ -295,6 +284,38 @@ public class WorkerConfig {
 
     WorkerPool.Settings poolSettings() {
         return new WorkerPool.Settings(poolSize, poolTtl, Duration.ofMinutes(10), Duration.ofSeconds(5));
+    }
+
+    /**
+     * The published bases file, loaded against the shipped catalog, or null (unset, or a
+     * problem added): its registry must be the one the gateway allows (1ffdb20 review N1).
+     */
+    BaseCatalog publishedBases(List<String> problems) {
+        if (publishedBases == null || publishedBases.isBlank()) {
+            return null;
+        }
+        try (InputStream in = Files.newInputStream(Path.of(publishedBases))) {
+            BaseCatalog catalog = BaseCatalog.load(in);
+            if (registry != null && !(registry + ":5000").equals(catalog.registry())) {
+                problems.add("the published bases name registry " + catalog.registry() + ", but the worker"
+                        + " reaches " + registry + ":5000; publish them for that registry");
+            }
+            return catalog;
+        } catch (Exception e) {
+            problems.add("published-bases " + publishedBases + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * What {@code --validate-config} checks of the worker (T7c step 0d): every refusal of the
+     * configuration itself and the published bases file, without a database, Docker or the
+     * network (the images' presence is left to startup).
+     */
+    public List<String> staticProblems(CoordinatorSettings settings) {
+        List<String> problems = problems(settings);
+        publishedBases(problems);
+        return problems;
     }
 
     /** Every refusal that needs no Docker, catalog or bean: the configuration itself. */

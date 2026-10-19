@@ -17,6 +17,25 @@ this page drifts from it. The same file generates
 as the first line of your `application.yml` (with the path to the schema) for completion and
 validation in VS Code, IntelliJ, Neovim or Zed.
 
+## Checking a configuration before you deploy it
+
+Skald refuses to start on a configuration it cannot honour, and lists every problem at once:
+an unknown key (with the key it was renamed to, or the one you probably meant), a value of
+the wrong type or out of bounds, a rule between keys (a renewal slower than half its lease),
+and, with the build worker enabled, every setting it needs. To run the same checks without
+starting anything, in CI or before a deploy, add `--validate-config` with the configuration
+you will deploy:
+
+```sh
+java -jar shinyproxy-<version>-exec.jar --validate-config \
+    --spring.config.location=file:/opt/skald/application.yml
+```
+
+It prints `Skald's configuration is valid.` and exits 0, or prints every problem and exits 1.
+It reads the files, the environment and the command line exactly as startup does, and opens
+no database, Docker or network connection, so it can run anywhere the configuration and its
+environment variables are. A secret's value is never printed.
+
 <!-- BEGIN generated from spec/configuration-v1.json by ConfigurationSpecTest; do not edit by hand -->
 
 ## Conventions
