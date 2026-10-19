@@ -22,6 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.binaries;
 
+import eu.openanalytics.shinyproxy.publisher.config.Settings;
+
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
@@ -83,16 +85,24 @@ public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceB
             throw new IllegalArgumentException("source settings must be positive");
         }
         if (repository != null) {
-            SafeUrls.requireBase("source-repository", repository);
+            SafeUrls.requireBase("skald.builds.binaries.source-repository", repository);
         }
     }
 
+    /**
+     * The {@code source-} keys of {@code skald.builds.binaries}: sizes with a unit ("64MB"; a
+     * bare number is bytes), durations in whole seconds ("30s", "48h"; a bare number is seconds).
+     */
+    public static final List<String> KEYS = List.of("source-repository", "source-max-index-size", "source-max-size",
+            "source-max-expanded-size", "source-fetch-timeout", "source-transfer-deadline", "source-index-ttl",
+            "source-behind-retry", "source-behind-max-retry", "source-behind-bound", "source-archived");
+
     /** True if {@code key} belongs here (a "source-" key) rather than to BinaryQueueSettings. */
     public static boolean owns(String key) {
-        return normal(key).startsWith("source_");
+        return normal(key).startsWith("source-");
     }
 
-    /** Defaults with the "source-" overrides; an unknown one stops startup. */
+    /** Defaults with the "source-" overrides; an unknown one stops startup, naming the known ones. */
     public static SourceSettings fromOverrides(Map<String, ?> overrides) {
         URI repository = DEFAULTS.repository;
         long index = DEFAULTS.maxIndexBytes;
@@ -107,41 +117,25 @@ public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceB
         boolean archived = DEFAULTS.archived;
         for (Map.Entry<String, ?> e : overrides.entrySet()) {
             String key = normal(e.getKey());
-            String value = String.valueOf(e.getValue()).trim();
-            if (key.equals("source_archived")) {
-                if (!value.equals("true") && !value.equals("false")) {
-                    throw new IllegalArgumentException("source-archived is true or false, not " + value);
-                }
-                archived = Boolean.parseBoolean(value);
-                continue;
-            }
-            if (key.equals("source_repository")) {
-                repository = value.isEmpty() ? null : SafeUrls.parse("source-repository", value);
-                continue;
-            }
-            long n;
-            try {
-                n = Long.parseLong(value);
-            } catch (NumberFormatException ex) {
-                throw new IllegalArgumentException("binary source setting '" + e.getKey()
-                        + "' is not an integer: " + e.getValue());
-            }
+            String full = "skald.builds.binaries." + key;
+            Object value = e.getValue();
             switch (key) {
-                case "source_max_index_bytes" -> index = n;
-                case "source_max_bytes" -> source = n;
-                case "source_max_expanded_bytes" -> expanded = n;
-                case "source_fetch_timeout_seconds" -> timeout = Duration.ofSeconds(n);
-                case "source_transfer_deadline_seconds" -> deadline = Duration.ofSeconds(n);
-                case "source_index_ttl_seconds" -> ttl = Duration.ofSeconds(n);
-                case "source_behind_retry_seconds" -> retry = Duration.ofSeconds(n);
-                case "source_behind_max_retry_seconds" -> maxRetry = Duration.ofSeconds(n);
-                case "source_behind_bound_hours" -> bound = Duration.ofHours(n);
-                default -> throw new IllegalArgumentException("unknown binary source setting '" + e.getKey()
-                        + "'; known settings are " + new TreeSet<>(List.of("source_repository",
-                        "source_max_index_bytes", "source_max_bytes", "source_max_expanded_bytes",
-                        "source_fetch_timeout_seconds", "source_transfer_deadline_seconds",
-                        "source_index_ttl_seconds", "source_behind_retry_seconds",
-                        "source_behind_max_retry_seconds", "source_behind_bound_hours", "source_archived")));
+                case "source-repository" -> {
+                    String url = String.valueOf(value).trim();
+                    repository = url.isEmpty() ? null : SafeUrls.parse(full, url);
+                }
+                case "source-archived" -> archived = Settings.bool(full, value);
+                case "source-max-index-size" -> index = Settings.size(full, value).toBytes();
+                case "source-max-size" -> source = Settings.size(full, value).toBytes();
+                case "source-max-expanded-size" -> expanded = Settings.size(full, value).toBytes();
+                case "source-fetch-timeout" -> timeout = Settings.seconds(full, value);
+                case "source-transfer-deadline" -> deadline = Settings.seconds(full, value);
+                case "source-index-ttl" -> ttl = Settings.seconds(full, value);
+                case "source-behind-retry" -> retry = Settings.seconds(full, value);
+                case "source-behind-max-retry" -> maxRetry = Settings.seconds(full, value);
+                case "source-behind-bound" -> bound = Settings.seconds(full, value);
+                default -> throw new IllegalArgumentException("unknown setting 'skald.builds.binaries."
+                        + e.getKey() + "'; known source settings are " + new TreeSet<>(KEYS));
             }
         }
         return new SourceSettings(repository, index, source, expanded, timeout, deadline, ttl, retry, maxRetry, bound,
@@ -149,6 +143,6 @@ public record SourceSettings(URI repository, long maxIndexBytes, long maxSourceB
     }
 
     private static String normal(String key) {
-        return key == null ? "" : key.trim().replace('-', '_').toLowerCase(Locale.ROOT);
+        return key == null ? "" : key.trim().replace('_', '-').toLowerCase(Locale.ROOT);
     }
 }

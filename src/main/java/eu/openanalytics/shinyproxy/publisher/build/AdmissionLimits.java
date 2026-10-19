@@ -66,7 +66,8 @@ public record AdmissionLimits(int queueCapacity, int perPublisherActive) {
             String key = e.getKey() == null ? "" : e.getKey().trim().replace('_', '-')
                     .toLowerCase(Locale.ROOT);
             switch (key) {
-                case "queue-capacity" -> queue = Settings.integer("skald.builds.admission.queue-capacity", e.getValue());
+                case "queue-capacity" -> queue = Settings.integer(
+                        "skald.builds.admission.queue-capacity", e.getValue());
                 case "per-publisher-active" -> perPublisher = Settings.integer(
                         "skald.builds.admission.per-publisher-active", e.getValue());
                 default -> throw new IllegalArgumentException("unknown setting 'skald.builds.admission."

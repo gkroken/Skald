@@ -224,6 +224,24 @@ public class BinaryGateTest {
         assertThrows(IllegalArgumentException.class, () -> ForgeSettings.fromOverrides(Map.of(
             "forge-binary-repository", "../x")));
         assertThrows(IllegalArgumentException.class, () -> ForgeSettings.fromOverrides(Map.of("forge-tokn", "x")));
+        ForgeSettings timed = ForgeSettings.fromOverrides(Map.of("forge-registration-ttl", "2m", "forge-timeout", "45",
+            "forge-upload-deadline", "15m"));
+        assertEquals(Duration.ofMinutes(2), timed.registrationTtl());
+        assertEquals(Duration.ofSeconds(45), timed.timeout(), "a bare number is seconds");
+        assertEquals(Duration.ofMinutes(15), timed.uploadDeadline());
+        assertThrows(IllegalArgumentException.class, () -> ForgeSettings.fromOverrides(
+            Map.of("forge-timeout", "1500ms")), "not whole seconds");
+        for (String old : List.of("forge-registration-ttl-seconds", "forge-timeout-seconds",
+                "forge-upload-deadline-seconds")) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> ForgeSettings.fromOverrides(Map.of(old, "1")), old);
+            assertTrue(e.getMessage().startsWith("unknown setting 'skald.builds.binaries." + old + "'")
+                && e.getMessage().contains("forge-registration-ttl,"), e.getMessage());
+        }
+        // A refused token is never repeated: it is not parsed by Settings, whose errors show the value.
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class, () -> ForgeSettings.fromOverrides(
+            Map.of("forge-url", "https://forge.example/", "forge-token", "s3cret token")));
+        assertFalse(e.getMessage().contains("s3cret"), e.getMessage());
     }
 
     @Test

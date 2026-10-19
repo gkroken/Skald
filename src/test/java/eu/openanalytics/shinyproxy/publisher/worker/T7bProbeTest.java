@@ -153,7 +153,7 @@ public class T7bProbeTest {
                 "skald.builds.binaries-enabled=true",
                 "skald.builds.binaries.forge-url=" + FORGE,
                 "skald.builds.binaries.forge-token=" + System.getenv("SKALD_T7B_FORGE_TOKEN"),
-                "skald.builds.binaries.forge-registration-ttl-seconds=5",
+                "skald.builds.binaries.forge-registration-ttl=5s",
                 // The source mutant (dev/t7b-probe.py --mutant source) names the group instead.
                 "skald.builds.binaries.source-repository=" + FORGE + "repository/"
                         + System.getProperty("skald.t7b.source-repo", "cran-proxy") + "/",

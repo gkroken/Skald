@@ -989,7 +989,7 @@ public class BinaryBuildQueueTest {
     public void settingsHaveDefaultsAndRefuseUnknownKeysAndBadValues() {
         assertEquals(BinaryQueueSettings.DEFAULTS, BinaryQueueSettings.fromOverrides(Map.of()));
         BinaryQueueSettings s = BinaryQueueSettings.fromOverrides(Map.of("max-running", "3",
-            "max_attempts", "4", "deadline-minutes", "90", "lease-seconds", "120", "renew-every-seconds", "30"));
+            "max_attempts", "4", "deadline", "90m", "lease", "120", "renew-every", "30s"));
         assertEquals(new BinaryQueueSettings(Duration.ofSeconds(120), Duration.ofSeconds(30),
             Duration.ofMinutes(90), 3, 4), s);
         assertThrows(IllegalArgumentException.class, () -> BinaryQueueSettings.fromOverrides(Map.of("max-runing", "1")));
@@ -997,7 +997,18 @@ public class BinaryBuildQueueTest {
         assertThrows(IllegalArgumentException.class, () -> BinaryQueueSettings.fromOverrides(Map.of("max-running", "0")));
         assertThrows(IllegalArgumentException.class, () -> BinaryQueueSettings.fromOverrides(Map.of("max-attempts", "0")));
         assertThrows(IllegalArgumentException.class, () -> BinaryQueueSettings.fromOverrides(
-            Map.of("lease-seconds", "30", "renew-every-seconds", "20")));
+            Map.of("lease", "30s", "renew-every", "20s")));
+        assertThrows(IllegalArgumentException.class, () -> BinaryQueueSettings.fromOverrides(
+            Map.of("lease", "1500ms")), "not whole seconds (115f64b N1)");
+        assertThrows(IllegalArgumentException.class, () -> BinaryQueueSettings.fromOverrides(
+            Map.of("deadline", "500ms")), "below a second");
+        // Renamed outright (T7c 0a): the old keys are refused, and the error names the new ones.
+        for (String old : List.of("lease-seconds", "renew-every-seconds", "deadline-minutes")) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> BinaryQueueSettings.fromOverrides(Map.of(old, "1")), old);
+            assertTrue(e.getMessage().startsWith("unknown setting 'skald.builds.binaries." + old + "'; known settings"
+                + " are [deadline, lease, max-attempts, max-running, renew-every]"), e.getMessage());
+        }
     }
 
     @Test

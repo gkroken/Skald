@@ -59,7 +59,10 @@ public record CoordinatorSettings(Duration lease, Duration renewEvery, Duration 
         }
     }
 
-    /** The keys of {@code skald.builds.coordinator}; values are durations ("300s", "20m"; a bare number is seconds). */
+    /**
+     * The keys of {@code skald.builds.coordinator}; values are durations in whole seconds
+     * ("300s", "20m"; a bare number is seconds).
+     */
     public static final List<String> KEYS = List.of("lease", "renew-every", "deadline");
 
     /**
@@ -76,9 +79,9 @@ public record CoordinatorSettings(Duration lease, Duration renewEvery, Duration 
             String key = e.getKey() == null ? "" : e.getKey().trim().replace('_', '-')
                     .toLowerCase(Locale.ROOT);
             switch (key) {
-                case "lease" -> lease = Settings.duration("skald.builds.coordinator.lease", e.getValue());
-                case "renew-every" -> renew = Settings.duration("skald.builds.coordinator.renew-every", e.getValue());
-                case "deadline" -> deadline = Settings.duration("skald.builds.coordinator.deadline", e.getValue());
+                case "lease" -> lease = Settings.seconds("skald.builds.coordinator.lease", e.getValue());
+                case "renew-every" -> renew = Settings.seconds("skald.builds.coordinator.renew-every", e.getValue());
+                case "deadline" -> deadline = Settings.seconds("skald.builds.coordinator.deadline", e.getValue());
                 default -> throw new IllegalArgumentException("unknown setting 'skald.builds.coordinator."
                         + e.getKey() + "'; known settings are " + new TreeSet<>(KEYS)
                         + " (the deployment's build limit is skald.builds.max-running)");

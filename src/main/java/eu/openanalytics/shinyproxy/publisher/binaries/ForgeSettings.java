@@ -22,6 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.binaries;
 
+import eu.openanalytics.shinyproxy.publisher.config.Settings;
+
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
@@ -61,13 +63,15 @@ public record ForgeSettings(URI url, String binaryRepository, String token, Dura
 
     public ForgeSettings {
         if (url != null) {
-            SafeUrls.requireBase("forge-url", url);
+            SafeUrls.requireBase("skald.builds.binaries.forge-url", url);
             if (token == null || token.isBlank() || token.chars().anyMatch(c -> c < 0x21 || c > 0x7e)) {
-                throw new IllegalArgumentException("forge-token is required with forge-url, as printable ASCII");
+                throw new IllegalArgumentException(
+                        "skald.builds.binaries.forge-token is required with forge-url, as printable ASCII");
             }
         }
         if (binaryRepository == null || !REPOSITORY.matcher(binaryRepository).matches()) {
-            throw new IllegalArgumentException("forge-binary-repository is not a repository name: " + binaryRepository);
+            throw new IllegalArgumentException("skald.builds.binaries.forge-binary-repository is not a"
+                    + " repository name: " + binaryRepository);
         }
         if (registrationTtl.isNegative() || timeout.isNegative() || timeout.isZero() || uploadDeadline.isNegative()
                 || uploadDeadline.isZero()) {
@@ -75,9 +79,16 @@ public record ForgeSettings(URI url, String binaryRepository, String token, Dura
         }
     }
 
+    /**
+     * The {@code forge-} keys of {@code skald.builds.binaries}; the durations are whole seconds.
+     * The token's value is never parsed by {@link Settings}, whose errors repeat the value.
+     */
+    public static final List<String> KEYS = List.of("forge-url", "forge-binary-repository", "forge-token",
+            "forge-registration-ttl", "forge-timeout", "forge-upload-deadline");
+
     /** True if {@code key} belongs here (a "forge-" key). */
     public static boolean owns(String key) {
-        return normal(key).startsWith("forge_");
+        return normal(key).startsWith("forge-");
     }
 
     public static ForgeSettings fromOverrides(Map<String, ?> overrides) {
@@ -88,33 +99,25 @@ public record ForgeSettings(URI url, String binaryRepository, String token, Dura
         Duration timeout = DEFAULTS.timeout;
         Duration upload = DEFAULTS.uploadDeadline;
         for (Map.Entry<String, ?> e : overrides.entrySet()) {
+            String key = normal(e.getKey());
+            String full = "skald.builds.binaries." + key;
             String value = String.valueOf(e.getValue()).trim();
-            switch (normal(e.getKey())) {
-                case "forge_url" -> url = value.isEmpty() ? null : SafeUrls.parse("forge-url", value);
-                case "forge_binary_repository" -> repo = value;
-                case "forge_token" -> token = value.isEmpty() ? null : value;
-                case "forge_registration_ttl_seconds" -> ttl = Duration.ofSeconds(integer(e.getKey(), value));
-                case "forge_timeout_seconds" -> timeout = Duration.ofSeconds(integer(e.getKey(), value));
-                case "forge_upload_deadline_seconds" -> upload = Duration.ofSeconds(integer(e.getKey(), value));
-                default -> throw new IllegalArgumentException("unknown forge setting '" + e.getKey()
-                        + "'; known settings are " + new TreeSet<>(List.of("forge_url", "forge_binary_repository",
-                        "forge_token", "forge_registration_ttl_seconds", "forge_timeout_seconds",
-                        "forge_upload_deadline_seconds")));
+            switch (key) {
+                case "forge-url" -> url = value.isEmpty() ? null : SafeUrls.parse(full, value);
+                case "forge-binary-repository" -> repo = value;
+                case "forge-token" -> token = value.isEmpty() ? null : value;
+                case "forge-registration-ttl" -> ttl = Settings.seconds(full, value);
+                case "forge-timeout" -> timeout = Settings.seconds(full, value);
+                case "forge-upload-deadline" -> upload = Settings.seconds(full, value);
+                default -> throw new IllegalArgumentException("unknown setting 'skald.builds.binaries."
+                        + e.getKey() + "'; known forge settings are " + new TreeSet<>(KEYS));
             }
         }
         return new ForgeSettings(url, repo, token, ttl, timeout, upload);
     }
 
-    private static long integer(String key, String value) {
-        try {
-            return Long.parseLong(value);
-        } catch (NumberFormatException ex) {
-            throw new IllegalArgumentException("forge setting '" + key + "' is not an integer: " + value);
-        }
-    }
-
     private static String normal(String key) {
-        return key == null ? "" : key.trim().replace('-', '_').toLowerCase(Locale.ROOT);
+        return key == null ? "" : key.trim().replace('_', '-').toLowerCase(Locale.ROOT);
     }
 
     @Override

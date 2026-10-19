@@ -930,6 +930,10 @@ public class BuildCoordinatorTest {
         assertThrows(IllegalArgumentException.class, () -> CoordinatorSettings.fromOverrides(Map.of(), "0"));
         assertThrows(IllegalArgumentException.class, () -> CoordinatorSettings.fromOverrides(Map.of(), "x"));
         assertThrows(IllegalArgumentException.class, () -> CoordinatorSettings.fromOverrides(Map.of("lease", "soon"), null));
+        // The lease and deadline reach SQL in whole seconds, the runner in nanoseconds: one value
+        // for both, or 1500ms is 1 s in the row and 1.5 s in the runner (115f64b N1).
+        assertThrows(IllegalArgumentException.class, () -> CoordinatorSettings.fromOverrides(Map.of("lease", "1500ms"), null));
+        assertThrows(IllegalArgumentException.class, () -> CoordinatorSettings.fromOverrides(Map.of("deadline", "500ms"), null));
         assertThrows(IllegalArgumentException.class,
             () -> CoordinatorSettings.fromOverrides(Map.of("lease_secs", "30"), null), "a typo");
         // Renamed outright (T7c 0a): the old keys are unknown, and the error names the new ones.

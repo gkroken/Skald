@@ -50,6 +50,19 @@ public final class Settings {
         }
     }
 
+    /**
+     * A duration in whole seconds, as the build and binary leases, deadlines and timers are
+     * kept: a database interval or a timer rounded to the second would not be the duration
+     * the runner measures against (115f64b N1), so "1500ms" is refused rather than rounded.
+     */
+    public static Duration seconds(String key, Object value) {
+        Duration d = duration(key, value);
+        if (d.getNano() != 0) {
+            throw new IllegalArgumentException("'" + key + "' must be whole seconds: '" + text(key, value) + "'");
+        }
+        return d;
+    }
+
     public static DataSize size(String key, Object value) {
         String text = text(key, value);
         try {

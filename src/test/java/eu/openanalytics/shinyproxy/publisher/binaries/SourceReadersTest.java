@@ -415,13 +415,31 @@ public class SourceReadersTest {
             assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(
                 Map.of("source-repository", bad)), bad);
         }
-        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-max-byte", "1")));
-        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-max-bytes", "0")));
-        assertEquals(1234, SourceSettings.fromOverrides(Map.of("source-max-bytes", "1234")).maxSourceBytes());
-        SourceSettings behind = SourceSettings.fromOverrides(Map.of("source-behind-retry-seconds", "60",
-            "source-behind-max-retry-seconds", "600", "source-behind-bound-hours", "72"));
+        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-max-siz", "1")));
+        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-max-size", "0")));
+        assertEquals(1234, SourceSettings.fromOverrides(Map.of("source-max-size", "1234")).maxSourceBytes(),
+            "a bare number is bytes");
+        assertEquals(64L << 20, SourceSettings.fromOverrides(Map.of("source-max-index-size", "64MB")).maxIndexBytes());
+        assertEquals(2L << 30, SourceSettings.fromOverrides(Map.of("source-max-expanded-size", "2GB"))
+            .maxExpandedBytes());
+        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(
+            Map.of("source-max-size", "lots")));
+        SourceSettings behind = SourceSettings.fromOverrides(Map.of("source-behind-retry", "60",
+            "source-behind-max-retry", "10m", "source-behind-bound", "72h"));
         assertEquals(Duration.ofSeconds(60), behind.behindRetry());
         assertEquals(Duration.ofSeconds(600), behind.behindMaxRetry());
+        assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(
+            Map.of("source-fetch-timeout", "2500ms")), "not whole seconds");
+        // Renamed outright (T7c 0a): the old names are refused, and the error names the new ones.
+        for (String old : List.of("source-max-bytes", "source-max-index-bytes", "source-max-expanded-bytes",
+                "source-fetch-timeout-seconds", "source-transfer-deadline-seconds", "source-index-ttl-seconds",
+                "source-behind-retry-seconds", "source-behind-max-retry-seconds", "source-behind-bound-hours")) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> SourceSettings.fromOverrides(Map.of(old, "1")), old);
+            assertTrue(e.getMessage().startsWith("unknown setting 'skald.builds.binaries." + old + "'")
+                && e.getMessage().contains("source-max-size") && e.getMessage().contains("source-behind-bound,"),
+                e.getMessage());
+        }
         assertEquals(Duration.ofHours(72), behind.behindBound());
         assertEquals(Duration.ofHours(48), SourceSettings.DEFAULTS.behindBound(), "a day past forge's 24 h index cache");
         assertFalse(SourceSettings.DEFAULTS.archived(), "archived versions are opt-in");
@@ -429,9 +447,9 @@ public class SourceReadersTest {
         assertFalse(SourceSettings.fromOverrides(Map.of("source-archived", "false")).archived());
         assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of("source-archived", "yes")));
         assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of(
-            "source-behind-retry-seconds", "600", "source-behind-max-retry-seconds", "60")), "max below first");
+            "source-behind-retry", "600", "source-behind-max-retry", "60")), "max below first");
         assertThrows(IllegalArgumentException.class, () -> SourceSettings.fromOverrides(Map.of(
-            "source-behind-retry-seconds", "0")));
+            "source-behind-retry", "0")));
     }
 
     @Test
