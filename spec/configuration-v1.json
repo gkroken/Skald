@@ -43,7 +43,7 @@
      "description": "A build's wall-clock deadline; past it the build is TIMED_OUT."},
 
     {"key": "skald.builds.binaries.enabled", "type": "boolean", "default": false, "parser": "settings", "scope": "deployment",
-     "description": "Shared Linux binaries for R packages: compile each package once in a sandbox and serve it from forge. Off until the deployment has reviewed what trusting shared binaries means (their integrity rests on forge and the uploader); needs the worker and forge-url."},
+     "description": "Shared Linux binaries for R packages: compile each package once in a sandbox and serve it from forge. Off by default. The shared-binaries path has not had Skald's own security review yet: until a release says it has, enable it only on a deployment that accepts that a binary's integrity rests on forge and the uploader. Needs the worker and forge-url."},
     {"key": "skald.builds.binaries.max-running", "type": "integer", "default": 1, "min": 1, "parser": "settings", "scope": "deployment",
      "description": "Package compiles running at once, beside the app builds."},
     {"key": "skald.builds.binaries.max-attempts", "type": "integer", "default": 2, "min": 1, "parser": "settings", "scope": "deployment",

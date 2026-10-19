@@ -39,8 +39,9 @@ environment variables are. A secret's value is never printed.
 ## Starting from the example
 
 `config/application.example.yml` holds every key at its default, each with its description; a
-key with no default is commented out with an example value. Copy its `skald:` section into
-your `application.yml` and change only what you need.
+key with no default is commented out with an example value. Copy only the keys you change
+into your `application.yml`: a key you leave out follows Skald's default, also when a later
+release changes it.
 
 ## Sizing
 
@@ -107,7 +108,7 @@ your `application.yml` and change only what you need.
 
 | Key | Type | Default | Scope | Description |
 |---|---|---|---|---|
-| `enabled` | boolean | `false` | deployment | Shared Linux binaries for R packages: compile each package once in a sandbox and serve it from forge. Off until the deployment has reviewed what trusting shared binaries means (their integrity rests on forge and the uploader); needs the worker and forge-url. |
+| `enabled` | boolean | `false` | deployment | Shared Linux binaries for R packages: compile each package once in a sandbox and serve it from forge. Off by default. The shared-binaries path has not had Skald's own security review yet: until a release says it has, enable it only on a deployment that accepts that a binary's integrity rests on forge and the uploader. Needs the worker and forge-url. |
 | `max-running` | integer, min 1 | `1` | deployment | Package compiles running at once, beside the app builds. |
 | `max-attempts` | integer, min 1 | `2` | deployment | Claims per package before it is FAILED and its apps keep restoring it from source. |
 | `lease` | duration, whole seconds | `300s` | deployment | How long a compile's claim lasts without renewal. |

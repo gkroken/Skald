@@ -125,7 +125,7 @@
                 "enabled" : {
                   "type" : "boolean",
                   "default" : false,
-                  "description" : "Shared Linux binaries for R packages: compile each package once in a sandbox and serve it from forge. Off until the deployment has reviewed what trusting shared binaries means (their integrity rests on forge and the uploader); needs the worker and forge-url."
+                  "description" : "Shared Linux binaries for R packages: compile each package once in a sandbox and serve it from forge. Off by default. The shared-binaries path has not had Skald's own security review yet: until a release says it has, enable it only on a deployment that accepts that a binary's integrity rests on forge and the uploader. Needs the worker and forge-url."
                 },
                 "max-running" : {
                   "type" : "integer",

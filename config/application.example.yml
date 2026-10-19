@@ -1,10 +1,11 @@
 # yaml-language-server: $schema=../schemas/config/skald-config.schema.json
 #
-# Skald's configuration: every key of the skald: section, each at its default. Copy the
-# section into your application.yml and change what you need; docs/CONFIGURATION.md
-# describes each key, and --validate-config checks a file before you deploy it. A key
-# with no default is shown commented out, with an example value. Secrets are ${VARIABLES}
-# from the environment: never write one into this file.
+# Skald's configuration: every key of the skald: section, each at its default. Copy only
+# the keys you change into your application.yml: a key you leave out follows Skald's
+# default, also when a later release changes it. docs/CONFIGURATION.md describes each
+# key, and --validate-config checks a file before you deploy it. A key with no default
+# is shown commented out, with an example value. Secrets are ${VARIABLES} from the
+# environment: never write one into this file.
 # Generated from spec/configuration-v1.json by ConfigurationSpecTest; do not edit by hand.
 skald:
 
@@ -56,9 +57,10 @@ skald:
 
     binaries:
       # Shared Linux binaries for R packages: compile each package once in a sandbox and
-      # serve it from forge. Off until the deployment has reviewed what trusting shared
-      # binaries means (their integrity rests on forge and the uploader); needs the worker
-      # and forge-url. (boolean; deployment)
+      # serve it from forge. Off by default. The shared-binaries path has not had Skald's
+      # own security review yet: until a release says it has, enable it only on a deployment
+      # that accepts that a binary's integrity rests on forge and the uploader. Needs the
+      # worker and forge-url. (boolean; deployment)
       enabled: false
       # Package compiles running at once, beside the app builds. (integer, min 1;
       # deployment)

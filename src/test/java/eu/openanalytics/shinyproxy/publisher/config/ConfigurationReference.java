@@ -192,11 +192,12 @@ final class ConfigurationReference {
     static String example(ConfigurationSpec spec, boolean filled) throws IOException {
         StringBuilder b = new StringBuilder();
         b.append("# yaml-language-server: $schema=../schemas/config/skald-config.schema.json\n");
-        b.append("#\n# Skald's configuration: every key of the skald: section, each at its default. Copy the\n");
-        b.append("# section into your application.yml and change what you need; docs/CONFIGURATION.md\n");
-        b.append("# describes each key, and --validate-config checks a file before you deploy it. A key\n");
-        b.append("# with no default is shown commented out, with an example value. Secrets are ${VARIABLES}\n");
-        b.append("# from the environment: never write one into this file.\n");
+        b.append("#\n# Skald's configuration: every key of the skald: section, each at its default. Copy only\n");
+        b.append("# the keys you change into your application.yml: a key you leave out follows Skald's\n");
+        b.append("# default, also when a later release changes it. docs/CONFIGURATION.md describes each\n");
+        b.append("# key, and --validate-config checks a file before you deploy it. A key with no default\n");
+        b.append("# is shown commented out, with an example value. Secrets are ${VARIABLES} from the\n");
+        b.append("# environment: never write one into this file.\n");
         b.append("# Generated from spec/configuration-v1.json by ConfigurationSpecTest; do not edit by hand.\n");
         b.append("skald:\n");
         List<String> open = new ArrayList<>();
