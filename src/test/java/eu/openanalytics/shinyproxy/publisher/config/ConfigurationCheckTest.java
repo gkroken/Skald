@@ -23,14 +23,18 @@
 package eu.openanalytics.shinyproxy.publisher.config;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.env.ConfigTreePropertySource;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.MapPropertySource;
 import org.springframework.core.env.MutablePropertySources;
 import org.springframework.core.env.StandardEnvironment;
 import org.springframework.core.env.SystemEnvironmentPropertySource;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -183,10 +187,35 @@ public class ConfigurationCheckTest {
                 "skald.builds.binaries.forge-timeout", "s3cret-value");
         String all = r.message();
         assertTrue(all.contains("skald.builds.worker.registry-password: its placeholder does not resolve"), all);
-        assertEquals(2, r.problems().size(), all);
+        assertTrue(all.contains("skald.builds.binaries.forge-token (/opt/skald/application.yml): a secret written in"
+                + " plain text"), all);
+        assertEquals(3, r.problems().size(), all);
         assertTrue(all.contains("'skald.builds.binaries.forge-timeout' is not a duration"), all);
         assertFalse(all.replace("'skald.builds.binaries.forge-timeout' is not a duration: 's3cret-value'", "")
                 .contains("s3cret"), "only the non-secret key's own value is shown: " + all);
+    }
+
+    @Test
+    public void aSecretComesFromTheEnvironmentAConfigTreeOrAPlaceholderWithoutDefault(@TempDir Path dir)
+            throws Exception {
+        // T7c step 0e, checked as written, before ${} resolution (8144a20 N2).
+        Map<String, Object> env = Map.of("FORGE_TOKEN", "t0ken", "SKALD_STORAGE_SECRETKEY", "k3y");
+        assertEquals(List.of(), CHECK.check(environment(Map.of("skald.builds.binaries.forge-token", "${FORGE_TOKEN}",
+                "skald.storage.access-key", "", "skald.builds.worker.registry-password", "${UNSET_HERE:}"), env,
+                Map.of())).problems(), "a placeholder, the environment, an empty value or an empty default");
+
+        Files.writeString(dir.resolve("skald.builds.worker.registry-password"), "pw-from-a-mounted-file");
+        StandardEnvironment tree = environment(Map.of(), Map.of(), Map.of());
+        tree.getPropertySources().addFirst(new ConfigTreePropertySource("Config tree '" + dir + "'", dir));
+        assertEquals(List.of(), CHECK.check(tree).problems(), "configtree: mounted files");
+
+        ConfigurationCheck.Result r = CHECK.check(environment(Map.of("skald.builds.binaries.forge-token",
+                "${FORGE_TOKEN:t0k3n-in-the-file}"), env, Map.of("skald.storage.secret-key", "sys-s3cret")));
+        assertEquals(List.of("skald.storage.secret-key (systemProperties): a secret written in plain text; give it as"
+                + " ${VARIABLE} from the environment, with no default, or through configtree:",
+                "skald.builds.binaries.forge-token (/opt/skald/application.yml): a secret written in plain text; give"
+                + " it as ${VARIABLE} from the environment, with no default, or through configtree:"), r.problems());
+        assertFalse(r.message().contains("t0k3n") || r.message().contains("sys-s3cret"), r.message());
     }
 
     @Configuration(proxyBeanMethods = false)

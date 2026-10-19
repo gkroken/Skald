@@ -186,7 +186,8 @@ public class ConfigurationValidatorTest {
         String bad = run(code, "--validate-config", "--skald.builds.max-runing=3",
                 "--skald.builds.coordinator.renew-every=200s", "--skald.builds.worker.registry-password=s3cret");
         assertEquals(1, code.get());
-        assertTrue(bad.contains("Skald's configuration has 2 problems") && bad.contains("skald.builds.max-runing")
+        assertTrue(bad.contains("Skald's configuration has 3 problems") && bad.contains("skald.builds.max-runing")
+                && bad.contains("registry-password (commandLineArgs): a secret written in plain text")
                 && bad.contains("must be at most half the lease"), bad);
         assertFalse(bad.contains("s3cret"), bad);
 

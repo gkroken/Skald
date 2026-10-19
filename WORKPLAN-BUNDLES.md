@@ -2792,7 +2792,11 @@ below are marked passed by this planning document.
             prints and exits before any bean exists; a section the key check refused is not
             parsed again, so each problem is listed once.
          e. Secrets never in the file: `${VAR}` or `configtree:`; the reference marks secret
-            keys and the example uses placeholders.
+            keys and the example uses placeholders. *As built:* the key check reads each
+            secret's raw value in its own source, before `${}` resolution (8144a20 N2): from
+            the environment or a `configtree:` import anything goes; anywhere else -- a file,
+            the command line, a system property -- only a placeholder without a default (or
+            an empty value, unset) passes, and the refusal never shows the value.
          f. `config/application.example.yml`: complete, commented, every `skald` key at its
             default, with the schema modeline; a test loads it and asserts no problems.
             `dev/application-dev.yml` overrides only what the dev stack needs; sizing

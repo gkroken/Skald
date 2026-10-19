@@ -22,6 +22,7 @@
  */
 package eu.openanalytics.shinyproxy.publisher.config;
 
+import org.springframework.boot.env.ConfigTreePropertySource;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
@@ -51,7 +52,10 @@ import java.util.TreeSet;
  * ({@code SKALD_DOCKER_CONFIG} inside the worker, the probes' {@code skald.t7b.*}).
  *
  * <p>A secret's value is never type-checked or printed; a placeholder that resolves to nothing
- * is reported by its key alone.
+ * is reported by its key alone. A secret may come from the environment or a {@code configtree:}
+ * import of mounted files; anywhere else -- a file, the command line, a system property, both
+ * visible in a process listing -- it must be a ${VARIABLE} placeholder with no default (T7c
+ * step 0e).
  */
 public final class ConfigurationCheck {
 
@@ -78,6 +82,7 @@ public final class ConfigurationCheck {
     private final Set<String> known;
     private final Set<String> owned = new TreeSet<>();
     private final Set<String> uniformKnown = new java.util.HashSet<>();
+    private final Set<String> uniformSecrets = new java.util.HashSet<>();
 
     public ConfigurationCheck(ConfigurationSpec spec) {
         this.spec = spec;
@@ -86,6 +91,7 @@ public final class ConfigurationCheck {
             owned.add(section(k));
             uniformKnown.add(uniform(k));
         }
+        spec.keys().stream().filter(ConfigurationSpec.Key::secret).forEach(k -> uniformSecrets.add(uniform(k.key())));
     }
 
     public Result check(ConfigurableEnvironment environment) {
@@ -97,8 +103,15 @@ public final class ConfigurationCheck {
             }
             boolean env = source instanceof SystemEnvironmentPropertySource;
             boolean shared = env || source.getName().equals(StandardEnvironment.SYSTEM_PROPERTIES_PROPERTY_SOURCE_NAME);
+            boolean secretsAllowed = env || source instanceof ConfigTreePropertySource;
             for (String name : names.getPropertyNames()) {
                 String key = env ? fromEnvironment(name) : normal(name);
+                if (key != null && !secretsAllowed && uniformSecrets.contains(uniform(key))
+                        && !isPlaceholder(source.getProperty(name))) {
+                    // As written, before ${} resolution (8144a20 N2); the value is never shown.
+                    problems.add(key + " (" + where(source) + "): a secret written in plain text; give it as"
+                            + " ${VARIABLE} from the environment, with no default, or through configtree:");
+                }
                 if (key == null || uniformKnown.contains(uniform(key))) {
                     continue;
                 }
@@ -167,6 +180,16 @@ public final class ConfigurationCheck {
      */
     private static String uniform(String name) {
         return name.toLowerCase(Locale.ROOT).replaceAll("[-_]", "");
+    }
+
+    /**
+     * A secret's raw value that keeps the secret out of the source (T7c step 0e): exactly one
+     * placeholder, with no default -- "${TOKEN:abc123}" writes the secret into the file after
+     * all -- or an empty default, which leaves the secret unset; an empty value is unset too.
+     */
+    private static boolean isPlaceholder(Object raw) {
+        // Empty is unset, not a secret.
+        return raw == null || raw.toString().isBlank() || raw.toString().trim().matches("\\$\\{[^:}\\s]+:?}");
     }
 
     /** The element after "skald.": the section a key belongs to. */
