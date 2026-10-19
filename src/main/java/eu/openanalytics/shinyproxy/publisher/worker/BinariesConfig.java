@@ -150,6 +150,15 @@ public class BinariesConfig {
         return new BinaryUploader(queue, gate, forge, BinaryArchive.Limits.DEFAULTS);
     }
 
+    /**
+     * The package attempts' disposals, off their compile slots (T7c step 3); closed after the
+     * loop, waiting for pending disposals as the app builds' Disposer does.
+     */
+    @Bean(destroyMethod = "close")
+    public Disposer binaryDisposer(BinaryQueueSettings queueSettings) {
+        return new Disposer(queueSettings.maxRunning());
+    }
+
     /** The package sandboxes' pools, one per R base's driver; stopped after the loop. */
     @Bean(destroyMethod = "stop")
     public WorkerPool.Group binaryWorkerPools(DockerClient skaldWorkerDocker) {
@@ -160,7 +169,8 @@ public class BinariesConfig {
     public PackageBuildLoop packageBuildLoop(WorkerConfig worker, DockerClient skaldWorkerDocker,
                                              BinaryBuildQueue queue, SourceVerifier verifier, BinaryUploader uploader,
                                              BinaryGate gate, ForgeHandIn handIn, BinaryQueueSettings queueSettings,
-                                             WorkerPool.Group binaryWorkerPools, HostCapacity skaldHostCapacity)
+                                             WorkerPool.Group binaryWorkerPools, HostCapacity skaldHostCapacity,
+                                             Disposer binaryDisposer)
             throws Exception {
         Images images = Images.of(worker.workerImage(), worker.gatewayImage());
         DockerWorkerLauncher launcher = new DockerWorkerLauncher(skaldWorkerDocker,
@@ -191,7 +201,8 @@ public class BinariesConfig {
                     new PackageBuildDriver.Config(Settings.defaults(), worker.quotaMegabytes(), egress,
                             worker.credential(), worker.poll(), worker.settle(), e.version(), e.rPlatform(),
                             BinaryArchive.Limits.DEFAULTS),
-                    pool, pool == null ? null : base.reference()).withCapacity(skaldHostCapacity);
+                    pool, pool == null ? null : base.reference()).withCapacity(skaldHostCapacity)
+                    .withDisposer(binaryDisposer);
             if (pool != null) {
                 binaryWorkerPools.start(pool);
             }
@@ -224,6 +235,15 @@ public class BinariesConfig {
                 launcher.dispose(DockerWorkerLauncher.handle(id));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
+            }
+        }, id -> {
+            // T7c step 3: left to its own driver's disposal while the marker is young.
+            try {
+                return PackageBuildDriver.stillDisposing(launcher.disposingSince(id),
+                        java.time.Instant.now().getEpochSecond());
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return true;
             }
         }, queueSettings.renewEvery(), worker.sweepPeriod());
     }

@@ -285,6 +285,42 @@ public final class DockerWorkerLauncher {
         }
     }
 
+    /** The label of a disposing marker: the epoch second its deferred disposal began. */
+    static final String DISPOSING_LABEL = "eu.skald.disposing";
+
+    static String disposingMarker(String attemptId) {
+        return "skald-b-" + attemptId + "-disposing";
+    }
+
+    /**
+     * Marks the attempt as being disposed of by its own driver, after the attempt itself ended
+     * and its containers are gone (T7c step 3): the package sweep leaves a marked attempt alone
+     * within its grace, and the disposal removes the marker last.
+     */
+    public void markDisposing(Handle h, long epochSeconds) throws DockerException, InterruptedException {
+        createOwnedVolume(disposingMarker(h.attemptId()), Map.of(ATTEMPT_LABEL, h.attemptId(),
+                DISPOSING_LABEL, Long.toString(epochSeconds)), null);
+    }
+
+    /**
+     * When the attempt's deferred disposal began, if it is marked. A marker that cannot be read
+     * is reported as marked just now: the sweep then waits a period rather than race a disposal.
+     */
+    public java.util.Optional<Long> disposingSince(String attemptId) throws InterruptedException {
+        try {
+            Volume v = docker.inspectVolume(disposingMarker(attemptId));
+            String since = v.labels() == null ? null : v.labels().get(DISPOSING_LABEL);
+            if (since == null || !attemptId.equals(v.labels().get(ATTEMPT_LABEL))) {
+                return java.util.Optional.empty();
+            }
+            return java.util.Optional.of(Long.parseLong(since));
+        } catch (NotFoundException | VolumeNotFoundException e) {
+            return java.util.Optional.empty();
+        } catch (DockerException | NumberFormatException e) {
+            return java.util.Optional.of(java.time.Instant.now().getEpochSecond());
+        }
+    }
+
     static Handle handle(String attemptId) {
         String p = "skald-b-" + attemptId;
         return new Handle(attemptId, p + "-net", p + "-gw", p + "-worker", p + "-sock",
@@ -777,6 +813,17 @@ public final class DockerWorkerLauncher {
         });
         clock.lap("dispose.network");
         List<String> left = leftovers(h, quotaState.get());
+        // A deferred disposal's marker (T7c step 3) goes last, and only once nothing else is
+        // left; if something is, it stays, and the package sweep disposes of the attempt again
+        // once the marker's grace has passed. It is not itself reported as left over.
+        if (left.remove("volume " + disposingMarker(h.attemptId())) && left.isEmpty()) {
+            quietly(errors, () -> {
+                Volume v = docker.inspectVolume(disposingMarker(h.attemptId()));
+                if (ours(v.labels(), h)) {
+                    retrying(() -> docker.removeVolume(disposingMarker(h.attemptId())));
+                }
+            });
+        }
         clock.lap("dispose.check");
         left.addAll(errors.stream().filter(e -> !e.contains("No such") && !e.contains("not found"))
                 .map(e -> "error: " + e).toList());

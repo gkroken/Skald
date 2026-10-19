@@ -121,6 +121,7 @@ public final class PackageBuildDriver {
     /** Ready sandboxes warmed with {@link #base}, or null: every attempt launches its own. */
     private final WorkerPool pool;
     private volatile HostCapacity capacity;
+    private volatile Disposer disposer;
     private final String base;
 
     public PackageBuildDriver(DockerClient docker, DockerWorkerLauncher launcher, BuildKitClient client,
@@ -217,20 +218,80 @@ public final class PackageBuildDriver {
             throw e;
         }
         clock.lap("finish");
-        // Disposed of HERE, before run() returns, never on the Disposer (bc66e6f-F1): the loop
-        // settles the row once run() returns, and the package sweep (no grace) disposes of any
-        // attempt no RUNNING row owns, so a disposal still running then would race the sweep's,
-        // on any instance. Nobody waits on a package outcome; the row stays RUNNING across it.
-        List<String> left = launcher.dispose(h, clock);
-        if (!left.isEmpty()) {
-            log.warn("package attempt {}: disposal left {}", h.attemptId(), left);
-        }
-        clock.lap("dispose");
+        dispose(h, clock);
         log.info("package attempt {} ({} {}): {}{}", h.attemptId(), claim.pkg(), claim.version(),
                 BuildKitDriver.PHASES, clock.summary());
         return crashed.get() != null
                 ? new Failed("DRIVER_ERROR", BuildKitDriver.detail(crashed.get().getClass().getSimpleName()))
                 : result.get();
+    }
+
+    /**
+     * The attempt's disposal, once its work thread has ended (T7c step 3). Every container --
+     * every process of the attempt, untrusted code included -- is removed HERE, before run()
+     * returns and its compile slot is free (8144a20 N4). The rest (volumes, the loop device,
+     * the network: on a loaded host most of an attempt's time, 2026-10-18) moves off the slot:
+     * the attempt is marked disposing, which the package sweep (no grace for unmarked attempts,
+     * bc66e6f-F1) leaves alone within {@link #DISPOSING_GRACE}, and a disposer thread holding a
+     * slot of the host's capacity of its own disposes of it, the marker last. A container that
+     * would not go, a marker that could not be made, or no disposer: disposed of here, as before.
+     */
+    private void dispose(Handle h, PhaseClock clock) throws InterruptedException {
+        Disposer d = disposer;
+        List<String> stopped = launcher.removeContainers(h).stream()
+                .filter(e -> !e.contains("No such") && !e.contains("not found")).toList();
+        clock.lap("dispose.containers");
+        if (d != null && stopped.isEmpty()) {
+            boolean marked;
+            try {
+                launcher.markDisposing(h, java.time.Instant.now().getEpochSecond());
+                marked = true;
+            } catch (Exception e) {
+                log.warn("package attempt {}: could not mark it disposing ({}); disposing of it here",
+                        h.attemptId(), e.getMessage());
+                marked = false;
+            }
+            if (marked) {
+                HostCapacity c = capacity;
+                HostCapacity.Slot slot = c == null ? () -> { } : c.attempt();
+                d.submit("package attempt " + h.attemptId(), () -> {
+                    try {
+                        PhaseClock disposal = new PhaseClock();
+                        List<String> left = launcher.dispose(h, disposal);
+                        log.info("package attempt {}: disposed of off its slot: {}{}", h.attemptId(),
+                                BuildKitDriver.PHASES, disposal.summary());
+                        return left;
+                    } finally {
+                        slot.close();
+                    }
+                });
+                clock.lap("dispose");
+                return;
+            }
+        }
+        List<String> left = launcher.dispose(h, clock);
+        if (!left.isEmpty()) {
+            log.warn("package attempt {}: disposal left {}", h.attemptId(), left);
+        }
+        clock.lap("dispose");
+    }
+
+    /**
+     * How long the package sweep leaves an attempt marked disposing to its own disposal: more
+     * than the slowest measured (about 20 min on a loaded host, 2026-10-18). Past it, a marker
+     * a crash left behind no longer holds the sweep off.
+     */
+    static final java.time.Duration DISPOSING_GRACE = java.time.Duration.ofMinutes(30);
+
+    /** Whether an attempt marked disposing at {@code since} is still its driver's, at {@code now}. */
+    static boolean stillDisposing(java.util.Optional<Long> since, long now) {
+        return since.map(s -> now - s < DISPOSING_GRACE.toSeconds()).orElse(false);
+    }
+
+    /** Moves each finished attempt's disposal off its compile slot onto {@code disposer} (T7c step 3). */
+    public PackageBuildDriver withDisposer(Disposer disposer) {
+        this.disposer = disposer;
+        return this;
     }
 
     private void stopEverything(Handle h, Thread work) throws InterruptedException {

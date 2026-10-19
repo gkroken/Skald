@@ -2840,7 +2840,16 @@ below are marked passed by this planning document.
          must never race it). It moves off the slot with a disposing marker the package
          sweep skips while it exists, as the taken-entry markers work, and a disposing
          sandbox counts against the capacity bound of step 2 until it is gone, so freeing
-         the slot sooner never adds load the host has no room for.
+         the slot sooner never adds load the host has no room for. *As built:* every
+         container (every process, untrusted code included) is removed before run()
+         returns (8144a20 N4); then the attempt is marked (a volume labelled with the
+         attempt and the time), a disposer thread holding a HostCapacity slot of its own,
+         taken before the compile's is released, disposes of the rest, and the marker goes
+         last, only once nothing else is left. The package sweep, which reads it after the
+         live leases, leaves a marked attempt alone for 30 minutes (the slowest measured
+         disposal was about 20); a marker a crash left behind then no longer holds it off.
+         A stop, a container that would not go or a marker that could not be made keep the
+         whole disposal inline, as before.
       4. A FAILED binary goes back to the queue when an app build has compiled that package
          itself (user, 2026-10-19). Today a row FAILED after its two attempts stays FAILED
          until an operator re-opens it, so two temporary failures -- jsonlite's lost session

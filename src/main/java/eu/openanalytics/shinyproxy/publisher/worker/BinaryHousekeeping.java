@@ -54,6 +54,7 @@ public final class BinaryHousekeeping {
     private final Supplier<Set<String>> present;
     private final Supplier<Set<String>> live;
     private final Consumer<String> dispose;
+    private final java.util.function.Predicate<String> disposing;
     private final Duration period;
     private final Duration sweepPeriod;
     private ScheduledExecutorService timer;
@@ -68,6 +69,19 @@ public final class BinaryHousekeeping {
      */
     public BinaryHousekeeping(Runnable reap, Supplier<Set<String>> present, Supplier<Set<String>> live,
                               Consumer<String> dispose, Duration period, Duration sweepPeriod) {
+        this(reap, present, live, dispose, id -> false, period, sweepPeriod);
+    }
+
+    /**
+     * As above; {@code disposing}: an attempt its own driver is disposing of (marked, within the
+     * grace), which the sweep leaves to it (T7c step 3). Read after the live leases: a row
+     * settles only after its attempt was marked, so an attempt dead in that read is marked by
+     * then if its disposal was deferred.
+     */
+    public BinaryHousekeeping(Runnable reap, Supplier<Set<String>> present, Supplier<Set<String>> live,
+                              Consumer<String> dispose, java.util.function.Predicate<String> disposing,
+                              Duration period, Duration sweepPeriod) {
+        this.disposing = disposing;
         this.reap = reap;
         this.present = present;
         this.live = live;
@@ -123,7 +137,7 @@ public final class BinaryHousekeeping {
         Set<String> running = live.get();
         List<String> disposed = new ArrayList<>();
         for (String id : onHost) {
-            if (id.length() == 33 && id.charAt(0) == 'p' && !running.contains(id)) {
+            if (id.length() == 33 && id.charAt(0) == 'p' && !running.contains(id) && !disposing.test(id)) {
                 dispose.accept(id);
                 disposed.add(id);
             }

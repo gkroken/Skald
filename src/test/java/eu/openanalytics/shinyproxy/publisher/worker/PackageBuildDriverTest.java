@@ -221,6 +221,43 @@ public class PackageBuildDriverTest {
     }
 
     @Test
+    @Timeout(value = 15, unit = java.util.concurrent.TimeUnit.MINUTES)
+    public void aFinishedAttemptsProcessesEndAtOnceAndTheRestIsDisposedOfOffItsSlot() throws Exception {
+        // T7c step 3: every container is gone before run() returns (8144a20 N4); the rest goes
+        // on a disposer, marked so the package sweep leaves it alone, holding a host slot. The
+        // disposer is kept busy so that moment can be looked at.
+        byte[] prebuilt = installed("foo", "1.0");
+        byte[] source = "source".getBytes(StandardCharsets.UTF_8);
+        BuildClaim c = claim("foo", List.of(), source);
+        String id = PackageBuildDriver.attemptId(c);
+        HostCapacity capacity = new HostCapacity(1);
+        Disposer disposer = new Disposer(1);
+        java.util.concurrent.CountDownLatch busy = new java.util.concurrent.CountDownLatch(1);
+        disposer.submit("something before it", () -> {
+            busy.await();
+            return List.of();
+        });
+        try {
+            PackageBuildDriver.Result r = driver(handIn(source, Map.of(), Map.of()),
+                standIn(prebuilt, NET_CHECK, false, "binary.tar.gz"))
+                .withCapacity(capacity).withDisposer(disposer).run(c, () -> false);
+            assertInstanceOf(PackageBuildDriver.Built.class, r, r.toString());
+            assertFalse(docker.listContainers(DockerClient.ListContainersParam.allContainers(),
+                DockerClient.ListContainersParam.withLabel(DockerWorkerLauncher.ATTEMPT_LABEL, id)).iterator().hasNext(),
+                "every process of the attempt ended before run() returned");
+            assertTrue(launcher.disposingSince(id).isPresent(), "marked disposing");
+            assertEquals(1, capacity.running(), "its disposal holds a slot; the attempt's own is free");
+            assertFalse(launcher.leftovers(DockerWorkerLauncher.handle(id)).isEmpty(), "the rest still there, off the slot");
+        } finally {
+            busy.countDown();
+            disposer.close();
+        }
+        assertNothingLeft(c);
+        assertTrue(launcher.disposingSince(id).isEmpty(), "the marker went last");
+        assertEquals(0, capacity.running(), "and the slot with it");
+    }
+
+    @Test
     @Timeout(value = 20, unit = java.util.concurrent.TimeUnit.MINUTES)
     public void aPooledSandboxExportsOneCheckedBinaryWithNoNetworkAndLeavesNothingOfItsEntry() throws Exception {
         // T7b, the fixed cost: the sandbox comes from the driver's own pool, launched with the
