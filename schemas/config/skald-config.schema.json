@@ -125,7 +125,7 @@
                 "enabled" : {
                   "type" : "boolean",
                   "default" : false,
-                  "description" : "Shared Linux binaries for R packages: compile each package once in a sandbox and serve it from forge. Off until the deployment's security review (WORKPLAN T7b); needs the worker and forge-url."
+                  "description" : "Shared Linux binaries for R packages: compile each package once in a sandbox and serve it from forge. Off until the deployment has reviewed what trusting shared binaries means (their integrity rests on forge and the uploader); needs the worker and forge-url."
                 },
                 "max-running" : {
                   "type" : "integer",

@@ -49,7 +49,7 @@ public final class ConfigurationSpec {
 
     /** One key: its default as the file gives it (null: unset), the parser that reads it. */
     public record Key(String key, String type, JsonNode defaultValue, String parser, String scope, boolean secret,
-                      boolean requiredWithWorker, Long min, Long max, String description) {
+                      boolean requiredWithWorker, Long min, Long max, String description, JsonNode example) {
 
         /** The default as an operator would write it, or null when unset. */
         public String defaultText() {
@@ -76,7 +76,8 @@ public final class ConfigurationSpec {
             k.add(new Key(n.path("key").asText(), n.path("type").asText(), n.has("default") ? n.get("default") : null,
                     n.path("parser").asText(), n.path("scope").asText(), n.path("secret").asBoolean(false),
                     n.path("required_with_worker").asBoolean(false), n.has("min") ? n.get("min").asLong() : null,
-                    n.has("max") ? n.get("max").asLong() : null, n.path("description").asText()));
+                    n.has("max") ? n.get("max").asLong() : null, n.path("description").asText(),
+                    n.has("example") ? n.get("example") : null));
         }
         List<Included> i = new ArrayList<>();
         for (JsonNode n : root.path("included")) {

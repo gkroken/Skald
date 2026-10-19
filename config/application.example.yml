@@ -1,0 +1,238 @@
+# yaml-language-server: $schema=../schemas/config/skald-config.schema.json
+#
+# Skald's configuration: every key of the skald: section, each at its default. Copy the
+# section into your application.yml and change what you need; docs/CONFIGURATION.md
+# describes each key, and --validate-config checks a file before you deploy it. A key
+# with no default is shown commented out, with an example value. Secrets are ${VARIABLES}
+# from the environment: never write one into this file.
+# Generated from spec/configuration-v1.json by ConfigurationSpecTest; do not edit by hand.
+skald:
+
+  storage:
+    # The S3-compatible object store (MinIO, Ceph, AWS S3) holding bundles and build logs.
+    # Unset: the publishing layer's storage is off and the application boots as upstream.
+    # (url; deployment)
+    # endpoint: http://minio:9000
+    # The store's region; most self-hosted stores accept any value. (string; deployment)
+    region: us-east-1
+    # The store's access key id. Required with endpoint. (string; deployment; SECRET)
+    # access-key: ${S3_ACCESS_KEY}
+    # The store's secret key. Required with endpoint. (string; deployment; SECRET)
+    # secret-key: ${S3_SECRET_KEY}
+    # Path-style bucket addressing. On by default, unlike the SDK: a self-hosted store
+    # behind one hostname has no wildcard DNS. Turn off for AWS S3. (boolean; deployment)
+    path-style: true
+
+  dispatcher:
+    # Refuse to start when the dispatcher override that runtime-added content needs could
+    # not be installed. false starts anyway, and content published at run time will not
+    # open. (boolean; instance)
+    require-override: true
+
+  builds:
+    # App builds running at once across the whole deployment, counted in the database.
+    # (integer, min 1; deployment)
+    max-running: 1
+
+    admission:
+      # Builds that may wait (QUEUED) across every content item. May be raised, never
+      # removed. (integer, min 1; deployment)
+      queue-capacity: 10
+      # Queued, running and publishing builds one publisher may hold at once. (integer, min
+      # 1; deployment)
+      per-publisher-active: 3
+
+    coordinator:
+      # How long a build's claim lasts without renewal before the reaper interrupts it. Long
+      # enough to outlast a stalled host: a holder survives a stall of lease minus
+      # renew-every. (duration, whole seconds; deployment)
+      lease: 300s
+      # How often a running build renews its claim; at most half the lease. (duration, whole
+      # seconds; deployment)
+      renew-every: 30s
+      # A build's wall-clock deadline; past it the build is TIMED_OUT. (duration, whole
+      # seconds; deployment)
+      deadline: 20m
+
+    binaries:
+      # Shared Linux binaries for R packages: compile each package once in a sandbox and
+      # serve it from forge. Off until the deployment has reviewed what trusting shared
+      # binaries means (their integrity rests on forge and the uploader); needs the worker
+      # and forge-url. (boolean; deployment)
+      enabled: false
+      # Package compiles running at once, beside the app builds. (integer, min 1;
+      # deployment)
+      max-running: 1
+      # Claims per package before it is FAILED and its apps keep restoring it from source.
+      # (integer, min 1; deployment)
+      max-attempts: 2
+      # How long a compile's claim lasts without renewal. (duration, whole seconds;
+      # deployment)
+      lease: 300s
+      # How often a compile renews its claim; at most half the lease. (duration, whole
+      # seconds; deployment)
+      renew-every: 30s
+      # One compile's wall-clock deadline. Large packages (duckdb) compile for well over an
+      # hour on a busy host. (duration, whole seconds; deployment)
+      deadline: 3h
+      # forge's base URL, ending in /. Unset: shared binaries are off. No credentials, query
+      # or fragment in it. (url; deployment)
+      # forge-url: http://forge/
+      # forge's repository for the binaries. (string; deployment)
+      forge-binary-repository: cran-linux
+      # forge's write token, scoped to bin/linux/<codename>-<arch>/contrib/<rminor>/** of
+      # the binary repository. Required with forge-url. Never handed to any container.
+      # (string; deployment; SECRET)
+      # forge-token: ${FORGE_TOKEN}
+      # How long forge's platform registration is trusted before it is read again.
+      # (duration, whole seconds; deployment)
+      forge-registration-ttl: 60s
+      # Connecting to forge and each small exchange. (duration, whole seconds; deployment)
+      forge-timeout: 30s
+      # One binary's upload, which grows with the binary. (duration, whole seconds;
+      # deployment)
+      forge-upload-deadline: 10m
+      # forge's CRAN proxy member (never the group, which also serves hosted packages),
+      # ending in /, from which sources are verified against the public index. Unset:
+      # nothing is verified. (url; deployment)
+      # source-repository: http://forge/repository/cran-proxy/
+      # The largest package index read. (size; deployment)
+      source-max-index-size: 64MB
+      # The largest source tarball read. (size; deployment)
+      source-max-size: 256MB
+      # A source tarball's largest expanded size. (size; deployment)
+      source-max-expanded-size: 2GB
+      # Connecting to the source repository. (duration, whole seconds; deployment)
+      source-fetch-timeout: 30s
+      # One source or index transfer. (duration, whole seconds; deployment)
+      source-transfer-deadline: 10m
+      # How long a fetched index is reused. (duration, whole seconds; deployment)
+      source-index-ttl: 5m
+      # When the index is behind the lock, the first retry; it doubles from there.
+      # (duration, whole seconds; deployment)
+      source-behind-retry: 5m
+      # The longest wait between retries of an index behind the lock. (duration, whole
+      # seconds; deployment)
+      source-behind-max-retry: 6h
+      # How long after the first try a package whose index stays behind is refused
+      # INDEX_BEHIND; forge caches a proxy's index for 24 hours by default. (duration, whole
+      # seconds; deployment)
+      source-behind-bound: 48h
+      # Also build archived versions the index no longer lists, trusting their first fetch
+      # (its SHA-256 is recorded and never changes). (boolean; deployment)
+      source-archived: false
+
+    worker:
+      # Run builds on this instance's Docker host. Needs a database, object storage and
+      # every key the worker marks required. (boolean; instance)
+      enabled: false
+      # This instance's name on the builds it claims. Unset: the host name. (string;
+      # instance)
+      # owner: build-host-1
+      # The build worker image (images/buildkit-worker), by digest. (image; instance;
+      # required with the worker)
+      # worker-image: skald-buildkit-worker:1
+      # The egress gateway image (images/egress-gateway), by digest. (image; instance;
+      # required with the worker)
+      # gateway-image: skald-egress-gateway:1
+      # The registry's host name as the worker reaches it (port 5000); built images and the
+      # published bases live there. (string; deployment; required with the worker)
+      # registry: skald-registry
+      # The registry as this instance reaches it, http(s)://host[:port], for publication's
+      # digest check. The credential travels in a Basic header: prefer https or an address
+      # on this host. (url; instance; required with the worker)
+      # registry-api: http://localhost:5000
+      # The registry user builds push as. (string; deployment; required with the worker)
+      # registry-username: skald-builds
+      # That user's password. (string; deployment; SECRET; required with the worker)
+      # registry-password: ${REGISTRY_PASSWORD}
+      # Docker networks the gateway joins to reach the registry and the mirrors. (list;
+      # instance)
+      outer-networks: []  # e.g. [skald]
+      # Hosts of the package repositories the gateway lets a build reach. (list; instance)
+      repos: []  # e.g. [forge]
+      # Hosts of private package mirrors the gateway lets a build reach. (list; instance)
+      private-mirrors: []  # e.g. [mirror.internal.example]
+      # The CRAN mirror R builds restore from (forge's CRAN group); its host must be in
+      # repos or private-mirrors. (url; deployment; required with the worker)
+      # cran-mirror: http://forge/repository/cran-public/
+      # The PyPI simple index Python builds install from; its host must be in repos or
+      # private-mirrors. (url; deployment; required with the worker)
+      # pypi-mirror: http://forge/repository/pypi-public/simple/
+      # The CRAN mirror has forge's Linux binary layout
+      # (<cran-mirror>__linux__/<codename>/latest). Off by default: a mirror without it
+      # answers 404 and renv does not fall back to source. (boolean; deployment)
+      cran-linux-binaries: false
+      # The published-bases file dev/publish-bases.py wrote: each base's digest in the
+      # registry. (path; instance; required with the worker)
+      # published-bases: /opt/skald/published-bases.json
+      # A writable directory this instance alone extracts bundles into; locked at startup.
+      # (path; instance; required with the worker)
+      # workspace: /var/lib/skald/workspace
+      # The architecture this host builds for. (string; instance)
+      architecture: amd64
+      # Each build's workspace quota. At least 1GB; a cold R build holds the extracted base,
+      # BuildKit's snapshots and the compiled library. (size; instance)
+      quota: 8GB
+      # How often a running build's stop and log are checked; at most half the coordinator's
+      # renew-every. (duration; instance)
+      poll: 1s
+      # How long a stopped build is given to wind down before its worker is removed.
+      # (duration; instance)
+      settle: 30s
+      # The build loop's pause when the queue is empty. (duration; instance)
+      idle-pause: 2s
+      # How often the reconciliation sweep removes what no live attempt owns. (duration;
+      # instance)
+      sweep-period: 10m
+      # How long after a build ends the sweep leaves its attempt alone; longer than settle
+      # and the disposal's close wait. (duration; instance)
+      sweep-grace: 15m
+      # Ready workers per published base, warmed ahead of any build. 0: every build launches
+      # its own. Each idle one holds a worker, a gateway, a loop device and a workspace
+      # image. (integer, min 0, max 8; instance)
+      pool-size: 1
+      # How long a ready worker is kept before a fresh one replaces it. (duration; instance)
+      pool-ttl: 30m
+      # The object store bucket holding bundles. (string; deployment)
+      bundle-bucket: skald-bundles
+      # The object store bucket holding build logs. (string; deployment)
+      log-bucket: skald-logs
+
+  bundle:
+
+    limits:
+      # The uploaded archive as it arrived. Checked against the byte count before a single
+      # header is parsed, so it is the first bound anything hits. (bytes, at most
+      # 68719476736; deployment)
+      max-compressed-bytes: 268435456
+      # Total bytes written across all members. Counted from bytes actually streamed, not
+      # from declared sizes, so a lying header cannot buy room. (bytes, at most
+      # 274877906944; deployment)
+      max-expanded-bytes: 2147483648
+      # Any single regular member. (bytes, at most 68719476736; deployment)
+      max-file-bytes: 536870912
+      # Physical headers, including directories, extended headers and anything else parsed
+      # and ignored. Metadata counts: an archive of nothing but ignored headers is still an
+      # archive the parser walked. (count, at most 5000000; deployment)
+      max-entries: 20000
+      # The manifest member. Distinct from max_file_bytes and always the smaller of the two
+      # in practice, because the manifest is parsed into memory as a document rather than
+      # streamed to disk. (bytes, at most 67108864; deployment)
+      max-manifest-bytes: 4194304
+      # One PAX extended header's own payload. tarfile never reports this, which is why the
+      # corpus fixture bomb-huge-pax-field is accepted by a library-only extractor. (bytes,
+      # at most 16777216; deployment)
+      max-extended-header-bytes: 65536
+      # The member path in UTF-8, after any approved PAX override, excluding the extraction
+      # root. (bytes, at most 4096; deployment)
+      max-path-bytes: 1024
+      # One path segment in UTF-8. (bytes, at most 255; deployment)
+      max-segment-bytes: 255
+      # Path segments in a member, counted after validation. (count, at most 256;
+      # deployment)
+      max-depth: 32
+      # Wall clock for one extraction, enforced by the extractor itself. The corpus oracle
+      # applies its own outer deadline on top, because a bound a subject enforces on itself
+      # is a bound that has to be checked from outside. (seconds, at most 3600; deployment)
+      extraction-deadline-seconds: 60

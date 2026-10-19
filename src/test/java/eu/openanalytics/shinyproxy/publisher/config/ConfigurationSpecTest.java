@@ -200,6 +200,10 @@ public class ConfigurationSpecTest {
             assertTrue(Set.of("deployment", "instance").contains(k.scope()), k.key());
             assertTrue(!k.description().isBlank() && k.key().matches("skald(\\.[a-z0-9]+(-[a-z0-9]+)*)+"), k.key());
             assertTrue(!k.secret() || k.defaultText() == null, k.key() + ": a secret has no default");
+            boolean unset = k.defaultValue() == null || k.defaultValue().isNull();
+            assertTrue(!(unset || k.type().equals("list")) || k.example() != null, k.key() + ": an example to show");
+            assertTrue(!k.secret() || k.example().asText().matches("\\$\\{[A-Z0-9_]+}"),
+                    k.key() + ": a secret's example is a placeholder");
         }
     }
 
@@ -229,6 +233,67 @@ public class ConfigurationSpecTest {
         assertEquals(block, current, ConfigurationReference.DOC_PATH
                 + "'s reference has drifted from spec/configuration-v1.json: rerun with -Dskald.regenerate=true");
     }
+
+    @Test
+    public void theExampleIsGeneratedValidAndMatchesTheSchemaAsDoItsExamples() throws Exception {
+        // T7c step 0f: every key at its default (or commented out with an example), loading
+        // clean through --validate-config and the generated JSON Schema; with every example
+        // set too, so a wrong example fails here rather than in an operator's file.
+        String example = ConfigurationReference.example(SPEC, false);
+        Path file = Path.of(ConfigurationReference.EXAMPLE_PATH);
+        if (Boolean.getBoolean("skald.regenerate")) {
+            Files.createDirectories(file.getParent());
+            Files.writeString(file, example);
+        }
+        assertEquals(example, Files.exists(file) ? Files.readString(file) : "", ConfigurationReference.EXAMPLE_PATH
+                + " has drifted from spec/configuration-v1.json: rerun with -Dskald.regenerate=true");
+        for (ConfigurationSpec.Key k : SPEC.keys()) {
+            String name = k.key().substring(k.key().lastIndexOf('.') + 1);
+            assertTrue(example.contains("\n" + "  ".repeat(k.key().split("\\.").length - 1) + name + ":")
+                    || example.contains("# " + name + ":"), k.key() + " is in the example");
+        }
+        String id = "https://skald.invalid/schemas/config/skald-config.schema.json";
+        Map<String, String> documents = Map.of(id, Files.readString(Path.of(ConfigurationReference.SCHEMA_PATH)));
+        com.networknt.schema.Schema schema = com.networknt.schema.SchemaRegistry.withDefaultDialect(
+                com.networknt.schema.SpecificationVersion.DRAFT_2020_12, builder -> builder.schemas(documents)
+                        .schemaLoader(loader -> loader.fetchRemoteResources(false)
+                                .block(iri -> !documents.containsKey(iri.toString()))))
+                .getSchema(com.networknt.schema.SchemaLocation.of(id));
+        for (boolean filled : new boolean[] {false, true}) {
+            String yaml = ConfigurationReference.example(SPEC, filled);
+            Object tree = new org.yaml.snakeyaml.Yaml().load(yaml);
+            List<com.networknt.schema.Error> errors = schema.validate(new com.fasterxml.jackson.databind.ObjectMapper()
+                    .valueToTree(tree));
+            assertEquals(List.of(), errors, (filled ? "filled" : "shipped") + " example against the schema");
+
+            org.springframework.core.env.StandardEnvironment env = new org.springframework.core.env.StandardEnvironment();
+            env.getPropertySources().remove("systemEnvironment");
+            env.getPropertySources().remove("systemProperties");
+            env.getPropertySources().addFirst(new org.springframework.core.env.SystemEnvironmentPropertySource(
+                    "systemEnvironment", filled ? Map.of("S3_ACCESS_KEY", "a", "S3_SECRET_KEY", "b",
+                            "FORGE_TOKEN", "c", "REGISTRY_PASSWORD", "d", "SKALD_BUILDS_WORKER_ENABLED", "true")
+                            : Map.of()));
+            Path copy = Files.createTempFile("skald-example", ".yml");
+            Files.writeString(copy, yaml);
+            for (var source : new org.springframework.boot.env.YamlPropertySourceLoader().load(
+                    "Config resource 'file [" + EXAMPLE + "]'", new org.springframework.core.io.FileSystemResource(copy))) {
+                env.getPropertySources().addLast(source);
+            }
+            Files.delete(copy);
+            ConfigurationCheck.Result r = ConfigurationValidator.validate(env);
+            // Filled, the worker is switched on too, so it checks the examples against each
+            // other (mirror hosts in repos, ports the gateway serves); only the two paths that
+            // exist on a build host and not here may be refused.
+            List<String> left = r.problems().stream().filter(p -> !(filled
+                    && (p.equals("workspace /var/lib/skald/workspace is not a writable directory")
+                    || p.startsWith("published-bases /opt/skald/published-bases.json: ")))).toList();
+            assertEquals(List.of(), left, (filled ? "filled" : "shipped") + " example");
+            assertEquals(filled ? 2 : 0, r.problems().size(), String.valueOf(r.problems()));
+            assertEquals(List.of(), r.warnings(), (filled ? "filled" : "shipped") + " example");
+        }
+    }
+
+    private static final String EXAMPLE = "application.example.yml";
 
     private static ConfigurationSpec.Key key(String name) {
         return SPEC.keys().stream().filter(k -> k.key().equals(name)).findFirst().orElseThrow(() -> new AssertionError(name));

@@ -2800,7 +2800,14 @@ below are marked passed by this planning document.
          f. `config/application.example.yml`: complete, commented, every `skald` key at its
             default, with the schema modeline; a test loads it and asserts no problems.
             `dev/application-dev.yml` overrides only what the dev stack needs; sizing
-            profiles (one host; several instances) in `docs/CONFIGURATION.md`.
+            profiles (one host; several instances) in `docs/CONFIGURATION.md`. *As built:*
+            the example is generated from the spec like the reference, a key with no default
+            commented out with the spec's `example` value (every unset and list key has one;
+            a secret's is a `${VARIABLE}` without the SKALD_ prefix, so it draws no warning);
+            the test validates it through `--validate-config`'s checks and the generated
+            JSON Schema, and again with every example set and the worker on, so the examples
+            are checked against each other (mirror hosts, gateway ports). The dev stack's
+            file sets no `skald:` key, so it is unchanged.
          Scope: the `skald:` section; upstream's `proxy:` section stays as upstream documents it.
       1. `skald.builds.worker.parallel` (default 1): how many builds THIS instance's Docker
          host takes; the build loop runs that many claim-and-build threads.
