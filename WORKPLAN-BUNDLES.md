@@ -2849,7 +2849,9 @@ below are marked passed by this planning document.
          live leases, leaves a marked attempt alone for 30 minutes (the slowest measured
          disposal was about 20); a marker a crash left behind then no longer holds it off.
          A stop, a container that would not go or a marker that could not be made keep the
-         whole disposal inline, as before.
+         whole disposal inline, as before. A queued disposal holds its slot from submission,
+         not from its start: conservative, bounded by the compile rate; revisit only if
+         refills measure slow behind a burst of finished compiles (7bed632 N2).
       4. A FAILED binary goes back to the queue when an app build has compiled that package
          itself (user, 2026-10-19). Today a row FAILED after its two attempts stays FAILED
          until an operator re-opens it, so two temporary failures -- jsonlite's lost session

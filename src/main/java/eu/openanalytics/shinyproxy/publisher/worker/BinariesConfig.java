@@ -152,10 +152,11 @@ public class BinariesConfig {
 
     /**
      * The package attempts' disposals, off their compile slots (T7c step 3); closed after the
-     * loop, waiting for pending disposals as the app builds' Disposer does.
+     * loop, waiting for pending disposals as the app builds' Disposer does. It takes the Docker
+     * client so Spring closes it first, before the client its disposals use (7bed632 N1).
      */
     @Bean(destroyMethod = "close")
-    public Disposer binaryDisposer(BinaryQueueSettings queueSettings) {
+    public Disposer binaryDisposer(DockerClient skaldWorkerDocker, BinaryQueueSettings queueSettings) {
         return new Disposer(queueSettings.maxRunning());
     }
 

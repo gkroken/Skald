@@ -169,6 +169,22 @@ public class WorkerConfigTest {
         assertEquals(3, WorkerConfig.slots(3, two, false), "no compiles without binaries");
     }
 
+    @Test
+    public void bothDisposersAreClosedBeforeTheDockerClientTheirDisposalsUse() {
+        // A bean method's parameter is a dependency, so Spring destroys the disposer -- which
+        // waits for pending disposals -- before the client (7bed632 N1; the pools' lesson).
+        for (java.lang.reflect.Method m : List.of(findBean(WorkerConfig.class, "skaldDisposer"),
+                findBean(BinariesConfig.class, "binaryDisposer"))) {
+            assertTrue(List.of(m.getParameterTypes()).contains(org.mandas.docker.client.DockerClient.class),
+                    m.getName() + " depends on the Docker client");
+        }
+    }
+
+    private static java.lang.reflect.Method findBean(Class<?> config, String name) {
+        return java.util.Arrays.stream(config.getMethods()).filter(m -> m.getName().equals(name)).findFirst()
+                .orElseThrow();
+    }
+
     private static String only(WorkerConfig c) {
         List<String> p = c.problems(DEFAULTS);
         assertEquals(1, p.size(), p.toString());
