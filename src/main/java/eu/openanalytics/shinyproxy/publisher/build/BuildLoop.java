@@ -26,6 +26,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -54,7 +55,11 @@ public final class BuildLoop {
     private final AtomicLong attempts = new AtomicLong();
     private final AtomicLong failures = new AtomicLong();
     private final int parallel;
-    private volatile boolean running;
+    // One flag per start (90b17e4 N1): a thread that outlived stop's wait checks the flag it
+    // was started with, so a later start never runs it beside the new threads.
+    private AtomicBoolean running = new AtomicBoolean();
+    // How long stop waits for every thread together; tests shorten it.
+    Duration stopWait = Duration.ofMinutes(2);
     private final java.util.List<Thread> threads = new java.util.ArrayList<>();
 
     /** {@code parallel} loops around {@code runner.runOnce(owner, driver)}. */
@@ -79,17 +84,18 @@ public final class BuildLoop {
         if (!threads.isEmpty()) {
             return;
         }
-        running = true;
+        AtomicBoolean live = new AtomicBoolean(true);
+        running = live;
         for (int i = 0; i < parallel; i++) {
-            Thread thread = new Thread(this::loop, parallel == 1 ? "skald-build-loop" : "skald-build-loop-" + i);
+            Thread thread = new Thread(() -> loop(live), parallel == 1 ? "skald-build-loop" : "skald-build-loop-" + i);
             thread.setDaemon(true);
             threads.add(thread);
             thread.start();
         }
     }
 
-    private void loop() {
-        while (running) {
+    private void loop(AtomicBoolean live) {
+        while (live.get()) {
             boolean idle;
             try {
                 BuildRunner.Result result = once.call();
@@ -120,9 +126,9 @@ public final class BuildLoop {
      * together. Each attempt itself is the driver's to stop, by its lease.
      */
     public synchronized void stop() throws InterruptedException {
-        running = false;
+        running.set(false);
         threads.forEach(Thread::interrupt);
-        long until = System.nanoTime() + Duration.ofMinutes(2).toNanos();
+        long until = System.nanoTime() + stopWait.toNanos();
         for (Thread thread : threads) {
             thread.join(Math.max(1, (until - System.nanoTime()) / 1_000_000));
         }

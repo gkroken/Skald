@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -153,6 +154,45 @@ public class BuildLoopTest {
         loop.stop();
         assertEquals(3, finished.get(), "stop returned only after every thread's attempt ended");
         releaser.join();
+    }
+
+    @Test
+    public void aThreadThatOutlivedStopNeverJoinsALaterStart() throws Exception {
+        // 90b17e4 N1: stop waits a bounded time; a thread still in its attempt then must end
+        // once the attempt does, even though the loop was started again meanwhile.
+        java.util.concurrent.atomic.AtomicReference<Thread> stuck = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.atomic.AtomicBoolean release = new java.util.concurrent.atomic.AtomicBoolean();
+        AtomicInteger callsByStuck = new AtomicInteger();
+        CountDownLatch inAttempt = new CountDownLatch(1);
+        BuildLoop loop = new BuildLoop(() -> {
+            if (stuck.compareAndSet(null, Thread.currentThread())) {
+                inAttempt.countDown();
+                while (!release.get()) {
+                    try {
+                        Thread.sleep(20);
+                    } catch (InterruptedException ignored) {
+                        // outlives stop's wait on purpose
+                    }
+                }
+            } else if (Thread.currentThread() == stuck.get()) {
+                callsByStuck.incrementAndGet();
+            }
+            return BuildRunner.Result.IDLE;
+        }, Duration.ofMillis(50), 1);
+        loop.stopWait = Duration.ofMillis(100);
+        loop.start();
+        assertTrue(inAttempt.await(10, TimeUnit.SECONDS));
+        loop.stop();
+        assertTrue(stuck.get().isAlive(), "still in its attempt after stop's wait");
+        loop.start();
+        release.set(true);
+        stuck.get().join(5000);
+        try {
+            assertFalse(stuck.get().isAlive(), "the old thread ended once its attempt did");
+            assertEquals(0, callsByStuck.get(), "and never claimed beside the new start's threads");
+        } finally {
+            loop.stop();
+        }
     }
 
     private static List<String> loopThreads() {
