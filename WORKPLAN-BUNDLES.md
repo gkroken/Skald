@@ -2676,8 +2676,9 @@ below are marked passed by this planning document.
       app builds each (80 MB layer, the probe's worker defaults, interleaved on this host)
       gave a minimum of 31.4 s with two solves and 30.8 s with one, medians 53 s and 64 s,
       ranges 31-153 s and 31-122 s. The gap to 50.6 s is the push to the local registry
-      on this WSL host, whose spread a single C sample cannot resolve; the 60 s target is
-      unchanged and the row stays red until a remeasure on a quieter host says otherwise.
+      on this WSL host, whose spread a single C sample cannot resolve. **The user accepted
+      about 70 s (2026-10-19)**: the probe's target for C is now 75 s, so this run's 71.0 s
+      passes and a real regression still fails.
       The 40-package drain took 6758 s with no package lease lost (d6fbcde, 4219fc0); the
       run's four reaps are the app builds A-D, each reaped INTERRUPTED one lease (now
       300 s) after PUBLISHING, as designed until T9. The session was NOT always kept

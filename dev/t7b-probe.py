@@ -443,12 +443,15 @@ def judge(r, admin):
         a, c, a / c if c > 0 else 0))
     # T7b's third target, by the user's measure ("a publish should take about a minute",
     # 2026-10-10): C is an R first publish whose packages all have binaries (3d18996-F1).
+    # 75 s since the user accepted about 70 s on this host (2026-10-19: 71.0 s measured on
+    # R base r3 with the two-solve build, the gap in the registry push).
+    target = 75
     total = float(builds.get("C", {}).get("seconds") or -1)
     # C is measured on a quiet host: the wait returns -1 if it never got quiet in 15 min.
     quiet = float(builds.get("C", {}).get("quiet_wait_seconds", -1))
-    record("first publish, binaries", 0 < total <= 60 and quiet >= 0,
-           "C %.1fs from start to publishing (target: 60s); restore %.0fs; waited %.0fs for a quiet host"
-           % (total, c, quiet))
+    record("first publish, binaries", 0 < total <= target and quiet >= 0,
+           "C %.1fs from start to publishing (target: %ds); restore %.0fs; waited %.0fs for a quiet host"
+           % (total, target, c, quiet))
     d = builds.get("D", {})
     deps = ((d.get("provenance") or {}).get("dependencies") or {})
     record("registration changed", d.get("state") == "PUBLISHING"
