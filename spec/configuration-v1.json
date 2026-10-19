@@ -137,6 +137,8 @@
      "description": "How long after a build ends the sweep leaves its attempt alone; longer than settle and the disposal's close wait."},
     {"key": "skald.builds.worker.pool-size", "type": "integer", "default": 1, "min": 0, "max": 8, "parser": "spring", "scope": "instance",
      "description": "Ready workers per published base, warmed ahead of any build. 0: every build launches its own. Each idle one holds a worker, a gateway, a loop device and a workspace image."},
+    {"key": "skald.builds.worker.parallel", "type": "integer", "default": 1, "min": 1, "max": 32, "parser": "spring", "scope": "instance",
+     "description": "Builds this instance's Docker host runs at once. At most skald.builds.max-running, the limit for the whole deployment, which every instance's builds count against."},
     {"key": "skald.builds.worker.pool-ttl", "type": "duration", "default": "30m", "parser": "spring", "scope": "instance",
      "description": "How long a ready worker is kept before a fresh one replaces it."},
     {"key": "skald.builds.worker.bundle-bucket", "type": "string", "default": "skald-bundles", "parser": "spring", "scope": "deployment",

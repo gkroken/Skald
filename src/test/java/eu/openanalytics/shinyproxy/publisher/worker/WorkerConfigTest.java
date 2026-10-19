@@ -128,6 +128,13 @@ public class WorkerConfigTest {
         badApi.setRegistryApi("http://localhost:5000/v2/");
         assertTrue(only(badApi).contains("is not http(s)://host[:port]"), only(badApi));
 
+        WorkerConfig tooParallel = valid(dir);
+        tooParallel.setParallel(2);
+        assertTrue(only(tooParallel).contains("skald.builds.worker.parallel 2 must be from 1 to"
+                + " skald.builds.max-running (1)"), only(tooParallel));
+        assertEquals(List.of(), tooParallel.problems(CoordinatorSettings.fromOverrides(Map.of(), "2")),
+                "within the deployment's limit");
+
         WorkerConfig tinyQuota = valid(dir);
         tinyQuota.setQuota("512MB");
         assertTrue(only(tinyQuota).contains("quota 512MB is below 1GB"), only(tinyQuota));

@@ -194,6 +194,10 @@ skald:
       # its own. Each idle one holds a worker, a gateway, a loop device and a workspace
       # image. (integer, min 0, max 8; instance)
       pool-size: 1
+      # Builds this instance's Docker host runs at once. At most skald.builds.max-running,
+      # the limit for the whole deployment, which every instance's builds count against.
+      # (integer, min 1, max 32; instance)
+      parallel: 1
       # How long a ready worker is kept before a fresh one replaces it. (duration; instance)
       pool-ttl: 30m
       # The object store bucket holding bundles. (string; deployment)

@@ -160,6 +160,7 @@ release changes it.
 | `sweep-period` | duration | `10m` | instance | How often the reconciliation sweep removes what no live attempt owns. |
 | `sweep-grace` | duration | `15m` | instance | How long after a build ends the sweep leaves its attempt alone; longer than settle and the disposal's close wait. |
 | `pool-size` | integer, min 0, max 8 | `1` | instance | Ready workers per published base, warmed ahead of any build. 0: every build launches its own. Each idle one holds a worker, a gateway, a loop device and a workspace image. |
+| `parallel` | integer, min 1, max 32 | `1` | instance | Builds this instance's Docker host runs at once. At most skald.builds.max-running, the limit for the whole deployment, which every instance's builds count against. |
 | `pool-ttl` | duration | `30m` | instance | How long a ready worker is kept before a fresh one replaces it. |
 | `bundle-bucket` | string | `skald-bundles` | deployment | The object store bucket holding bundles. |
 | `log-bucket` | string | `skald-logs` | deployment | The object store bucket holding build logs. |

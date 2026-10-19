@@ -2814,7 +2814,11 @@ below are marked passed by this planning document.
          `max-running` stays the deployment-wide cap; the startup checks report a `parallel`
          above it (threads that could never claim). Each thread keeps the loop's lease,
          stop, settle and sweep behaviour; the stop and disposal paths already handle
-         concurrent attempts per instance.
+         concurrent attempts per instance. *As built:* `BuildLoop` runs `parallel` threads
+         of the same loop (claims are serialized by the coordinator's advisory lock, which
+         counts running builds across the deployment); `stop` interrupts every thread's
+         pause and returns only once every thread's current attempt has ended; a
+         `parallel` above `max-running` is refused at startup and by --validate-config.
       2. The pools replace a taken entry at once, but an instance's running attempts, its
          warming entries and its ready entries together never exceed `parallel` +
          `pool-size` (per driver: the app loop's, and each package platform's with the

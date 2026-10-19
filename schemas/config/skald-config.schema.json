@@ -475,6 +475,13 @@
                   "default" : 1,
                   "description" : "Ready workers per published base, warmed ahead of any build. 0: every build launches its own. Each idle one holds a worker, a gateway, a loop device and a workspace image."
                 },
+                "parallel" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "maximum" : 32,
+                  "default" : 1,
+                  "description" : "Builds this instance's Docker host runs at once. At most skald.builds.max-running, the limit for the whole deployment, which every instance's builds count against."
+                },
                 "pool-ttl" : {
                   "anyOf" : [ {
                     "type" : "integer",

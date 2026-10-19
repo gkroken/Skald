@@ -140,6 +140,12 @@ public class WorkerConfig {
      * restart for builds and pool alike.
      */
     private int poolSize = 1;
+    /**
+     * Builds this instance's Docker host takes at once (T7c step 1): the build loop's threads.
+     * The deployment's limit is skald.builds.max-running, counted across instances; a parallel
+     * above it is refused, since the threads past it could never claim a build.
+     */
+    private int parallel = 1;
     /** How long a ready worker is kept before it is replaced by a fresh one. */
     @DurationUnit(ChronoUnit.SECONDS)
     private Duration poolTtl = Duration.ofMinutes(30);
@@ -242,7 +248,7 @@ public class WorkerConfig {
                 new Credential(registryUsername, registryPassword), logWriter);
         return new BuildLoop(new BuildRunner(coordinator.getObject(), settings, verifier), driver,
                 owner != null && !owner.isBlank() ? owner : java.net.InetAddress.getLocalHost().getHostName(),
-                idlePause);
+                idlePause, parallel);
     }
 
     /**
@@ -412,6 +418,11 @@ public class WorkerConfig {
                 && !registryApi.matches("https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?")) {
             problems.add("registry-api " + shown(registryApi) + " is not http(s)://host[:port]");
         }
+        if (parallel < 1 || parallel > settings.maxRunning()) {
+            problems.add("skald.builds.worker.parallel " + parallel + " must be from 1 to skald.builds.max-running ("
+                    + settings.maxRunning() + "): the deployment never runs more builds at once, so the threads past"
+                    + " it could never claim one");
+        }
         if (quotaMegabytes < 1024) {
             problems.add("quota " + quotaMegabytes + "MB is below 1GB: no base fits");
         }
@@ -513,6 +524,10 @@ public class WorkerConfig {
 
     public void setSweepGrace(Duration sweepGrace) {
         this.sweepGrace = sweepGrace;
+    }
+
+    public void setParallel(int parallel) {
+        this.parallel = parallel;
     }
 
     public void setPoolSize(int poolSize) {

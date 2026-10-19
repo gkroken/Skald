@@ -25,11 +25,13 @@ package eu.openanalytics.shinyproxy.publisher.build;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** The loop never dies of what runOnce throws (T6 carry (c)), pauses when idle, and stops. */
@@ -65,6 +67,97 @@ public class BuildLoopTest {
         }
         assertEquals(3, loop.failures(), "three throws, each logged and survived");
         assertEquals(2, loop.attempts(), "two attempts that ran");
+    }
+
+    @Test
+    public void parallelLoopsRunThatManyAttemptsSideBySideAndNoMore() throws Exception {
+        // T7c step 1: three threads, each holding an attempt until all three are in flight.
+        AtomicInteger inFlight = new AtomicInteger();
+        AtomicInteger most = new AtomicInteger();
+        CountDownLatch three = new CountDownLatch(3);
+        CountDownLatch release = new CountDownLatch(1);
+        BuildLoop loop = new BuildLoop(() -> {
+            int now = inFlight.incrementAndGet();
+            most.accumulateAndGet(now, Math::max);
+            three.countDown();
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } finally {
+                inFlight.decrementAndGet();
+            }
+            return BuildRunner.Result.IDLE;
+            // A long idle pause: only stop's interrupt can end a thread in time.
+        }, Duration.ofSeconds(60), 3);
+        loop.start();
+        try {
+            assertTrue(three.await(10, TimeUnit.SECONDS), "three attempts in flight at once");
+            Thread.sleep(300);
+            assertEquals(3, most.get(), "and never a fourth");
+        } finally {
+            release.countDown();
+        }
+        long stopping = System.nanoTime();
+        loop.stop();
+        assertTrue(System.nanoTime() - stopping < TimeUnit.SECONDS.toNanos(5),
+                "stop interrupts every thread's pause rather than waiting it out");
+        assertEquals(List.of(), loopThreads(), "stop ends every thread");
+        assertThrows(IllegalArgumentException.class, () -> new BuildLoop(() -> BuildRunner.Result.IDLE,
+                Duration.ofMillis(10), 0));
+    }
+
+    @Test
+    public void stopWaitsForEveryThreadsCurrentAttempt() throws Exception {
+        // "Stops after the current attempt", for every thread: the pools and the disposer stop
+        // after the loop, so no thread may still be in an attempt when stop returns.
+        AtomicInteger started = new AtomicInteger();
+        AtomicInteger finished = new AtomicInteger();
+        java.util.concurrent.atomic.AtomicBoolean release = new java.util.concurrent.atomic.AtomicBoolean();
+        BuildLoop loop = new BuildLoop(() -> {
+            started.incrementAndGet();
+            // Staggered by thread: the first ends first, the others 300 and 600 ms later.
+            String name = Thread.currentThread().getName();
+            long extra = 300L * Integer.parseInt(name.substring(name.lastIndexOf('-') + 1));
+            while (!release.get()) {
+                try {
+                    Thread.sleep(20);
+                } catch (InterruptedException ignored) {
+                    // an attempt ends on its own terms, not on the loop's interrupt
+                }
+            }
+            long end = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(extra);
+            while (System.nanoTime() < end) {
+                try {
+                    Thread.sleep(20);
+                } catch (InterruptedException ignored) {
+                    // as above
+                }
+            }
+            finished.incrementAndGet();
+            return BuildRunner.Result.FAILED;
+        }, Duration.ofSeconds(60), 3);
+        loop.start();
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (started.get() < 3 && System.nanoTime() < until) {
+            Thread.sleep(20);
+        }
+        assertEquals(3, started.get(), "three attempts in flight");
+        Thread releaser = new Thread(() -> {
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException ignored) {
+                // released below anyway
+            }
+            release.set(true);
+        });
+        releaser.start();
+        loop.stop();
+        assertEquals(3, finished.get(), "stop returned only after every thread's attempt ended");
+        releaser.join();
+    }
+
+    private static List<String> loopThreads() {
+        return Thread.getAllStackTraces().keySet().stream().filter(Thread::isAlive).map(Thread::getName)
+                .filter(n -> n.startsWith("skald-build-loop")).toList();
     }
 
     @Test
