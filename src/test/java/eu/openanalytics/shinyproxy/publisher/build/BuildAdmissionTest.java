@@ -295,6 +295,10 @@ public class BuildAdmissionTest {
             () -> AdmissionLimits.fromOverrides(Map.of("per_publisher_active", "-1")));
         assertThrows(IllegalArgumentException.class,
             () -> AdmissionLimits.fromOverrides(Map.of("queue_capacity", "lots")));
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+            () -> AdmissionLimits.fromOverrides(Map.of("queue-capacty", "20")));
+        assertEquals("unknown setting 'skald.builds.admission.queue-capacty'; known settings are"
+            + " [per-publisher-active, queue-capacity]", e.getMessage(), "the full key, and the known ones");
     }
 
     // ------------------------------------------------------------------ concurrency

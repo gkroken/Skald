@@ -22,6 +22,9 @@
  */
 package eu.openanalytics.shinyproxy.publisher.build;
 
+import eu.openanalytics.shinyproxy.publisher.config.Settings;
+
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeSet;
@@ -30,11 +33,12 @@ import java.util.TreeSet;
  * How much build work may wait, and how much of it one publisher may hold
  * (WORKPLAN-BUNDLES.md T6, decision 2 of 2026-10-01).
  *
- * <p>{@code queue_capacity}: QUEUED attempts across every content item (default 10, the plan's
- * "finite queue (10)"). {@code per_publisher_active}: QUEUED, RUNNING and PUBLISHING attempts
- * one publisher may hold at once (default 3). Both may be raised or lowered by the operator,
- * never removed: a value must be a positive integer, so "unbounded" cannot be configured
- * (Q3: "a limit may be raised but not removed"). No manifest reaches these.
+ * <p>{@code skald.builds.admission.queue-capacity}: QUEUED attempts across every content item
+ * (default 10, the plan's "finite queue (10)"). {@code per-publisher-active}: QUEUED, RUNNING
+ * and PUBLISHING attempts one publisher may hold at once (default 3). Both may be raised or
+ * lowered by the operator, never removed: a value must be a positive integer, so "unbounded"
+ * cannot be configured (Q3: "a limit may be raised but not removed"). No manifest reaches
+ * these.
  *
  * <p>An unknown key stops startup, as {@code ExtractionLimits} does: a typo that Spring would
  * silently ignore is a limit nobody set.
@@ -46,36 +50,29 @@ public record AdmissionLimits(int queueCapacity, int perPublisherActive) {
     public AdmissionLimits {
         if (queueCapacity < 1 || perPublisherActive < 1) {
             throw new IllegalArgumentException("admission limits must be positive integers, got"
-                    + " queue_capacity=" + queueCapacity + ", per_publisher_active="
+                    + " queue-capacity=" + queueCapacity + ", per-publisher-active="
                     + perPublisherActive);
         }
     }
 
-    /** The defaults with operator overrides; keys in spec or Spring-relaxed spelling. */
+    /** The keys of {@code skald.builds.admission}. */
+    public static final List<String> KEYS = List.of("queue-capacity", "per-publisher-active");
+
+    /** The defaults with operator overrides; keys in kebab-case or Spring-relaxed spelling. */
     public static AdmissionLimits fromOverrides(Map<String, ?> overrides) {
         int queue = DEFAULTS.queueCapacity;
         int perPublisher = DEFAULTS.perPublisherActive;
         for (Map.Entry<String, ?> e : overrides.entrySet()) {
-            String key = e.getKey() == null ? "" : e.getKey().trim().replace('-', '_')
+            String key = e.getKey() == null ? "" : e.getKey().trim().replace('_', '-')
                     .toLowerCase(Locale.ROOT);
-            int value = parse(e.getKey(), e.getValue());
             switch (key) {
-                case "queue_capacity" -> queue = value;
-                case "per_publisher_active" -> perPublisher = value;
-                default -> throw new IllegalArgumentException("unknown admission limit '"
-                        + e.getKey() + "'; known limits are "
-                        + new TreeSet<>(java.util.List.of("queue_capacity", "per_publisher_active")));
+                case "queue-capacity" -> queue = Settings.integer("skald.builds.admission.queue-capacity", e.getValue());
+                case "per-publisher-active" -> perPublisher = Settings.integer(
+                        "skald.builds.admission.per-publisher-active", e.getValue());
+                default -> throw new IllegalArgumentException("unknown setting 'skald.builds.admission."
+                        + e.getKey() + "'; known settings are " + new TreeSet<>(KEYS));
             }
         }
         return new AdmissionLimits(queue, perPublisher);
-    }
-
-    private static int parse(String key, Object value) {
-        try {
-            return Integer.parseInt(String.valueOf(value).trim());
-        } catch (NumberFormatException ex) {
-            throw new IllegalArgumentException("admission limit '" + key + "' is not an integer: "
-                    + value);
-        }
     }
 }

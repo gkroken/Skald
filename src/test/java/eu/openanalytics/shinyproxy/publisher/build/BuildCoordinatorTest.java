@@ -46,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -916,16 +917,60 @@ public class BuildCoordinatorTest {
 
     @Test
     public void coordinatorSettingsAreValidated() {
-        assertEquals(CoordinatorSettings.DEFAULTS, CoordinatorSettings.fromOverrides(Map.of()));
-        assertEquals(Duration.ofSeconds(30), CoordinatorSettings.fromOverrides(
-            Map.of("lease-seconds", "30", "renew_every_seconds", "10")).lease());
+        assertEquals(CoordinatorSettings.DEFAULTS, CoordinatorSettings.fromOverrides(Map.of(), null));
+        CoordinatorSettings s = CoordinatorSettings.fromOverrides(
+            Map.of("lease", "30s", "renew_every", "10", "deadline", "3h"), "4");
+        assertEquals(Duration.ofSeconds(30), s.lease());
+        assertEquals(Duration.ofSeconds(10), s.renewEvery(), "a bare number is seconds");
+        assertEquals(Duration.ofHours(3), s.deadline());
+        assertEquals(4, s.maxRunning(), "skald.builds.max-running");
         assertThrows(IllegalArgumentException.class,
-            () -> CoordinatorSettings.fromOverrides(Map.of("renew_every_seconds", "160")),
+            () -> CoordinatorSettings.fromOverrides(Map.of("renew-every", "160s"), null),
             "renewal slower than half the lease");
+        assertThrows(IllegalArgumentException.class, () -> CoordinatorSettings.fromOverrides(Map.of(), "0"));
+        assertThrows(IllegalArgumentException.class, () -> CoordinatorSettings.fromOverrides(Map.of(), "x"));
+        assertThrows(IllegalArgumentException.class, () -> CoordinatorSettings.fromOverrides(Map.of("lease", "soon"), null));
         assertThrows(IllegalArgumentException.class,
-            () -> CoordinatorSettings.fromOverrides(Map.of("max_running", "0")));
-        assertThrows(IllegalArgumentException.class,
-            () -> CoordinatorSettings.fromOverrides(Map.of("lease_secs", "30")), "a typo");
+            () -> CoordinatorSettings.fromOverrides(Map.of("lease_secs", "30"), null), "a typo");
+        // Renamed outright (T7c 0a): the old keys are unknown, and the error names the new ones.
+        for (String old : List.of("lease-seconds", "renew-every-seconds", "deadline-minutes", "max-running")) {
+            IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> CoordinatorSettings.fromOverrides(Map.of(old, "1"), null), old);
+            assertTrue(e.getMessage().contains("skald.builds.coordinator." + old)
+                && e.getMessage().contains("[deadline, lease, renew-every]"), e.getMessage());
+        }
+    }
+
+    @Test
+    public void theApplicationReadsTheDeploymentsBuildLimitAndTheSectionsWithUnits() {
+        org.springframework.boot.test.context.runner.ApplicationContextRunner runner =
+            new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withConfiguration(org.springframework.boot.autoconfigure.AutoConfigurations.of(
+                    org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration.class))
+                .withUserConfiguration(BuildsConfig.class);
+        runner.withPropertyValues("skald.builds.max-running=3", "skald.builds.coordinator.lease=10m",
+                "skald.builds.coordinator.deadline=2h", "skald.builds.admission.queue-capacity=12")
+            .run(ctx -> {
+                assertNull(ctx.getStartupFailure(), String.valueOf(ctx.getStartupFailure()));
+                CoordinatorSettings c = ctx.getBean(CoordinatorSettings.class);
+                assertEquals(3, c.maxRunning());
+                assertEquals(Duration.ofMinutes(10), c.lease());
+                assertEquals(Duration.ofHours(2), c.deadline());
+                assertEquals(12, ctx.getBean(AdmissionLimits.class).queueCapacity());
+            });
+        // The old place of the limit is refused, not silently the default.
+        runner.withPropertyValues("skald.builds.coordinator.max-running=3").run(ctx -> {
+            assertNotNull(ctx.getStartupFailure());
+            assertTrue(String.valueOf(rootCause(ctx.getStartupFailure()).getMessage())
+                .contains("skald.builds.coordinator.max-running"), String.valueOf(ctx.getStartupFailure()));
+        });
+    }
+
+    private static Throwable rootCause(Throwable t) {
+        while (t.getCause() != null && t.getCause() != t) {
+            t = t.getCause();
+        }
+        return t;
     }
 
     @Test

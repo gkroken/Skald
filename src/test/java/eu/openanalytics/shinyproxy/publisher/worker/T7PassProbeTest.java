@@ -860,7 +860,7 @@ public class T7PassProbeTest {
             // several. The reaper settles it TIMED_OUT; the worker's own stop finishes the log,
             // STOPPED with the reason, and the sweep (every 30 s here, so it lands in that gap
             // if it can) leaves it to the writer (01683f9-F1).
-            application("skald.builds.coordinator.deadline-minutes=1", "skald.builds.worker.sweep-period=30s").run(ctx -> {
+            application("skald.builds.coordinator.deadline=1m", "skald.builds.worker.sweep-period=30s").run(ctx -> {
                 assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
                 UUID[] ids = store(ctx, R, payload(R));
                 Map<String, Object> row = settleWithLog(ctx, ctx.getBean(BuildAdmission.class).request(ids[0], "probe",

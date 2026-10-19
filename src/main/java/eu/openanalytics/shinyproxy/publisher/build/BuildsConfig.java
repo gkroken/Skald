@@ -35,8 +35,9 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Binds {@code skald.builds.admission.*}, {@code skald.builds.coordinator.*} and
- * {@code skald.builds.binaries.*} (T7b's binary queue), each as a
+ * Binds {@code skald.builds.max-running} (app builds running at once across the
+ * deployment), {@code skald.builds.admission.*}, {@code skald.builds.coordinator.*} and
+ * {@code skald.builds.binaries.*} (T7b's binary queue), the sections each as a
  * free-form map for the reason {@code BundleLimitsConfig} gives (an unknown key must stop
  * startup rather than be ignored), and wires the build package when a database is configured.
  *
@@ -49,9 +50,18 @@ import java.util.Map;
 @ConfigurationProperties(prefix = "skald.builds")
 public class BuildsConfig {
 
+    private String maxRunning;
     private Map<String, String> admission = new LinkedHashMap<>();
     private Map<String, String> coordinator = new LinkedHashMap<>();
     private Map<String, String> binaries = new LinkedHashMap<>();
+
+    public String getMaxRunning() {
+        return maxRunning;
+    }
+
+    public void setMaxRunning(String maxRunning) {
+        this.maxRunning = maxRunning;
+    }
 
     public Map<String, String> getAdmission() {
         return admission;
@@ -84,7 +94,7 @@ public class BuildsConfig {
 
     @Bean
     public CoordinatorSettings coordinatorSettings() {
-        return CoordinatorSettings.fromOverrides(coordinator);
+        return CoordinatorSettings.fromOverrides(coordinator, maxRunning);
     }
 
     /** Validated at startup; the queue itself is wired with the builder (T7b step 2e). */

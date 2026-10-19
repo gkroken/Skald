@@ -2745,7 +2745,12 @@ below are marked passed by this planning document.
             the map sections (admission, coordinator, binaries) become typed. Concurrency
             grouped: `skald.builds.max-running` (deployment), `skald.builds.worker.parallel`
             (instance), `pool-size`, `binaries.max-running`. Nothing has shipped, so keys are
-            renamed outright, with no aliases.
+            renamed outright, with no aliases. *As built:* the map sections keep their own
+            parsers rather than becoming bound classes, because each already refuses an
+            unknown key and names the known ones, which Spring's binder reports less
+            usefully; what changes is the values (durations and sizes with units, through
+            one shared `publisher.config.Settings`), kebab-case names and full key paths in
+            every error.
          b. Unknown keys under `skald.*` refused at startup (Spring ignores them, so a
             mistyped `pool-sise` is silently the default today), every problem reported at
             once with its path.

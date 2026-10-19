@@ -22,6 +22,8 @@
  */
 package eu.openanalytics.shinyproxy.publisher.build;
 
+import eu.openanalytics.shinyproxy.publisher.config.Settings;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
@@ -57,31 +59,33 @@ public record CoordinatorSettings(Duration lease, Duration renewEvery, Duration 
         }
     }
 
-    /** Defaults with overrides: lease-seconds, renew-every-seconds, deadline-minutes, max-running. */
-    public static CoordinatorSettings fromOverrides(Map<String, ?> overrides) {
+    /** The keys of {@code skald.builds.coordinator}; values are durations ("300s", "20m"; a bare number is seconds). */
+    public static final List<String> KEYS = List.of("lease", "renew-every", "deadline");
+
+    /**
+     * Defaults with overrides: {@code skald.builds.coordinator.*} ({@link #KEYS}) and the
+     * deployment's {@code skald.builds.max-running} (null: the default). Keys in kebab-case or
+     * Spring-relaxed spelling; an unknown key stops startup, naming the known ones.
+     */
+    public static CoordinatorSettings fromOverrides(Map<String, ?> overrides, Object maxRunning) {
         Duration lease = DEFAULTS.lease;
         Duration renew = DEFAULTS.renewEvery;
         Duration deadline = DEFAULTS.deadline;
         int running = DEFAULTS.maxRunning;
         for (Map.Entry<String, ?> e : overrides.entrySet()) {
-            String key = e.getKey() == null ? "" : e.getKey().trim().replace('-', '_')
+            String key = e.getKey() == null ? "" : e.getKey().trim().replace('_', '-')
                     .toLowerCase(Locale.ROOT);
-            long value;
-            try {
-                value = Long.parseLong(String.valueOf(e.getValue()).trim());
-            } catch (NumberFormatException ex) {
-                throw new IllegalArgumentException("coordinator setting '" + e.getKey()
-                        + "' is not an integer: " + e.getValue());
-            }
             switch (key) {
-                case "lease_seconds" -> lease = Duration.ofSeconds(value);
-                case "renew_every_seconds" -> renew = Duration.ofSeconds(value);
-                case "deadline_minutes" -> deadline = Duration.ofMinutes(value);
-                case "max_running" -> running = Math.toIntExact(value);
-                default -> throw new IllegalArgumentException("unknown coordinator setting '"
-                        + e.getKey() + "'; known settings are " + new TreeSet<>(List.of(
-                        "lease_seconds", "renew_every_seconds", "deadline_minutes", "max_running")));
+                case "lease" -> lease = Settings.duration("skald.builds.coordinator.lease", e.getValue());
+                case "renew-every" -> renew = Settings.duration("skald.builds.coordinator.renew-every", e.getValue());
+                case "deadline" -> deadline = Settings.duration("skald.builds.coordinator.deadline", e.getValue());
+                default -> throw new IllegalArgumentException("unknown setting 'skald.builds.coordinator."
+                        + e.getKey() + "'; known settings are " + new TreeSet<>(KEYS)
+                        + " (the deployment's build limit is skald.builds.max-running)");
             }
+        }
+        if (maxRunning != null) {
+            running = Settings.integer("skald.builds.max-running", maxRunning);
         }
         return new CoordinatorSettings(lease, renew, deadline, running);
     }

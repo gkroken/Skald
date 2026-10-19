@@ -48,7 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** The worker refuses to start on anything a build would otherwise meet at run time. */
 public class WorkerConfigTest {
 
-    private static final CoordinatorSettings DEFAULTS = CoordinatorSettings.fromOverrides(Map.of());
+    private static final CoordinatorSettings DEFAULTS = CoordinatorSettings.fromOverrides(Map.of(), null);
 
     private static WorkerConfig valid(Path workspace) {
         WorkerConfig c = new WorkerConfig();
