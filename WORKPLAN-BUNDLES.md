@@ -2717,7 +2717,7 @@ below are marked passed by this planning document.
       what in it, still needs the client's session (candidates: the context or Dockerfile
       read lazily, the base's registry auth through the session, the export).
 
-- [ ] **T7c. Configuration as code, then build concurrency: several builds per instance,
+- [x] **T7c. Configuration as code, then build concurrency: several builds per instance,
       a pool bounded by capacity.** Depends T7b. Placed before T8 (user, 2026-10-16). Today
       app builds run one at a time in the whole deployment:
       `skald.builds.coordinator.max_running` (`skald.builds.max-running` after step 0)
@@ -2887,6 +2887,26 @@ below are marked passed by this planning document.
       and a mutant); for step 4, a FAILED row re-opened by a published build of its lock and
       left FAILED by a failed one, by another base's build and by a lock without it, each
       with a mutant; host clean.
+      **Measured (2026-10-19, closing T7c; forge's kind cluster stopped for each timing run):**
+      the full pass probe at `parallel` 3 green, 68 of 68, host clean, after two rounds of
+      fixes (85f042e: three probe defects; 5923c7a: a pool stop that left a ready entry
+      behind once its fixed 3-minute wait ran out, now a wait per entry, and the probe's
+      worker-death injection aimed at a taken entry's worker). Three cold builds of the
+      Python fixture admitted at once: with `parallel` 1 they finished 40, 387 and 718 s
+      after admission (attempts 26-39 s; the gaps are each PUBLISHING attempt holding the
+      loop's slot for a lease until T9); with `parallel` 3 all three finished in 69-70 s
+      (attempts 67-68 s, launch.setup 9.4-10.4 s against 5.6 s alone). The T7b probe twice:
+      package launch.setup median 36.6 s and 28.5 s against 4160e3a's 43 s; with step 3 a
+      compile slot keeps only the container removal (median 14.9 s), and 3915 s of
+      disposal over 40 attempts (median 28.8 s, max 489 s) ran off the slots. Row C, the
+      first publish with binaries: 272 s in the first run (its registry push took 175 s
+      beside a 240 s R warm-up, on a host slow throughout: A 653 s against r3's 434 s) and
+      63 s in the second, within the 75 s target; the warm-up beside C is as in r3 (71 s),
+      so no change is made for it. In the second run a forge stall timed out
+      skald.private's fetch twice, 30 s apart, which used both attempts: FAILED
+      SOURCE_FETCH, never fetched elsewhere, and the last app build re-opened it (step 4),
+      back on the deferral path; the probe accepts that case and no other. Full suite
+      green: 1599 tests, 0 failed, 8 skipped.
       **Not here:** time-windowed pool sizes (GitLab's policy windows; small, later), several
       Docker hosts with a capacity each and a Kubernetes runtime (the later multi-host
       track), microVM isolation (needs KVM; this host has none).

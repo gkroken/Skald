@@ -422,10 +422,20 @@ def judge(r, admin):
                                                                          old.get("source_kind")))
     shadowed_row(drained)
     private = drained.get("skald.private", {})
-    record("hosted-only package", private.get("state") in ("PENDING_SOURCE", "REFUSED")
-           and private.get("binary_sha256") in (None, "None") and binary(admin, "skald.private", "1.0") is None,
-           "skald.private %s %s, deferrals %s, no binary in forge" % (
-               private.get("state"), private.get("refusal_code") or "", private.get("deferrals")))
+    final = rows.get("skald.private", {})
+    # A forge stall during the drain can fail its fetch instead (two 30 s timeouts use both
+    # attempts; seen in T7c's rerun): still never fetched elsewhere and never built, and the
+    # last app build re-opens it (T7c step 4), so the final row must be back on the deferral path.
+    stalled = (private.get("state") == "FAILED" and private.get("error_code") == "SOURCE_FETCH"
+               and "Timeout" in str(private.get("error_detail"))
+               and final.get("state") == "PENDING_SOURCE" and final.get("error_code") == "INDEX_BEHIND")
+    record("hosted-only package", (private.get("state") in ("PENDING_SOURCE", "REFUSED") or stalled)
+           and private.get("binary_sha256") in (None, "None") and final.get("binary_sha256") in (None, "None")
+           and binary(admin, "skald.private", "1.0") is None,
+           "skald.private %s %s, deferrals %s, no binary in forge%s" % (
+               private.get("state"), private.get("refusal_code") or private.get("error_code") or "",
+               private.get("deferrals"), "; re-opened by the last build, final %s %s" % (
+                   final.get("state"), final.get("error_code")) if stalled else ""))
     # forge's proxy pins the tarball it cached first (forge-issues/008), so the republished bytes
     # never reach Skald: the binary must be of what forge serves, never of the new bytes.
     # HANDIN_DIGEST and SOURCE_CHANGED stay covered by SourceVerifierTest/PackageSandboxTest.
