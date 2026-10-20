@@ -2993,10 +2993,25 @@ below are marked passed by this planning document.
       receipt is committed". That wording is wrong against T4's receipt, which is written
       last. (a) records the correction as an additive key (the bytes are complete and
       their digest is on the row) and leaves the frozen text unedited. **Validation is
-      asynchronous**, on a bounded executor (`skald.bundles.validation.parallel`, default 2).
-      A request thread could be held for a minute by a bundle near the 2 GiB expanded
-      limit, and its client may disconnect half-way. The client polls bundle.status; a small
-      bundle is VALIDATED within a second. Refusals: 409 `BUNDLE_NOT_UPLOADING` with the
+      asynchronous**: a request thread could be held for a minute by a bundle near the
+      2 GiB expanded limit, and its client may disconnect half-way. The client polls
+      bundle.status; a small bundle is VALIDATED within a second.
+      **A VALIDATING row is claimed work, not a submitted task** (6a23bcb-F1), on the
+      pattern T6 built for build attempts. Each instance runs
+      `skald.bundles.validation.parallel` (default 2) validator threads. Each claims the
+      oldest VALIDATING row with no live lease (`FOR UPDATE SKIP LOCKED`), bumps its
+      generation, and renews a lease (60 s, renewed every 20 s: the build defaults) while
+      it validates from the stored archive. Its final transition is conditional on that
+      generation, so a validator that lost its lease is fenced. A restart, a crash or an OOM
+      loses nothing: the lease lapses and another thread, on any instance, runs validation
+      again, which is safe because every write is create-only and compared on replay. The
+      PUT wakes the local threads after its commit point. A full pool means the row waits,
+      never that the PUT is refused. The lease needs columns, so this adds **V5** (forward
+      only, additive): `bundle.validating_at`, `validation_owner`,
+      `validation_lease_expires_at`, `validation_generation`, `validation_claims` and
+      `validation_storage_error`. A CHECK makes the lease columns null outside VALIDATING.
+      The T6 decision delegated schema to the coder, and this schema has not shipped
+      anywhere yet. Refusals: 409 `BUNDLE_NOT_UPLOADING` with the
       current state (repeat PUT, different bytes, or the loser of two concurrent PUTs); 400
       `UPLOAD_INCOMPLETE` when fewer bytes than `Content-Length` arrive. The bundle stays
       UPLOADING and the same PUT may be sent again. 503 `STORAGE_UNAVAILABLE`,
@@ -3018,15 +3033,23 @@ below are marked passed by this planning document.
       transition. A read-back the store cannot serve is 503 `STORAGE_UNAVAILABLE` again.
       (iii) Row has left UPLOADING: 409 `BUNDLE_NOT_UPLOADING` with its state, as T1
       froze. The frozen "a later PUT restarts it cleanly" holds through (ii): the restart
-      is verified, not a rewrite. A storage failure inside validation (writing the
-      manifest, inventory or receipt) is the platform's problem, not the client's. The
-      validator retries with backoff while the bundle's VALIDATING deadline allows (the
-      row's `updated_at` plus `skald.bundles.validation.deadline`, default 15 min; no new
-      column),
-      writing create-only and comparing what is there on a replay. Past the deadline the
-      reaper rejects the bundle with rule `VALIDATION_STORAGE`, which names the store
-      rather than the bundle. (f)'s injection test faults the archive put, the read-back,
-      the row update, and each of validation's three writes, each separately.
+      is verified, not a rewrite. A storage failure inside validation (reading the
+      archive, or writing the manifest, inventory or receipt) is the platform's problem,
+      not the client's. The validator records it in `validation_storage_error`, releases
+      the claim and retries with backoff. **The deadline rejects a bundle only for what was
+      observed.** The deadline is `validating_at` plus `skald.bundles.validation.deadline`
+      (default 15 min). Past it the reaper rejects with `VALIDATION_STORAGE` when a storage
+      failure is recorded, which names the store and not the bundle, and with
+      `VALIDATION_STALLED` when nothing finished and nothing was recorded (no validator
+      ran, e.g. publishing switched off on every instance). A bundle whose validation was
+      claimed `skald.bundles.validation.max-claims` times (default 3) without finishing is
+      rejected `VALIDATION_INTERRUPTED`: something in it ends validators (an OOM or a crash).
+      That stops a poison bundle taking down instance after instance, and the rule says
+      exactly that. Each of these rules is retryable by uploading a new bundle, and none is
+      reported as a fault in the bundle's content. (f)'s injection test faults the archive
+      put, the read-back, the row update, the archive read and each of validation's three writes, each separately, and kills
+      the instance mid-validation: after the restart the bundle reaches VALIDATED (or
+      REJECTED for its own rule) with no re-upload.
 
       *bundle.status.* 200: `{id, contentId, state, createdBy, createdAt, updatedAt,
       finishedAt, uploadDeadline, archive: {sha256, bytes} | null, manifestSha256,
@@ -3173,7 +3196,7 @@ below are marked passed by this planning document.
 
       *Order of work after sign-off*, one reviewed commit each: (a) the shapes into
       `spec/admin-transport-v1.json` plus the fixture checker; (b) the upload service and
-      bundle endpoints (validation executor, reaper rule, S9); (c) build create, status,
+      bundle endpoints (V5, the claimed validator loop, reaper rules, S9); (c) build create, status,
       list and cancel; (d) log replay (cursor, both formats, neutraliser); (e) the SSE
       stream; (f) T2's whole corpus through HTTP, Alice allow / Bob deny / signed-out deny
       per endpoint with deny cases first, cross-content IDs and cursors, hostile-origin
