@@ -2992,8 +2992,22 @@ below are marked passed by this planning document.
       `retryable: true`, with `Retry-After`, for the store's "outcome unknown", the
       unexplained `400 IncompleteBody`, and throttling that outlasted the SDK's retries (the
       Q4 risk row). The bundle stays UPLOADING, and that is never a verdict on the bundle.
-      A replay after an unknown outcome finds the receipt already committed with the same
-      digest, so it goes on; with a different digest it is 409.
+      **Replays after an unknown outcome, per stage** (ad2d195-F1). The archive key is
+      fixed by the v1 layout and its put is create-only, and a streamed put records no
+      digest, so a stored archive cannot simply be trusted. (i) No archive object: the
+      replay writes it as a first PUT would. (ii) Archive present, no receipt (the long
+      streamed put whose answer was lost): the replay's body is streamed to a digest and
+      size only, not stored, then the stored archive is read back once and hashed (bounded
+      by `maxBytes`; a rare path). Both match: the receipt is committed from the read-back
+      digest, which describes the stored bytes, never from what the request claims, and the
+      bundle goes on to VALIDATING. No match: 409 `BUNDLE_ARCHIVE_CONFLICT` ("make a new
+      bundle"); the bundle stays UPLOADING, so the one-hour rule rejects it
+      (`UPLOAD_ABANDONED`) and the lifecycle gains no new transition. A read-back the store
+      cannot serve is 503 `STORAGE_UNAVAILABLE` again. (iii) Receipt present: the bundle
+      has left UPLOADING, so 409 `BUNDLE_NOT_UPLOADING` with its state, as T1 froze. The
+      frozen "a later PUT restarts it cleanly" is true through (ii): the restart is
+      verified, not a rewrite. (f)'s injection test faults the archive put, the read-back
+      and the receipt put, each separately.
 
       *bundle.status.* 200: `{id, contentId, state, createdBy, createdAt, updatedAt,
       finishedAt, uploadDeadline, archive: {sha256, bytes} | null, manifestSha256,
@@ -3020,7 +3034,7 @@ below are marked passed by this planning document.
       deadlineAt, error: {code, detail} | null, image, recipe, effectiveLimits,
       cancel: {requestedAt, outcome} | null, log: {state, final}, links: {self, logs,
       stream, cancel}}`. Left out on purpose: lease owner, generation and the worker handle,
-      which are internals and name infrastructure. `cancel.outcome` is `requested`,
+      which are internals and name infrastructure. `cancel.outcome` is `requested`, `overtaken`,
       `cancelled`, or `too_late`, the last one shown as "cancel requested; the build had
       already finished" (T5 carry 4). `log.state` is `pending` (nothing written yet), `live`,
       `finishing` (the build has settled and there is no final record yet, which can last
@@ -3071,15 +3085,37 @@ below are marked passed by this planning document.
       per connection, then the server closes without `end` and the client resumes by
       cursor. A storage outage sends `state` with `logState: "storage_unavailable"` and
       keeps retrying with backoff until the connection limit; it does not end the stream.
+      This pull model **supersedes the frozen stream note's "bounded subscriber queue"**:
+      there is no queue at all, which is the stronger form of the same bound. (a) records
+      the supersession as an additive key and leaves the frozen note unedited (ad2d195 N2).
 
-      *build.cancel.* `POST .../cancel`, body `{}` (JSON for the CSRF rule). 202
-      `{outcome, build}`: `cancelled` (it was QUEUED) or `requested` (RUNNING; final once
-      the worker is confirmed stopped). 409 `CANCEL_REFUSED_PUBLISHING`; 409
-      `CANCEL_TOO_LATE` ("the build had already finished") when the cancel arrived after
-      the driver finished; 409 `ALREADY_FINISHED` for a terminal attempt never asked to
-      cancel. A repeated cancel returns the first one's outcome: a CANCELLED attempt with
-      a cancel request gives 202 `cancelled` again, and a RUNNING one gives `requested`
-      again (T6 carry 5).
+      *build.cancel.* `POST .../cancel`, body `{}` (JSON for the CSRF rule). The reply is
+      a function of the attempt's state and whether it carries a cancel request
+      (`cancel_requested_at`), read under the row lock (ad2d195-F2). `CancelOutcome` gains
+      the values this needs:
+
+      | State | Cancel requested before? | HTTP | `code` / `outcome` | `cancel.outcome` in status |
+      |---|---|---|---|---|
+      | QUEUED | (never kept) | 202 | `cancelled`; moves to CANCELLED | `cancelled` |
+      | RUNNING | either | 202 | `requested`; recorded once, final when the worker is confirmed stopped | `requested` |
+      | PUBLISHING | no | 409 | `CANCEL_REFUSED_PUBLISHING` | none |
+      | PUBLISHING | yes | 409 | `CANCEL_TOO_LATE` | `too_late` |
+      | CANCELLED | yes | 202 | `cancelled` | `cancelled` |
+      | SUCCEEDED, FAILED | yes | 409 | `CANCEL_TOO_LATE` | `too_late` |
+      | TIMED_OUT, INTERRUPTED | yes | 409 | `ALREADY_FINISHED` | `overtaken` |
+      | any terminal | no | 409 | `ALREADY_FINISHED` | none |
+
+      `too_late` reads "cancel requested; the build had already finished" (T5 carry 4):
+      the driver finished before the stop and the attempt went on to PUBLISHING. A request
+      during PUBLISHING itself is the refusal row, never `too_late`. `overtaken` reads
+      "cancel requested; the attempt ended <state> before a stop was confirmed", since a
+      timeout or a lost worker is not a finished build. A superseded attempt is CANCELLED
+      without a request of its own, so a cancel of it is `ALREADY_FINISHED`. **The replay
+      guarantee is "a retry reports the cancel's current outcome"** (T6 carry 5), which is
+      what the coordinator can give: a first 202 `requested` whose reply was lost, retried
+      after the build ended, answers with the row it has reached, e.g. 202 `cancelled` or
+      409 `CANCEL_TOO_LATE`. A retry never makes a second cancel or a different
+      transition.
 
       *Auth, CSRF and IDs.* Admins only, as T1 froze it: `/admin/**` is gated by
       `UISecurityConfig`, with no second matcher. A non-admin gets upstream's 403; a
@@ -3089,7 +3125,12 @@ below are marked passed by this planning document.
       (no oracle), and log objects are only reached through keys built from that pair. The
       CSRF rule is T1's and unchanged: every body is `application/json` or, for the upload,
       `application/gzip` plus `X-Skald-Upload`. Form types are 415 and a missing header is
-      400 `UPLOAD_HEADER_MISSING`. The GET endpoints change nothing. Cross-origin reads of
+      400 `UPLOAD_HEADER_MISSING`. A body with no `Content-Type` at all can also be sent
+      cross-site without a preflight (`navigator.sendBeacon`, or `fetch` in no-cors mode
+      with an untyped Blob). `consumes` reads it as `application/octet-stream` and refuses
+      it with 415, so it is covered. It is stated here because nothing else would show it:
+      (a)'s checker and (f)'s hostile-origin set include an untyped POST to bundle.create
+      and to build.cancel (ad2d195 N1). The GET endpoints change nothing. Cross-origin reads of
       them, EventSource included, are refused by CORS for any origin the deployment has
       not configured. No CORS change, and no change to the CSRF matcher. Audit:
       `bundle.create`, `bundle.upload`, `bundle.validated` / `bundle.rejected`,
