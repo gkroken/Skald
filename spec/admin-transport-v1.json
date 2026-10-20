@@ -135,5 +135,177 @@
   "cancel_refused_states": [
     "PUBLISHING"
   ],
-  "cancel_refused_rationale": "409 rather than a silent no-op. A push may already have produced a digest, so a cancel racing publication is how an image comes to exist with no row describing it. This list must agree with spec/lifecycle-v1.json: a state named here must have no transition to CANCELLED."
+  "cancel_refused_rationale": "409 rather than a silent no-op. A push may already have produced a digest, so a cancel racing publication is how an image comes to exist with no row describing it. This list must agree with spec/lifecycle-v1.json: a state named here must have no transition to CANCELLED.",
+  "shapes": {
+    "note": "Added by T8 (a), signed off by the user on 2026-10-20 (WORKPLAN-BUNDLES T8 plan, ad2d195 + c50e4fa). Additive: every key above this one is T1's and unchanged. What T1 left open -- bodies, errors, the log cursor and formats, the stream, the cancel replies -- is fixed here, and dev/schema-fixture-check.py holds it consistent with the frozen keys and spec/lifecycle-v1.json. The Java side holds its enums and controllers to this file.",
+    "envelope": {
+      "success": {"status": "success", "data": "the endpoint's response object"},
+      "refusal": {"status": "fail", "data": {"code": "one of errors", "message": "operator-facing text", "retryable": "boolean, from errors"}},
+      "server_error": {"status": "error", "data": {"code": "INTERNAL", "message": "no detail beyond a correlation id", "retryable": false}},
+      "why": "ContainerProxy's ApiResponse, as spine #1's /admin/content uses. data is an object so a client branches on code, never on message text. Spine #1's own string-valued errors are left as they are.",
+      "not_this_envelope": "A non-admin's 403 and a signed-out caller's redirect to log in are upstream's responses, not this envelope."
+    },
+    "naming": "camelCase",
+    "strict_request_bodies": "An unknown field in a JSON request body is 400 BAD_REQUEST, as in the manifest.",
+    "untyped_body": {
+      "rule": "A body with no Content-Type is sendable cross-site without a preflight (navigator.sendBeacon; fetch no-cors with an untyped Blob). consumes reads it as application/octet-stream and refuses it.",
+      "status": 415,
+      "tested_on": ["bundle.create", "build.create", "build.cancel"]
+    },
+    "untrusted_text": {
+      "json": "Responses are written with every non-ASCII character escaped, so the bytes on the wire are ASCII: a bidi override or a C1 control arrives as \\uXXXX, never raw.",
+      "text": "The text view replaces Cc (except tab), Cf, Zl, Zp and default-ignorable code points (publisher.names.InvisibleCharacters) with \\x{HEX}.",
+      "log_response_headers": {
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "default-src 'none'; sandbox"
+      }
+    },
+    "errors": {
+      "BAD_REQUEST":                      {"status": 400, "retryable": false},
+      "INVALID_ID":                       {"status": 400, "retryable": false},
+      "UPLOAD_HEADER_MISSING":            {"status": 400, "retryable": false},
+      "UPLOAD_INCOMPLETE":                {"status": 400, "retryable": true, "why": "fewer bytes than Content-Length arrived; the bundle stays UPLOADING and the same PUT may be sent again"},
+      "KEY_INVALID":                      {"status": 400, "retryable": false},
+      "CURSOR_INVALID":                   {"status": 400, "retryable": false},
+      "CONTENT_NOT_FOUND":                {"status": 404, "retryable": false},
+      "BUNDLE_NOT_FOUND":                 {"status": 404, "retryable": false, "why": "also another content item's bundle: no oracle"},
+      "BUILD_NOT_FOUND":                  {"status": 404, "retryable": false, "why": "also another content item's build"},
+      "BUNDLE_NOT_UPLOADING":             {"status": 409, "retryable": false},
+      "BUNDLE_ARCHIVE_CONFLICT":          {"status": 409, "retryable": false, "why": "a replay's bytes differ from the archive already stored; make a new bundle"},
+      "BUNDLE_NOT_VALIDATED":             {"status": 409, "retryable": false},
+      "KEY_REUSED_WITH_DIFFERENT_INPUTS": {"status": 409, "retryable": false},
+      "RETRY_BUNDLE_MISMATCH":            {"status": 400, "retryable": false, "why": "retryOf reuses its attempt's bundle; naming another is a different request"},
+      "RETRY_NOT_TERMINAL":               {"status": 409, "retryable": false},
+      "CANCEL_REFUSED_PUBLISHING":        {"status": 409, "retryable": false},
+      "CANCEL_TOO_LATE":                  {"status": 409, "retryable": false},
+      "ALREADY_FINISHED":                 {"status": 409, "retryable": false},
+      "LOG_EXPIRED":                      {"status": 410, "retryable": false},
+      "LENGTH_REQUIRED":                  {"status": 411, "retryable": false},
+      "BUNDLE_TOO_LARGE":                 {"status": 413, "retryable": false},
+      "UNSUPPORTED_MEDIA_TYPE":           {"status": 415, "retryable": false},
+      "PUBLISHER_LIMIT":                  {"status": 429, "retryable": true},
+      "STREAM_LIMIT":                     {"status": 429, "retryable": true},
+      "INTERNAL":                         {"status": 500, "retryable": false},
+      "QUEUE_FULL":                       {"status": 503, "retryable": true},
+      "STORAGE_UNAVAILABLE":              {"status": 503, "retryable": true, "why": "the store's outcome unknown, 400 IncompleteBody, or throttling past the SDK's retries; never a verdict on the bundle"}
+    },
+    "bodies": {
+      "bundle.create": {
+        "request": {},
+        "response": ["id", "contentId", "state", "uploadUrl", "uploadDeadline", "maxBytes"],
+        "errors": ["BAD_REQUEST", "INVALID_ID", "CONTENT_NOT_FOUND", "UNSUPPORTED_MEDIA_TYPE", "STORAGE_UNAVAILABLE"]
+      },
+      "bundle.upload": {
+        "request_headers": ["Content-Type: application/gzip", "X-Skald-Upload", "Content-Length"],
+        "response": "bundle.status",
+        "response_state": "VALIDATING",
+        "errors": ["INVALID_ID", "CONTENT_NOT_FOUND", "BUNDLE_NOT_FOUND", "UPLOAD_HEADER_MISSING", "LENGTH_REQUIRED", "BUNDLE_TOO_LARGE", "UPLOAD_INCOMPLETE", "BUNDLE_NOT_UPLOADING", "BUNDLE_ARCHIVE_CONFLICT", "UNSUPPORTED_MEDIA_TYPE", "STORAGE_UNAVAILABLE"]
+      },
+      "bundle.status": {
+        "response": ["id", "contentId", "state", "createdBy", "createdAt", "updatedAt", "finishedAt", "uploadDeadline", "archive", "manifestSha256", "inventory", "rejection"],
+        "errors": ["INVALID_ID", "CONTENT_NOT_FOUND", "BUNDLE_NOT_FOUND"]
+      },
+      "build.create": {
+        "request": {"bundleId": "uuid; optional only when retryOf is given", "idempotencyKey": "1-200 printable ASCII", "retryOf": "optional uuid of a terminal attempt of this content"},
+        "response": "build.status",
+        "response_extra": ["created", "supersededBuildId"],
+        "errors": ["BAD_REQUEST", "INVALID_ID", "KEY_INVALID", "CONTENT_NOT_FOUND", "BUNDLE_NOT_FOUND", "BUILD_NOT_FOUND", "BUNDLE_NOT_VALIDATED", "KEY_REUSED_WITH_DIFFERENT_INPUTS", "RETRY_BUNDLE_MISMATCH", "RETRY_NOT_TERMINAL", "PUBLISHER_LIMIT", "QUEUE_FULL", "UNSUPPORTED_MEDIA_TYPE"]
+      },
+      "build.status": {
+        "response": ["id", "contentId", "bundleId", "retryOf", "supersededBy", "state", "createdBy", "createdAt", "startedAt", "publishingAt", "finishedAt", "deadlineAt", "error", "image", "recipe", "effectiveLimits", "cancel", "log", "links"],
+        "never": ["leaseOwner", "leaseGeneration", "workerHandle"],
+        "cancel_outcomes": ["requested", "cancelled", "too_late", "overtaken"],
+        "log_states": ["pending", "live", "finishing", "final"],
+        "errors": ["INVALID_ID", "CONTENT_NOT_FOUND", "BUILD_NOT_FOUND"]
+      },
+      "build.list": {
+        "query": {"limit": "default 50, max 200", "state": "repeatable", "before": "a buildId from a previous page's next"},
+        "response": ["items", "next"],
+        "errors": ["BAD_REQUEST", "INVALID_ID", "CONTENT_NOT_FOUND"]
+      },
+      "build.logs.replay": {
+        "query": {"after": "cursor", "limit": "records; ndjson default 1000, max 10000; text unlimited"},
+        "default_media_type": "text/plain",
+        "response_headers": ["X-Skald-Log-State", "X-Skald-Build-State", "X-Skald-Next-Cursor"],
+        "errors": ["INVALID_ID", "CONTENT_NOT_FOUND", "BUILD_NOT_FOUND", "CURSOR_INVALID", "LOG_EXPIRED", "STORAGE_UNAVAILABLE"]
+      },
+      "build.logs.stream": {
+        "resume": ["Last-Event-ID", "after"],
+        "errors": ["INVALID_ID", "CONTENT_NOT_FOUND", "BUILD_NOT_FOUND", "CURSOR_INVALID", "LOG_EXPIRED", "STREAM_LIMIT"]
+      },
+      "build.cancel": {
+        "request": {},
+        "response": ["outcome", "build"],
+        "errors": ["BAD_REQUEST", "INVALID_ID", "CONTENT_NOT_FOUND", "BUILD_NOT_FOUND", "CANCEL_REFUSED_PUBLISHING", "CANCEL_TOO_LATE", "ALREADY_FINISHED", "UNSUPPORTED_MEDIA_TYPE"]
+      }
+    },
+    "cursor": {
+      "form": "<chunk sequence>.<record index>, both decimal, no leading zeros",
+      "pattern": "^(0|[1-9][0-9]{0,11})\\.(0|[1-9][0-9]{0,8})$",
+      "matched": "whole: java.util.regex matches(), never find(); $ alone matches before a final newline (dd46cac-F2)",
+      "start": "0.0",
+      "opaque": "Documented so a person can read one; a client never builds one.",
+      "served_up_to": "what the log advertises: final.json once it exists, else index.json; never past a hole",
+      "ahead_of_index": "not an error: replay returns nothing, the stream waits"
+    },
+    "log_records": {
+      "line":   {"cursor": "3.17", "n": 412, "t": "text", "cut": "true, only when the line was shortened"},
+      "gap":    {"cursor": "3.18", "gap": {"lines": "L", "bytes": "B"}},
+      "end":    {"end": {"outcome": "final.json outcome", "complete": "boolean", "truncated": "boolean", "buildState": "the build's state"}},
+      "stored_marker_renamed": "HeadTailLog stores the marker as {\"cut\":{...}}; it is served as gap so the two meanings of cut do not share a key",
+      "text_line": "<n right-aligned> | <text>, ' [cut]' appended to a shortened line",
+      "text_platform_lines": "----- skald: ... ----- (no ' | ', so build output cannot pass for one)"
+    },
+    "stream": {
+      "events": ["line", "gap", "state", "end"],
+      "event_ids": "the record's cursor, on line and gap",
+      "retry_ms": 5000,
+      "keepalive_seconds": 15,
+      "index_poll_seconds": 1,
+      "after_end": "the server closes; a reconnect gets end again at once",
+      "model": "pull: each subscriber reads committed chunks from storage when its previous write has gone out. Nothing the build writes waits for a reader.",
+      "supersedes": "the build.logs.stream note's 'bounded subscriber queue': there is no queue at all, which is the stronger form of the same bound. The frozen note is left unedited.",
+      "limits": {"per_instance": 64, "per_user": 8, "connection_minutes": 30},
+      "storage_outage": "a state event with logState storage_unavailable, then retries with backoff until the connection limit"
+    },
+    "cancel_replies": [
+      {"state": "QUEUED",      "requested": false, "status": 202, "outcome": "cancelled"},
+      {"state": "QUEUED",      "requested": true,  "status": 202, "outcome": "cancelled"},
+      {"state": "RUNNING",     "requested": false, "status": 202, "outcome": "requested"},
+      {"state": "RUNNING",     "requested": true,  "status": 202, "outcome": "requested"},
+      {"state": "PUBLISHING",  "requested": false, "status": 409, "code": "CANCEL_REFUSED_PUBLISHING"},
+      {"state": "PUBLISHING",  "requested": true,  "status": 409, "code": "CANCEL_TOO_LATE"},
+      {"state": "CANCELLED",   "requested": true,  "status": 202, "outcome": "cancelled"},
+      {"state": "CANCELLED",   "requested": false, "status": 409, "code": "ALREADY_FINISHED", "why": "superseded: cancelled with no request of its own"},
+      {"state": "SUCCEEDED",   "requested": true,  "status": 409, "code": "CANCEL_TOO_LATE"},
+      {"state": "SUCCEEDED",   "requested": false, "status": 409, "code": "ALREADY_FINISHED"},
+      {"state": "FAILED",      "requested": true,  "status": 409, "code": "CANCEL_TOO_LATE"},
+      {"state": "FAILED",      "requested": false, "status": 409, "code": "ALREADY_FINISHED"},
+      {"state": "TIMED_OUT",   "requested": true,  "status": 409, "code": "ALREADY_FINISHED", "cancel_outcome": "overtaken"},
+      {"state": "TIMED_OUT",   "requested": false, "status": 409, "code": "ALREADY_FINISHED"},
+      {"state": "INTERRUPTED", "requested": true,  "status": 409, "code": "ALREADY_FINISHED", "cancel_outcome": "overtaken"},
+      {"state": "INTERRUPTED", "requested": false, "status": 409, "code": "ALREADY_FINISHED"}
+    ],
+    "cancel_replay": "A retry reports the cancel's current outcome; it never makes a second cancel or a different transition.",
+    "upload_commit_point": {
+      "put": "The row moves UPLOADING -> VALIDATING under its lock, with object_key, object_sha256 and object_bytes from the archive put or the stage (ii) read-back. receipt.json is NOT written by the PUT.",
+      "validation_writes": ["manifest.json", "inventory.json", "receipt.json"],
+      "then": "VALIDATED",
+      "validating_deadline": "validating_at + skald.bundles.validation.deadline",
+      "validation_is_claimed": "A VALIDATING row is claimed work: FOR UPDATE SKIP LOCKED, a generation-fenced lease (60 s, renewed every 20 s), re-run by any instance when the lease lapses; a full pool makes rows wait and never refuses a PUT (6a23bcb-F1).",
+      "lifecycle_correction": "spec/lifecycle-v1.json says VALIDATING means 'bytes are complete and the receipt is committed'. Read it as: the bytes are complete and their digest is on the row; receipt.json is written last, by validation (BundleWriter.commit, BundleReceipt). The frozen text is left unedited (c50e4fa-F1)."
+    },
+    "upload_replay": [
+      {"stage": "row UPLOADING, no archive object", "action": "written as a first PUT would"},
+      {"stage": "row UPLOADING, archive present", "action": "the body is hashed without storing; the stored archive is read back once and hashed; a match moves the row to VALIDATING with the read-back digest", "mismatch": "BUNDLE_ARCHIVE_CONFLICT", "read_back_fails": "STORAGE_UNAVAILABLE"},
+      {"stage": "row has left UPLOADING", "action": "refused", "code": "BUNDLE_NOT_UPLOADING"}
+    ],
+    "rejection_rules_added": {
+      "UPLOAD_ABANDONED": "UPLOADING past its upload deadline (lifecycle: upload abandoned past its deadline)",
+      "VALIDATION_STORAGE": "VALIDATING past its deadline with a storage failure recorded; names the store, not the bundle",
+      "VALIDATION_STALLED": "VALIDATING past its deadline with nothing finished and nothing recorded: no validator ran",
+      "VALIDATION_INTERRUPTED": "claimed max-claims times without finishing: something in the bundle ends validators",
+      "S9": "the manifest's type differs from content.type"
+    }
+  }
 }

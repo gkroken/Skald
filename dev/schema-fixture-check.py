@@ -1527,6 +1527,310 @@ def _limits_self_test():
     return missed
 
 
+
+# The bodies, errors, log formats and cancel replies T8 adds under "shapes" (signed off by
+# the user 2026-10-20). Returned as findings rather than printed through fail(), so the
+# self-test below can mutate the document in memory and require each check to fail for its
+# own reason, as the isolation and limits checks do.
+CURSOR_EXAMPLES_VALID = ("0.0", "1.0", "3.17", "999999999999.999999999")
+CURSOR_EXAMPLES_INVALID = ("", "1", "01.2", "1.02", "-1.0", "1.0 ", "a.b", "1.0\n", "1..2",
+                           "1000000000000.0")
+
+
+def _transport_shape_findings(spec, lifecycle):
+    bad, good = [], []
+    shapes = spec.get("shapes")
+    if not isinstance(shapes, dict) or not shapes:
+        return ["admin transport has no shapes section, so nothing T8 signed off is held "
+                "to anything"], good
+
+    endpoints = {e["id"]: e for e in spec.get("endpoints") or []}
+    errors = shapes.get("errors") or {}
+    build = lifecycle["machines"]["build"]
+
+    # Every error names its status and whether a client may retry; a 503 that is not
+    # retryable contradicts the Retry-After it is sent with, and a 2xx/3xx is not an error.
+    for code, e in sorted(errors.items()):
+        if not isinstance(e.get("status"), int) or not 400 <= e["status"] <= 599:
+            bad.append("error %s has status %r; an error is 4xx or 5xx" % (code, e.get("status")))
+        if not isinstance(e.get("retryable"), bool):
+            bad.append("error %s does not say whether it is retryable" % code)
+        elif e.get("status") == 503 and not e["retryable"]:
+            bad.append("error %s is a 503 that is not retryable" % code)
+    if not errors:
+        bad.append("shapes.errors is empty; every reference below would be unchecked")
+
+    # Every endpoint has a body entry, and every code an endpoint, the cancel table or the
+    # upload replay names is a declared error.
+    bodies = shapes.get("bodies") or {}
+    for eid in sorted(endpoints):
+        if eid not in bodies:
+            bad.append("endpoint %s has no entry in shapes.bodies" % eid)
+    for eid, b in sorted(bodies.items()):
+        if eid not in endpoints:
+            bad.append("shapes.bodies names %s, which is not a frozen endpoint" % eid)
+            continue
+        for code in b.get("errors") or []:
+            if code not in errors:
+                bad.append("%s names error %s, which shapes.errors does not declare" % (eid, code))
+        e = endpoints[eid]
+        if e["method"] in BODY_METHODS and "application/json" in e.get("accepts", []):
+            if not isinstance(b.get("request"), dict):
+                bad.append("%s takes a JSON body but declares no request object" % eid)
+            if "UNSUPPORTED_MEDIA_TYPE" not in (b.get("errors") or []):
+                bad.append("%s takes a JSON body but does not list UNSUPPORTED_MEDIA_TYPE, so "
+                           "a form or untyped body has no declared answer" % eid)
+
+    # The untyped body: refused with 415, on every JSON-bodied endpoint, and nothing accepts
+    # the type Spring reads it as.
+    untyped = shapes.get("untyped_body") or {}
+    if untyped.get("status") != 415:
+        bad.append("untyped_body.status is %r; a body with no Content-Type must be 415"
+                   % untyped.get("status"))
+    json_posts = sorted(eid for eid, e in endpoints.items()
+                        if e["method"] in BODY_METHODS and "application/json" in e.get("accepts", []))
+    missing = sorted(set(json_posts) - set(untyped.get("tested_on") or []))
+    if missing:
+        bad.append("untyped_body is not tested on %s" % ", ".join(missing))
+    for eid, e in sorted(endpoints.items()):
+        for raw in e.get("accepts", []):
+            if normalise_media_type(raw) in ("application/octet-stream", ""):
+                bad.append("%s accepts %r, which is what an untyped cross-site body is read as"
+                           % (eid, raw))
+
+    headers = (shapes.get("untrusted_text") or {}).get("log_response_headers") or {}
+    if headers.get("X-Content-Type-Options") != "nosniff":
+        bad.append("log responses do not carry X-Content-Type-Options: nosniff")
+    if "sandbox" not in (headers.get("Content-Security-Policy") or ""):
+        bad.append("log responses do not carry a sandboxing Content-Security-Policy")
+
+    # The cursor pattern accepts exactly the documented form.
+    pattern = (shapes.get("cursor") or {}).get("pattern")
+    try:
+        rx = re.compile(pattern or "")
+    except re.error as e:
+        bad.append("the cursor pattern does not compile: %s" % e)
+        rx = None
+    if not pattern:
+        bad.append("the cursor declares no pattern")
+    elif rx:
+        # Matched whole (java.util.regex matches(), Python fullmatch), because `$` alone
+        # matches before a final newline in both engines (dd46cac-F2). The anchors are
+        # still required in the text, so a later find() cannot accept a cursor inside junk.
+        if not (pattern.startswith("^") and pattern.endswith("$")):
+            bad.append("the cursor pattern is not anchored at both ends")
+        for c in CURSOR_EXAMPLES_VALID:
+            if not rx.fullmatch(c):
+                bad.append("the cursor pattern refuses %r" % c)
+        for c in CURSOR_EXAMPLES_INVALID:
+            if rx.fullmatch(c):
+                bad.append("the cursor pattern accepts %r" % c)
+        if shapes["cursor"].get("start") and not rx.fullmatch(shapes["cursor"]["start"]):
+            bad.append("the cursor pattern refuses its own start value")
+
+    stream = shapes.get("stream") or {}
+    if "end" not in (stream.get("events") or []):
+        bad.append("the stream has no end event, so a client cannot tell a finished log from a "
+                   "dropped connection")
+    if "end" not in (shapes.get("log_records") or {}):
+        bad.append("the replay records have no end record")
+
+    # The cancel table: total over (state, requested), agreeing with the lifecycle and with
+    # the frozen cancel_refused_states.
+    rows = shapes.get("cancel_replies") or []
+    seen = {}
+    for r in rows:
+        key = (r.get("state"), r.get("requested"))
+        if key in seen:
+            bad.append("cancel_replies has two rows for %s requested=%s" % key)
+        seen[key] = r
+        if r.get("state") not in build["states"]:
+            bad.append("cancel_replies names unknown build state %s" % r.get("state"))
+        if r.get("status") == 202:
+            if r.get("outcome") not in ("cancelled", "requested"):
+                bad.append("cancel_replies %s requested=%s is 202 with outcome %r"
+                           % (key + (r.get("outcome"),)))
+        elif r.get("status") == 409:
+            if r.get("code") not in errors or errors[r["code"]]["status"] != 409:
+                bad.append("cancel_replies %s requested=%s is 409 with code %r, not a declared "
+                           "409 error" % (key + (r.get("code"),)))
+        else:
+            bad.append("cancel_replies %s requested=%s has status %r" % (key + (r.get("status"),)))
+    for state in build["states"]:
+        for requested in (False, True):
+            if (state, requested) not in seen:
+                bad.append("cancel_replies has no row for %s requested=%s" % (state, requested))
+    to_cancelled = {t["from"] for t in build["transitions"] if t["to"] == "CANCELLED"}
+    for (state, requested), r in sorted(seen.items(), key=lambda kv: str(kv[0])):
+        if state in (spec.get("cancel_refused_states") or []) and r.get("status") != 409:
+            bad.append("%s is a refused cancel state but cancel_replies answers %s"
+                       % (state, r.get("status")))
+        if r.get("outcome") == "cancelled" and state not in to_cancelled | {"CANCELLED"}:
+            bad.append("cancel_replies says %s cancels, but the lifecycle has no %s -> CANCELLED"
+                       % (state, state))
+        if r.get("outcome") == "requested" and state != "RUNNING":
+            bad.append("cancel_replies records a pending request in %s; only RUNNING waits for "
+                       "a confirmed stop" % state)
+        if state in build["terminal"] and state != "CANCELLED" and r.get("status") == 202:
+            bad.append("cancel_replies answers 202 for terminal %s" % state)
+
+    outcomes = set((bodies.get("build.status") or {}).get("cancel_outcomes") or [])
+    for r in rows:
+        o = r.get("cancel_outcome")
+        if o and o not in outcomes:
+            bad.append("cancel_replies uses cancel outcome %r, which build.status does not list" % o)
+
+    for stage in shapes.get("upload_replay") or []:
+        for k in ("code", "mismatch", "read_back_fails"):
+            if k in stage and stage[k] not in errors:
+                bad.append("upload_replay stage %r names undeclared error %s" % (stage["stage"], stage[k]))
+    if not shapes.get("upload_replay"):
+        bad.append("upload_replay is empty; a replay after an unknown outcome has no defined answer")
+    if "receipt.json" not in ((shapes.get("upload_commit_point") or {}).get("validation_writes") or []):
+        bad.append("upload_commit_point does not put receipt.json among validation's writes, so a "
+                   "PUT could commit a receipt before validation (c50e4fa-F1)")
+
+    rules = shapes.get("rejection_rules_added") or {}
+    for rule in ("UPLOAD_ABANDONED", "VALIDATION_STORAGE", "VALIDATION_STALLED",
+                 "VALIDATION_INTERRUPTED", "S9"):
+        if rule not in rules:
+            bad.append("rejection_rules_added does not name %s, which the T8 plan rejects with"
+                       % rule)
+
+    if not bad:
+        good.append("  ok   shapes: %d errors, %d bodies, cancel table total over %d states, "
+                    "cursor pattern holds %d+%d examples"
+                    % (len(errors), len(bodies), len(build["states"]),
+                       len(CURSOR_EXAMPLES_VALID), len(CURSOR_EXAMPLES_INVALID)))
+    return bad, good
+
+
+def check_transport_shapes():
+    print("== admin transport shapes (T8) ==")
+    bad, good = _transport_shape_findings(load("spec/admin-transport-v1.json"),
+                                          load("spec/lifecycle-v1.json"))
+    for m in bad:
+        fail(m)
+    for line in good:
+        print(line)
+    print()
+
+
+def _drop(path):
+    """A mutation removing one key: path is a list of keys/indices."""
+    def m(doc):
+        node = doc
+        for k in path[:-1]:
+            node = node[k]
+        del node[path[-1]]
+    return m
+
+
+def _set(path, value):
+    def m(doc):
+        node = doc
+        for k in path[:-1]:
+            node = node[k]
+        node[path[-1]] = value
+    return m
+
+
+def _cancel_row(state, requested, **changes):
+    def m(doc):
+        for r in doc["shapes"]["cancel_replies"]:
+            if r["state"] == state and r["requested"] == requested:
+                r.update(changes)
+    return m
+
+
+TRANSPORT_CASES = [
+    ("the shapes section removed", _drop(["shapes"]), "has no shapes section"),
+    ("a 503 made non-retryable", _set(["shapes", "errors", "QUEUE_FULL", "retryable"], False),
+     "is a 503 that is not retryable"),
+    ("an error given a 2xx status", _set(["shapes", "errors", "LOG_EXPIRED", "status"], 200),
+     "an error is 4xx or 5xx"),
+    ("an endpoint's body entry removed", _drop(["shapes", "bodies", "build.list"]),
+     "build.list has no entry"),
+    ("an undeclared error code referenced",
+     _set(["shapes", "bodies", "build.cancel", "errors"], ["NO_SUCH_CODE"]),
+     "which shapes.errors does not declare"),
+    ("415 dropped from a JSON endpoint",
+     _set(["shapes", "bodies", "build.create", "errors"], ["BAD_REQUEST"]),
+     "does not list UNSUPPORTED_MEDIA_TYPE"),
+    ("untyped body allowed through", _set(["shapes", "untyped_body", "status"], 400),
+     "must be 415"),
+    ("untyped body not tested on cancel",
+     _set(["shapes", "untyped_body", "tested_on"], ["bundle.create", "build.create"]),
+     "not tested on build.cancel"),
+    ("nosniff removed", _drop(["shapes", "untrusted_text", "log_response_headers",
+                               "X-Content-Type-Options"]), "nosniff"),
+    ("an unanchored cursor pattern",
+     _set(["shapes", "cursor", "pattern"], "(0|[1-9][0-9]{0,11})\\.(0|[1-9][0-9]{0,8})"),
+     "not anchored at both ends"),
+    ("a cursor pattern allowing leading zeros",
+     _set(["shapes", "cursor", "pattern"], "^[0-9]{1,12}\\.[0-9]{1,9}$"),
+     "the cursor pattern accepts '01.2'"),
+    ("the stream's end event removed", _set(["shapes", "stream", "events"], ["line", "gap", "state"]),
+     "no end event"),
+    ("a cancel row removed",
+     lambda d: d["shapes"].__setitem__("cancel_replies",
+                                       [r for r in d["shapes"]["cancel_replies"]
+                                        if not (r["state"] == "FAILED" and r["requested"])]),
+     "no row for FAILED requested=True"),
+    ("PUBLISHING made cancellable", _cancel_row("PUBLISHING", False, status=202, outcome="cancelled"),
+     "PUBLISHING is a refused cancel state"),
+    ("a terminal state answering 202", _cancel_row("SUCCEEDED", True, status=202, outcome="cancelled"),
+     "no SUCCEEDED -> CANCELLED"),
+    ("a pending request outside RUNNING", _cancel_row("QUEUED", False, outcome="requested"),
+     "only RUNNING waits"),
+    ("a 409 row with a non-409 code", _cancel_row("FAILED", True, code="LOG_EXPIRED"),
+     "not a declared 409 error"),
+    ("an unlisted cancel outcome", _cancel_row("TIMED_OUT", True, cancel_outcome="vanished"),
+     "which build.status does not list"),
+    ("upload replay naming an undeclared code",
+     lambda d: d["shapes"]["upload_replay"][1].__setitem__("mismatch", "NO_SUCH_CODE"),
+     "names undeclared error NO_SUCH_CODE"),
+    ("a rejection rule dropped",
+     _drop(["shapes", "rejection_rules_added", "VALIDATION_STALLED"]),
+     "does not name VALIDATION_STALLED"),
+    ("the receipt moved to the PUT",
+     _set(["shapes", "upload_commit_point", "validation_writes"], ["manifest.json", "inventory.json"]),
+     "c50e4fa-F1"),
+]
+
+
+def _transport_self_test():
+    print()
+    print("== self-test: every transport-shape check must fail FOR ITS STATED REASON ==")
+    spec = load("spec/admin-transport-v1.json")
+    lifecycle = load("spec/lifecycle-v1.json")
+    bad, good = _transport_shape_findings(spec, lifecycle)
+    if bad:
+        print("  FAIL the unmutated tree is not green; nothing below means anything")
+        for m in bad:
+            print("       %s" % m)
+        return ["transport control"]
+    print("  ok   control: unmutated tree green, %d line(s)" % len(good))
+    missed = []
+    for label, mutate, expect in TRANSPORT_CASES:
+        found, summary = _transport_shape_findings(_mutate(spec, mutate), lifecycle)
+        if found and summary:
+            print("  FAIL an ok summary was printed beside the failure: %s" % label)
+            missed.append(label + " (summary)")
+        if not found:
+            print("  FAIL not caught at all: %s" % label)
+            missed.append(label)
+        elif not any(expect in m for m in found):
+            print("  FAIL caught for the WRONG REASON: %s" % label)
+            print("       expected to contain: %r" % expect)
+            for m in found:
+                print("       got: %s" % m)
+            missed.append(label)
+        else:
+            print("  ok   %s" % label)
+    return missed
+
+
 def self_test():
     print("== self-test: every isolation check must fail FOR ITS STATED REASON ==")
     spec = load("spec/isolation-profile-v1.json")
@@ -1581,8 +1885,9 @@ def self_test():
         print("  ok   %s" % label)
 
     missed += _limits_self_test()
+    missed += _transport_self_test()
 
-    total = len(ISOLATION_CASES) + 3 + len(LIMIT_CASES)
+    total = len(ISOLATION_CASES) + 3 + len(LIMIT_CASES) + len(TRANSPORT_CASES)
     if missed:
         print("\nRESULT: self-test FAILED, %d of %d case(s) not caught for their stated "
               "reason" % (len(missed), total))
@@ -1602,6 +1907,7 @@ check_path_rules_have_not_drifted()
 check_semantic_fixtures_have_an_owning_rule()
 check_lifecycle_is_consistent()
 check_admin_transport()
+check_transport_shapes()
 check_image_references()
 check_isolation_profile()
 check_extraction_limits()
