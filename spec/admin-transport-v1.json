@@ -300,11 +300,18 @@
       {"stage": "row UPLOADING, archive present", "action": "the body is hashed without storing; the stored archive is read back once and hashed; a match moves the row to VALIDATING with the read-back digest", "mismatch": "BUNDLE_ARCHIVE_CONFLICT", "read_back_fails": "STORAGE_UNAVAILABLE"},
       {"stage": "row has left UPLOADING", "action": "refused", "code": "BUNDLE_NOT_UPLOADING"}
     ],
+    "validation_claims": {
+      "counts": "lapsed_claims",
+      "lapsed_claim": "claimed, never released, lease expired",
+      "not_counted": "a claim released after a recorded storage error",
+      "precedence": ["VALIDATION_STORAGE", "VALIDATION_INTERRUPTED", "VALIDATION_STALLED"],
+      "precedence_why": "a recorded storage error is the observed cause, so it wins; a short outage must never read as a poison bundle (95e2185-F1)"
+    },
     "rejection_rules_added": {
       "UPLOAD_ABANDONED": "UPLOADING past its upload deadline (lifecycle: upload abandoned past its deadline)",
       "VALIDATION_STORAGE": "VALIDATING past its deadline with a storage failure recorded; names the store, not the bundle",
       "VALIDATION_STALLED": "VALIDATING past its deadline with nothing finished and nothing recorded: no validator ran",
-      "VALIDATION_INTERRUPTED": "claimed max-claims times without finishing: something in the bundle ends validators",
+      "VALIDATION_INTERRUPTED": "its validation's lease lapsed max-claims times (claimed, never released, expired: the validator died): something in the bundle ends validators",
       "S9": "the manifest's type differs from content.type"
     }
   }

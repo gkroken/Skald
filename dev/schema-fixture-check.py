@@ -1697,6 +1697,18 @@ def _transport_shape_findings(spec, lifecycle):
             bad.append("rejection_rules_added does not name %s, which the T8 plan rejects with"
                        % rule)
 
+    claims = shapes.get("validation_claims") or {}
+    if claims.get("counts") != "lapsed_claims":
+        bad.append("validation_claims does not count lapsed claims only, so an outage's "
+                   "released claims can read as a poison bundle (95e2185-F1)")
+    precedence = claims.get("precedence") or []
+    if (precedence[:1] != ["VALIDATION_STORAGE"]
+            or "VALIDATION_INTERRUPTED" not in precedence):
+        bad.append("validation_claims.precedence does not put a recorded storage error "
+                   "before VALIDATION_INTERRUPTED (95e2185-F1)")
+    if "lapse" not in (rules.get("VALIDATION_INTERRUPTED") or ""):
+        bad.append("VALIDATION_INTERRUPTED is not described as lapsed claims")
+
     if not bad:
         good.append("  ok   shapes: %d errors, %d bodies, cancel table total over %d states, "
                     "cursor pattern holds %d+%d examples"
@@ -1793,6 +1805,17 @@ TRANSPORT_CASES = [
     ("a rejection rule dropped",
      _drop(["shapes", "rejection_rules_added", "VALIDATION_STALLED"]),
      "does not name VALIDATION_STALLED"),
+    ("every claim counted toward the poison verdict",
+     _set(["shapes", "validation_claims", "counts"], "claims"),
+     "does not count lapsed claims only"),
+    ("INTERRUPTED put before a recorded storage error",
+     _set(["shapes", "validation_claims", "precedence"],
+          ["VALIDATION_INTERRUPTED", "VALIDATION_STORAGE", "VALIDATION_STALLED"]),
+     "before VALIDATION_INTERRUPTED"),
+    ("the pre-fix INTERRUPTED wording",
+     _set(["shapes", "rejection_rules_added", "VALIDATION_INTERRUPTED"],
+          "claimed max-claims times without finishing"),
+     "not described as lapsed claims"),
     ("the receipt moved to the PUT",
      _set(["shapes", "upload_commit_point", "validation_writes"], ["manifest.json", "inventory.json"]),
      "c50e4fa-F1"),
