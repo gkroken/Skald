@@ -41,7 +41,7 @@
         <handlebars.version>4.7.9</handlebars.version>
         <sqlite-jdbc.version>3.50.3.0</sqlite-jdbc.version>
         <commons-lang.version>3.18.0</commons-lang.version>
-        <!-- Skald: the AWS SDK at the version ContainerProxy already brings (UPSTREAM_CHANGES, Q4). -->
+        <!-- Skald: the AWS SDK at the version ContainerProxy already brings (WORKPLAN-BUNDLES Q4). -->
         <aws-sdk.version>2.31.21</aws-sdk.version>
         <!-- Plugin versions -->
         <maven.license-plugin.version>4.6</maven.license-plugin.version>
@@ -427,6 +427,9 @@
                                      licenseSet below with a short header. -->
                                 <exclude>dev/**/*.py</exclude>
                                 <exclude>dev/**/*.js</exclude>
+                                <!-- Skald: Spring's registration of Skald's startup check;
+                                     ours, so the third licenseSet below. -->
+                                <exclude>src/main/resources/META-INF/spring.factories</exclude>
                                 <exclude>README.md</exclude>
                                 <exclude>docs/**</exclude>
                                 <exclude>src/main/resources/configs/**</exclude>
@@ -458,7 +461,14 @@
                             <includes>
                                 <include>dev/**/*.py</include>
                                 <include>dev/**/*.js</include>
+                                <include>src/main/resources/META-INF/spring.factories</include>
                             </includes>
+                            <!-- Skald: the sample applications are publisher content, built and
+                                 run as bundles, not tooling; a header would be part of the app's
+                                 bytes. The R ones match no set already. -->
+                            <excludes>
+                                <exclude>dev/fixtures/apps/**</exclude>
+                            </excludes>
                         </licenseSet>
                     </licenseSets>
                     <aggregate>true</aggregate>

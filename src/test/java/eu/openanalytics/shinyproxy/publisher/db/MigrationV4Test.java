@@ -412,7 +412,7 @@ public class MigrationV4Test {
         try (var conn = old.getDataSource().getConnection()) {
             url = conn.getMetaData().getURL();
         }
-        migrate(url, null);
+        migrate(url, "4");
         assertEquals(1, old.queryForObject("SELECT count(*) FROM skald.content WHERE id = ?", Integer.class, c));
         assertEquals(0, old.queryForObject("SELECT count(*) FROM skald.binary_build", Integer.class));
         assertEquals("4", old.queryForObject("SELECT max(version::int)::text FROM skald.flyway_schema_history",

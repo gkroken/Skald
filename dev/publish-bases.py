@@ -1,3 +1,8 @@
+#
+# Skald - Copyright (C) 2026 Gard Kroken
+# SPDX-License-Identifier: Apache-2.0
+#
+
 """Publishes the trusted bases: builds every catalog entry through the mirror, checks it as
 dev/bases-probe.py does, pushes it to the operator's registry, and writes the published bases
 file that publisher.recipe.BaseCatalog loads (T7, part 3e; 4dd3f76 review N1).
