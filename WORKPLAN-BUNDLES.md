@@ -3041,15 +3041,24 @@ below are marked passed by this planning document.
       (default 15 min). Past it the reaper rejects with `VALIDATION_STORAGE` when a storage
       failure is recorded, which names the store and not the bundle, and with
       `VALIDATION_STALLED` when nothing finished and nothing was recorded (no validator
-      ran, e.g. publishing switched off on every instance). A bundle whose validation was
-      claimed `skald.bundles.validation.max-claims` times (default 3) without finishing is
-      rejected `VALIDATION_INTERRUPTED`: something in it ends validators (an OOM or a crash).
-      That stops a poison bundle taking down instance after instance, and the rule says
-      exactly that. Each of these rules is retryable by uploading a new bundle, and none is
+      ran, e.g. publishing switched off on every instance). `validation_claims` counts only claims
+      that ended by **lease lapse** (claimed, never released, lease expired: the validator
+      died). A claim released after a recorded storage error is not counted (95e2185-F1).
+      A bundle whose claims lapsed `skald.bundles.validation.max-claims` times (default 3)
+      is rejected `VALIDATION_INTERRUPTED`: something in it ends validators (an OOM or a
+      crash). That stops a poison bundle taking down instance after instance, and the rule
+      says exactly that. When both could apply, a recorded storage error wins
+      (`VALIDATION_STORAGE`), since it is the observed cause. **Validation's outputs are
+      canonical** (95e2185 N1): manifest.json and inventory.json are serialised with
+      sorted keys and members sorted by path, and hold no time, host or validator id, so
+      two validations of one archive, even concurrent ones after a stalled lease, write
+      byte-identical objects, and the create-only compare on replay holds. (b) tests that. Each of these rules is retryable by uploading a new bundle, and none is
       reported as a fault in the bundle's content. (f)'s injection test faults the archive
       put, the read-back, the row update, the archive read and each of validation's three writes, each separately, and kills
       the instance mid-validation: after the restart the bundle reaches VALIDATED (or
-      REJECTED for its own rule) with no re-upload.
+      REJECTED for its own rule) with no re-upload. A storage fault lasting longer than
+      max-claims retries ends VALIDATED once the store returns within the deadline, or
+      `VALIDATION_STORAGE` after it, never `VALIDATION_INTERRUPTED`.
 
       *bundle.status.* 200: `{id, contentId, state, createdBy, createdAt, updatedAt,
       finishedAt, uploadDeadline, archive: {sha256, bytes} | null, manifestSha256,
