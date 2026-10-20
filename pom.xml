@@ -41,6 +41,7 @@
         <handlebars.version>4.7.9</handlebars.version>
         <sqlite-jdbc.version>3.50.3.0</sqlite-jdbc.version>
         <commons-lang.version>3.18.0</commons-lang.version>
+        <!-- Skald: the AWS SDK at the version ContainerProxy already brings (UPSTREAM_CHANGES, Q4). -->
         <aws-sdk.version>2.31.21</aws-sdk.version>
         <!-- Plugin versions -->
         <maven.license-plugin.version>4.6</maven.license-plugin.version>
@@ -402,7 +403,7 @@
                                 <exclude>**/*.properties</exclude>
                                 <exclude>**/*.raml</exclude>
                                 <exclude>**/*.sh</exclude>
-                                <!-- Flyway migrations are data, not source, and are ours:
+                                <!-- Skald: Flyway migrations are data, not source, and are ours:
                                      upstream's header would assert Open Analytics copyright
                                      over them. Excluded here like the other config formats
                                      above; each migration carries its own explanatory
@@ -472,7 +473,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <systemPropertyVariables>
-                        <!-- ContainerProxy's own test helper (ShinyProxyInstance.TestConfiguration)
+                        <!-- Skald: ContainerProxy's own test helper (ShinyProxyInstance.TestConfiguration)
                              legitimately substitutes the proxyDispatcherService bean through a
                              @Primary @Bean, which DispatcherOverrideRegistrar cannot retarget.
                              Production fails closed when the override cannot be installed; the
