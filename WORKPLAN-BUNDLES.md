@@ -3211,6 +3211,19 @@ below are marked passed by this planning document.
       per endpoint with deny cases first, cross-content IDs and cursors, hostile-origin
       form and fetch beside a real authorised upload, MinIO broken mid-log, clients
       disconnected and resumed, `dev/smoke.sh` extended; then the full suite to close T8.
+      *(b1) as built* (V5, the claimed validator, its reaper, S9): four departures from the
+      text above, each for the end user. The keys are `skald.bundle.validation.*`, singular
+      like the existing `skald.bundle.limits.*`, so an operator finds one `bundle:` section.
+      The lease is the build's 300 s renewed every 30 s, not "60 s / 20 s": the build
+      defaults this plan meant to copy changed in d6fbcde (129 s host stalls), and a second
+      run is harmless. The deadline is 30 min rather than 15, so that max-claims (3) full
+      leases fit inside it and a bundle that kills validators is called INTERRUPTED, not
+      STALLED; the configuration refuses a deadline that does not exceed them. V5 has one
+      more column, `validation_retry_at`, the backoff after a storage release, so that
+      `validation_lease_expires_at` means one thing. And manifest.json is stored exactly as it
+      arrived in the archive, not re-serialised with sorted keys: those bytes are the same on
+      every run (the point of 95e2185 N1), and re-serialising would store a manifest that
+      differs from the publisher's. inventory.json is canonical as planned.
 
 - [ ] **T9. Managed publication and unchanged runtime semantics.** Depends T7/T8.
       Wire successful builds into the shared version allocator with explicit activation.

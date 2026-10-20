@@ -26,6 +26,7 @@ import eu.openanalytics.shinyproxy.publisher.binaries.BinaryQueueSettings;
 import eu.openanalytics.shinyproxy.publisher.binaries.ForgeSettings;
 import eu.openanalytics.shinyproxy.publisher.binaries.SourceSettings;
 import eu.openanalytics.shinyproxy.publisher.build.AdmissionLimits;
+import eu.openanalytics.shinyproxy.publisher.upload.ValidationSettings;
 import eu.openanalytics.shinyproxy.publisher.build.CoordinatorSettings;
 import eu.openanalytics.shinyproxy.publisher.storage.ObjectStorageConfig;
 import eu.openanalytics.shinyproxy.publisher.worker.WorkerConfig;
@@ -89,6 +90,9 @@ public class ConfigurationSpecTest {
         assertEquals(new TreeSet<>(CoordinatorSettings.KEYS), names("skald.builds.coordinator.", n -> true));
         assertEquals(CoordinatorSettings.DEFAULTS, CoordinatorSettings.fromOverrides(
                 defaults("skald.builds.coordinator.", n -> true), key("skald.builds.max-running").defaultText()));
+        assertEquals(new TreeSet<>(ValidationSettings.KEYS), names("skald.bundle.validation.", n -> true));
+        assertEquals(ValidationSettings.DEFAULTS, ValidationSettings.fromOverrides(
+                defaults("skald.bundle.validation.", n -> true)));
         assertEquals(new TreeSet<>(AdmissionLimits.KEYS), names("skald.builds.admission.", n -> true));
         assertEquals(AdmissionLimits.DEFAULTS, AdmissionLimits.fromOverrides(defaults("skald.builds.admission.", n -> true)));
 

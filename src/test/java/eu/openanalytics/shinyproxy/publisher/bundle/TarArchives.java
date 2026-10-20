@@ -43,19 +43,19 @@ import java.util.Map;
  * (aa461cf) and the one two copies of a length calculation taught inside a single test file
  * (3b37820-F1).
  */
-final class TarArchives {
+public final class TarArchives {
 
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
 
     private TarArchives() {
     }
 
-    static TarArchives archive() {
+    public static TarArchives archive() {
         return new TarArchives();
     }
 
     /** The smallest payload an R Shiny manifest can describe: app.R and its lockfile. */
-    static Map<String, byte[]> shinyPayload() {
+    public static Map<String, byte[]> shinyPayload() {
         Map<String, byte[]> payload = new LinkedHashMap<>();
         payload.put("app.R", "library(shiny)\n".getBytes(StandardCharsets.UTF_8));
         payload.put("renv.lock", "{}\n".getBytes(StandardCharsets.UTF_8));
@@ -67,7 +67,7 @@ final class TarArchives {
      * payload root, renv, and each file's real size and SHA-256. The payload must carry
      * app.R and renv.lock, as {@link #shinyPayload} does.
      */
-    static byte[] manifestFor(Map<String, byte[]> payload, String... executable) {
+    public static byte[] manifestFor(Map<String, byte[]> payload, String... executable) {
         ObjectMapper json = new ObjectMapper();
         ObjectNode doc = json.createObjectNode();
         doc.put("schema_version", 1).put("type", "shiny");
@@ -91,13 +91,13 @@ final class TarArchives {
     }
 
     /** The manifest for {@code payload}, then every payload file under app/, in order. */
-    static TarArchives bundle(Map<String, byte[]> payload) {
+    public static TarArchives bundle(Map<String, byte[]> payload) {
         TarArchives archive = archive().file("manifest.json", manifestFor(payload));
         payload.forEach((path, bytes) -> archive.file("app/" + path, bytes));
         return archive;
     }
 
-    static String sha256(byte[] bytes) {
+    public static String sha256(byte[] bytes) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
         } catch (java.security.NoSuchAlgorithmException ex) {
@@ -105,7 +105,7 @@ final class TarArchives {
         }
     }
 
-    TarArchives file(String name, byte[] content) {
+    public TarArchives file(String name, byte[] content) {
         return raw(header(name, content.length, '0', "0000644"), content);
     }
 
@@ -144,7 +144,7 @@ final class TarArchives {
     }
 
     /** The archive, ended properly. */
-    byte[] end() {
+    public byte[] end() {
         byte[] body = out.toByteArray();
         byte[] whole = new byte[body.length + 2 * TarHeader.BLOCK];
         System.arraycopy(body, 0, whole, 0, body.length);

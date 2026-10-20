@@ -34,11 +34,11 @@ import java.util.Optional;
  * two threads and hoping would give a test that passes when the race does not happen,
  * which for a concurrency guard is the worst kind of green.
  */
-abstract class ForwardingObjectStore implements ObjectStore {
+public abstract class ForwardingObjectStore implements ObjectStore {
 
     private final ObjectStore delegate;
 
-    ForwardingObjectStore(ObjectStore delegate) {
+    protected ForwardingObjectStore(ObjectStore delegate) {
         this.delegate = delegate;
     }
 

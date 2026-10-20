@@ -207,6 +207,34 @@ skald:
 
   bundle:
 
+    validation:
+      # Validator threads on this instance. Each claims one uploaded bundle at a time; more
+      # uploads than threads wait as rows, and no upload is refused for it. (integer, min 1;
+      # instance)
+      parallel: 2
+      # How long a validator's claim on a bundle lasts without renewal. When it lapses
+      # another validator, on any instance, validates the bundle again; the build's lease,
+      # for the build's reason (a stalled host). (duration, whole seconds; deployment)
+      lease: 300s
+      # How often a validator renews its claim. At most half the lease. (duration, whole
+      # seconds; deployment)
+      renew-every: 30s
+      # How long a bundle may stay VALIDATING before it is rejected (VALIDATION_STORAGE when
+      # a storage failure was recorded, else VALIDATION_STALLED). Must exceed max-claims
+      # leases. (duration, whole seconds; deployment)
+      deadline: 30m
+      # How many times a bundle's validation may end by a lapsed lease (its validator died)
+      # before the bundle is rejected VALIDATION_INTERRUPTED. Storage retries do not count.
+      # (integer, min 1; deployment)
+      max-claims: 3
+      # The pause before a bundle is validated again after a storage failure released its
+      # claim. (duration, whole seconds; deployment)
+      retry-after: 15s
+      # Where uploaded bundles are extracted to be checked, deleted after each one. Local
+      # disk with room for one bundle's expanded size per validator thread. Unset:
+      # skald-validation under java.io.tmpdir. (path; instance)
+      # workspace: /var/lib/skald/validation
+
     limits:
       # The uploaded archive as it arrived. Checked against the byte count before a single
       # header is parsed, so it is the first bound anything hits. (bytes, at most

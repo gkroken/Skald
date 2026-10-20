@@ -100,10 +100,12 @@ public class BuildAdmissionTest {
         boolean done = state.equals("VALIDATED") || state.equals("REJECTED");
         jdbc.update("INSERT INTO skald.bundle (id, content_id, created_by, state, upload_deadline,"
             + " finished_at, object_key, object_sha256, object_bytes, manifest_sha256,"
-            + " inventory_files, inventory_bytes, rejection_rule) VALUES (?, ?, 'alice', ?,"
+            + " inventory_files, inventory_bytes, rejection_rule, validating_at) VALUES (?, ?, 'alice', ?,"
             + " now() + interval '1 hour', CASE WHEN ? THEN now() END, ?, ?, 10, ?, 1, 10,"
-            + " CASE WHEN ? = 'REJECTED' THEN 'MANIFEST_MISSING' END)",
-            id, content, state, done, "bundles/" + id, "a".repeat(64), "b".repeat(64), state);
+            + " CASE WHEN ? = 'REJECTED' THEN 'MANIFEST_MISSING' END,"
+            // V5: a VALIDATING row carries the time it entered that state.
+            + " CASE WHEN ? = 'VALIDATING' THEN now() END)",
+            id, content, state, done, "bundles/" + id, "a".repeat(64), "b".repeat(64), state, state);
         return id;
     }
 

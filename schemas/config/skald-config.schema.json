@@ -511,6 +511,72 @@
           "type" : "object",
           "additionalProperties" : false,
           "properties" : {
+            "validation" : {
+              "type" : "object",
+              "additionalProperties" : false,
+              "properties" : {
+                "parallel" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "default" : 2,
+                  "description" : "Validator threads on this instance. Each claims one uploaded bundle at a time; more uploads than threads wait as rows, and no upload is refused for it."
+                },
+                "lease" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "300s",
+                  "description" : "How long a validator's claim on a bundle lasts without renewal. When it lapses another validator, on any instance, validates the bundle again; the build's lease, for the build's reason (a stalled host)."
+                },
+                "renew-every" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "30s",
+                  "description" : "How often a validator renews its claim. At most half the lease."
+                },
+                "deadline" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "30m",
+                  "description" : "How long a bundle may stay VALIDATING before it is rejected (VALIDATION_STORAGE when a storage failure was recorded, else VALIDATION_STALLED). Must exceed max-claims leases."
+                },
+                "max-claims" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "default" : 3,
+                  "description" : "How many times a bundle's validation may end by a lapsed lease (its validator died) before the bundle is rejected VALIDATION_INTERRUPTED. Storage retries do not count."
+                },
+                "retry-after" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "15s",
+                  "description" : "The pause before a bundle is validated again after a storage failure released its claim."
+                },
+                "workspace" : {
+                  "type" : "string",
+                  "description" : "Where uploaded bundles are extracted to be checked, deleted after each one. Local disk with room for one bundle's expanded size per validator thread. Unset: skald-validation under java.io.tmpdir."
+                }
+              }
+            },
             "limits" : {
               "type" : "object",
               "additionalProperties" : false,

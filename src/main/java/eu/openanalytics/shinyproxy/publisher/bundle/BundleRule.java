@@ -202,7 +202,19 @@ public enum BundleRule {
 
     // ---- archive layout ----------------------------------------------------------------
     /** A member that is neither the manifest nor under the payload root. */
-    LAYOUT_UNEXPECTED_MEMBER;
+    LAYOUT_UNEXPECTED_MEMBER,
+
+    // ---- the platform's own verdicts (T8): none of these is a fault in the bundle's content.
+    // A publisher's recourse is the same for all four -- upload a new bundle -- and each names
+    // what was observed, never a guess (6a23bcb-F1, 95e2185-F1).
+    /** UPLOADING past its upload deadline: no complete upload arrived in time. */
+    UPLOAD_ABANDONED,
+    /** VALIDATING past its deadline with a storage failure recorded: names the store. */
+    VALIDATION_STORAGE,
+    /** VALIDATING past its deadline with nothing finished and nothing recorded: no validator ran. */
+    VALIDATION_STALLED,
+    /** Its validation's lease lapsed max-claims times: something in it ends validators. */
+    VALIDATION_INTERRUPTED;
 
     /** The identifier a publisher sees, which is the enum's own name. */
     public String ruleName() {

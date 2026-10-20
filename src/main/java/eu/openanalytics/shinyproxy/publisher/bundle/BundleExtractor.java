@@ -33,6 +33,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.LongSupplier;
 
@@ -129,12 +130,30 @@ public final class BundleExtractor {
     public static Extracted extract(InputStream upload, long uploadSize, Path workspace,
                                     ExtractionLimits limits, LongSupplier nanoTime)
             throws IOException {
+        return extract(upload, uploadSize, workspace, limits, Optional.empty(), nanoTime);
+    }
+
+    /**
+     * The same, with S9: the manifest's type must be {@code targetType}, the type of the
+     * content item the bundle was uploaded to. The upload path (T8) passes it; a reader of an
+     * already-validated bundle, which was held to it then, need not.
+     */
+    public static Extracted extract(InputStream upload, long uploadSize, Path workspace,
+                                    ExtractionLimits limits, Optional<String> targetType)
+            throws IOException {
+        return extract(upload, uploadSize, workspace, limits, targetType, System::nanoTime);
+    }
+
+    static Extracted extract(InputStream upload, long uploadSize, Path workspace,
+                             ExtractionLimits limits, Optional<String> targetType,
+                             LongSupplier nanoTime) throws IOException {
         requireUtf8FileNames();
         if (uploadSize >= 0) {
             GzipMember.checkUploadSize(uploadSize, limits);
         }
 
-        return extractInto(ExtractionRoot.createUnder(workspace), upload, limits, nanoTime);
+        return extractInto(ExtractionRoot.createUnder(workspace), upload, limits, targetType,
+                nanoTime);
     }
 
     /**
@@ -150,7 +169,13 @@ public final class BundleExtractor {
     static Extracted extractInto(ExtractionRoot root, InputStream upload,
                                  ExtractionLimits limits, LongSupplier nanoTime)
             throws IOException {
-        Collector collector = new Collector(root, limits);
+        return extractInto(root, upload, limits, Optional.empty(), nanoTime);
+    }
+
+    static Extracted extractInto(ExtractionRoot root, InputStream upload,
+                                 ExtractionLimits limits, Optional<String> targetType,
+                                 LongSupplier nanoTime) throws IOException {
+        Collector collector = new Collector(root, limits, targetType);
         try (GzipMember member = GzipMember.open(upload, limits)) {
             try {
                 TarStream.walk(member, limits, nanoTime, collector);
@@ -195,6 +220,7 @@ public final class BundleExtractor {
 
         private final ExtractionRoot root;
         private final ExtractionLimits limits;
+        private final Optional<String> targetType;
 
         private byte[] manifest;
         private ManifestValidator.Manifest validated;
@@ -202,9 +228,11 @@ public final class BundleExtractor {
         private long files;
         private long bytes;
 
-        private Collector(ExtractionRoot root, ExtractionLimits limits) {
+        private Collector(ExtractionRoot root, ExtractionLimits limits,
+                          Optional<String> targetType) {
             this.root = root;
             this.limits = limits;
+            this.targetType = targetType;
         }
 
         @Override
@@ -214,7 +242,7 @@ public final class BundleExtractor {
                 manifest = readManifest(header, content);
                 // The schema and S1-S9, before a single payload byte is written: the plan's
                 // ordering, and the reason the manifest must come first.
-                validated = ManifestValidator.validate(manifest, limits);
+                validated = ManifestValidator.validate(manifest, limits, targetType);
                 return;
             }
             if (header.kind() == TarHeader.Kind.DIRECTORY) {

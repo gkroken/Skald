@@ -165,6 +165,18 @@ release changes it.
 | `bundle-bucket` | string | `skald-bundles` | deployment | The object store bucket holding bundles. |
 | `log-bucket` | string | `skald-logs` | deployment | The object store bucket holding build logs. |
 
+## skald.bundle.validation
+
+| Key | Type | Default | Scope | Description |
+|---|---|---|---|---|
+| `parallel` | integer, min 1 | `2` | instance | Validator threads on this instance. Each claims one uploaded bundle at a time; more uploads than threads wait as rows, and no upload is refused for it. |
+| `lease` | duration, whole seconds | `300s` | deployment | How long a validator's claim on a bundle lasts without renewal. When it lapses another validator, on any instance, validates the bundle again; the build's lease, for the build's reason (a stalled host). |
+| `renew-every` | duration, whole seconds | `30s` | deployment | How often a validator renews its claim. At most half the lease. |
+| `deadline` | duration, whole seconds | `30m` | deployment | How long a bundle may stay VALIDATING before it is rejected (VALIDATION_STORAGE when a storage failure was recorded, else VALIDATION_STALLED). Must exceed max-claims leases. |
+| `max-claims` | integer, min 1 | `3` | deployment | How many times a bundle's validation may end by a lapsed lease (its validator died) before the bundle is rejected VALIDATION_INTERRUPTED. Storage retries do not count. |
+| `retry-after` | duration, whole seconds | `15s` | deployment | The pause before a bundle is validated again after a storage failure released its claim. |
+| `workspace` | path | unset | instance | Where uploaded bundles are extracted to be checked, deleted after each one. Local disk with room for one bundle's expanded size per validator thread. Unset: skald-validation under java.io.tmpdir. |
+
 ## Renamed keys
 
 Keys renamed in T7c (2026-10-19) before anything shipped, with no aliases: an old name stops startup and the error names the new one; a key whose unit changed also changed its name, so an old value is never read in a new unit.

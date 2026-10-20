@@ -25,6 +25,7 @@ package eu.openanalytics.shinyproxy.publisher.config;
 import eu.openanalytics.shinyproxy.publisher.build.BuildsConfig;
 import eu.openanalytics.shinyproxy.publisher.build.CoordinatorSettings;
 import eu.openanalytics.shinyproxy.publisher.bundle.BundleLimitsConfig;
+import eu.openanalytics.shinyproxy.publisher.upload.UploadsConfig;
 import eu.openanalytics.shinyproxy.publisher.worker.WorkerConfig;
 import org.springframework.boot.context.properties.bind.Bindable;
 import org.springframework.boot.context.properties.bind.Binder;
@@ -68,6 +69,10 @@ public final class ConfigurationValidator {
         BundleLimitsConfig bundle = bind(binder, "skald.bundle", new BundleLimitsConfig(), problems);
         if (bundle != null) {
             section(problems, "skald.bundle.limits", bundle::extractionLimits);
+        }
+        UploadsConfig uploads = bind(binder, "skald.bundle", new UploadsConfig(), problems);
+        if (uploads != null) {
+            section(problems, "skald.bundle.validation", uploads::validationSettings);
         }
         if ("true".equals(environment.getProperty("skald.builds.worker.enabled"))) {
             WorkerConfig worker = bind(binder, "skald.builds.worker", new WorkerConfig(), problems);

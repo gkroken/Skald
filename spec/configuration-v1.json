@@ -144,7 +144,21 @@
     {"key": "skald.builds.worker.bundle-bucket", "type": "string", "default": "skald-bundles", "parser": "spring", "scope": "deployment",
      "description": "The object store bucket holding bundles."},
     {"key": "skald.builds.worker.log-bucket", "type": "string", "default": "skald-logs", "parser": "spring", "scope": "deployment",
-     "description": "The object store bucket holding build logs."}
+     "description": "The object store bucket holding build logs."},
+    {"key": "skald.bundle.validation.parallel", "type": "integer", "default": 2, "min": 1, "parser": "settings", "scope": "instance",
+     "description": "Validator threads on this instance. Each claims one uploaded bundle at a time; more uploads than threads wait as rows, and no upload is refused for it."},
+    {"key": "skald.bundle.validation.lease", "type": "duration", "default": "300s", "parser": "settings-seconds", "scope": "deployment",
+     "description": "How long a validator's claim on a bundle lasts without renewal. When it lapses another validator, on any instance, validates the bundle again; the build's lease, for the build's reason (a stalled host)."},
+    {"key": "skald.bundle.validation.renew-every", "type": "duration", "default": "30s", "parser": "settings-seconds", "scope": "deployment",
+     "description": "How often a validator renews its claim. At most half the lease."},
+    {"key": "skald.bundle.validation.deadline", "type": "duration", "default": "30m", "parser": "settings-seconds", "scope": "deployment",
+     "description": "How long a bundle may stay VALIDATING before it is rejected (VALIDATION_STORAGE when a storage failure was recorded, else VALIDATION_STALLED). Must exceed max-claims leases."},
+    {"key": "skald.bundle.validation.max-claims", "type": "integer", "default": 3, "min": 1, "parser": "settings", "scope": "deployment",
+     "description": "How many times a bundle's validation may end by a lapsed lease (its validator died) before the bundle is rejected VALIDATION_INTERRUPTED. Storage retries do not count."},
+    {"key": "skald.bundle.validation.retry-after", "type": "duration", "default": "15s", "parser": "settings-seconds", "scope": "deployment",
+     "description": "The pause before a bundle is validated again after a storage failure released its claim."},
+    {"key": "skald.bundle.validation.workspace", "type": "path", "default": null, "example": "/var/lib/skald/validation", "parser": "settings", "scope": "instance",
+     "description": "Where uploaded bundles are extracted to be checked, deleted after each one. Local disk with room for one bundle's expanded size per validator thread. Unset: skald-validation under java.io.tmpdir."}
   ],
 
   "renamed": [

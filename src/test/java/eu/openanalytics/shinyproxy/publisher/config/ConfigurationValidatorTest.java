@@ -78,6 +78,17 @@ public class ConfigurationValidatorTest {
     }
 
     @Test
+    public void theValidationSectionsOwnRulesAreListed() {
+        // Valid values each; only ValidationSettings sees that three lapsed leases of 20 min
+        // would outlast the 30-min deadline, so a poison bundle would be called stalled.
+        List<String> p = validate("skald.bundle.validation.lease", "20m").problems();
+        assertEquals(1, p.size(), String.valueOf(p));
+        assertTrue(p.get(0).contains("must exceed max-claims"), p.get(0));
+        assertEquals(List.of(), validate("skald.bundle.validation.lease", "5m", "skald.bundle.validation.parallel", "4")
+                .problems());
+    }
+
+    @Test
     public void aSectionTheCheckRefusedIsListedOnce() {
         // The check and the sections word a bound differently ("0 is outside 1.." against
         // "must be positive"), so a section the check refused is not parsed again; the
