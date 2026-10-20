@@ -2980,8 +2980,19 @@ below are marked passed by this planning document.
       *bundle.upload.* `PUT .../bundles/{bundleId}/content`, `Content-Type: application/gzip`,
       `X-Skald-Upload: 1`, and `Content-Length` (required: 411 without it; 413
       `BUNDLE_TOO_LARGE` before any byte is read when it is over `maxBytes`). The body
-      streams to the bundle bucket and is counted against `Content-Length`. 200, once the
-      receipt is committed: the bundle status with `state: "VALIDATING"`. **Validation is
+      streams to the bundle bucket and is counted against `Content-Length`. 200 at the
+      PUT's commit point: the bundle status with `state: "VALIDATING"`.
+      **Where each record is written** (c50e4fa-F1). The PUT's commit point is the
+      database row moving UPLOADING -> VALIDATING, with `object_key`, `object_sha256`
+      and `object_bytes` from the archive put (or from the read-back in stage (ii)
+      below), under the row lock. It is not `receipt.json`. Validation then writes
+      `manifest.json`, `inventory.json`, then `receipt.json` (BundleWriter.commit, which
+      requires all three objects first, as T4 built it), then sets the row VALIDATED.
+      So "receipt present" keeps meaning "usable bundle", which readReceipt and
+      BundleContextSource rely on. spec/lifecycle-v1.json says VALIDATING means "the
+      receipt is committed". That wording is wrong against T4's receipt, which is written
+      last. (a) records the correction as an additive key (the bytes are complete and
+      their digest is on the row) and leaves the frozen text unedited. **Validation is
       asynchronous**, on a bounded executor (`skald.bundles.validation.parallel`, default 2).
       A request thread could be held for a minute by a bundle near the 2 GiB expanded
       limit, and its client may disconnect half-way. The client polls bundle.status; a small
@@ -2994,20 +3005,28 @@ below are marked passed by this planning document.
       Q4 risk row). The bundle stays UPLOADING, and that is never a verdict on the bundle.
       **Replays after an unknown outcome, per stage** (ad2d195-F1). The archive key is
       fixed by the v1 layout and its put is create-only, and a streamed put records no
-      digest, so a stored archive cannot simply be trusted. (i) No archive object: the
-      replay writes it as a first PUT would. (ii) Archive present, no receipt (the long
-      streamed put whose answer was lost): the replay's body is streamed to a digest and
-      size only, not stored, then the stored archive is read back once and hashed (bounded
-      by `maxBytes`; a rare path). Both match: the receipt is committed from the read-back
-      digest, which describes the stored bytes, never from what the request claims, and the
-      bundle goes on to VALIDATING. No match: 409 `BUNDLE_ARCHIVE_CONFLICT` ("make a new
-      bundle"); the bundle stays UPLOADING, so the one-hour rule rejects it
-      (`UPLOAD_ABANDONED`) and the lifecycle gains no new transition. A read-back the store
-      cannot serve is 503 `STORAGE_UNAVAILABLE` again. (iii) Receipt present: the bundle
-      has left UPLOADING, so 409 `BUNDLE_NOT_UPLOADING` with its state, as T1 froze. The
-      frozen "a later PUT restarts it cleanly" is true through (ii): the restart is
-      verified, not a rewrite. (f)'s injection test faults the archive put, the read-back
-      and the receipt put, each separately.
+      digest, so a stored archive cannot simply be trusted. The stages are keyed on the
+      row and the archive object, never on the receipt. (i) Row UPLOADING, no archive
+      object: the replay writes it as a first PUT would. (ii) Row still UPLOADING, archive
+      present (the long streamed put whose answer was lost, or a row update that failed
+      after it): the replay's body is streamed to a digest and size only, not stored, then
+      the stored archive is read back once and hashed (bounded by `maxBytes`; a rare
+      path). Both match: the row moves to VALIDATING with the read-back digest, which
+      describes the stored bytes, never what the request claims. No match: 409
+      `BUNDLE_ARCHIVE_CONFLICT` ("make a new bundle"); the bundle stays UPLOADING, so the
+      one-hour rule rejects it (`UPLOAD_ABANDONED`) and the lifecycle gains no new
+      transition. A read-back the store cannot serve is 503 `STORAGE_UNAVAILABLE` again.
+      (iii) Row has left UPLOADING: 409 `BUNDLE_NOT_UPLOADING` with its state, as T1
+      froze. The frozen "a later PUT restarts it cleanly" holds through (ii): the restart
+      is verified, not a rewrite. A storage failure inside validation (writing the
+      manifest, inventory or receipt) is the platform's problem, not the client's. The
+      validator retries with backoff while the bundle's VALIDATING deadline allows (the
+      row's `updated_at` plus `skald.bundles.validation.deadline`, default 15 min; no new
+      column),
+      writing create-only and comparing what is there on a replay. Past the deadline the
+      reaper rejects the bundle with rule `VALIDATION_STORAGE`, which names the store
+      rather than the bundle. (f)'s injection test faults the archive put, the read-back,
+      the row update, and each of validation's three writes, each separately.
 
       *bundle.status.* 200: `{id, contentId, state, createdBy, createdAt, updatedAt,
       finishedAt, uploadDeadline, archive: {sha256, bytes} | null, manifestSha256,
