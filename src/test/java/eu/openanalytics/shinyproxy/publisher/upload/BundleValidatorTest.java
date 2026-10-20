@@ -314,6 +314,20 @@ public class BundleValidatorTest {
     }
 
     @Test
+    public void aRelinquishedClaimFencesItsOwnLaterWrites() throws Exception {
+        // Held by the database, not only by the run's lost flag: a run that outlives an orderly
+        // stop cannot write a verdict on a claim it gave back.
+        ValidationQueue queue = new ValidationQueue(jdbc, settings(3));
+        UUID b = validating("shiny", validArchive())[1];
+        ValidationQueue.Claimed given = queue.claim("stopping").orElseThrow();
+        assertTrue(queue.relinquished(given));
+        assertFalse(queue.validated(given, "a".repeat(64), 1, 1));
+        assertFalse(queue.rejected(given, eu.openanalytics.shinyproxy.publisher.bundle.BundleRule.MANIFEST_MISSING, "x"));
+        assertFalse(queue.relinquished(given), "given back once");
+        assertEquals("VALIDATING", row(b).get("state"));
+    }
+
+    @Test
     public void aLostLeaseClosesTheSourceAndTheRunEndsFenced() throws Exception {
         ValidationQueue queue = new ValidationQueue(jdbc, settings(3));
         UUID b = validating("shiny", validArchive())[1];
@@ -458,6 +472,135 @@ public class BundleValidatorTest {
             assertTrue(((String) r.get("validation_storage_error")).contains("not the "), (String) r.get("validation_storage_error"));
             due(b);
         }
+    }
+
+    /** A stored stream that throws once at {@code at} bytes, then goes on: a socket read timeout. */
+    private static Faults throwsOnceAt(long at) {
+        return new Faults() {
+            @Override
+            public InputStream open(String bucket, String key) {
+                InputStream real = super.open(bucket, key);
+                return new java.io.FilterInputStream(real) {
+                    long read;
+                    boolean thrown;
+
+                    @Override
+                    public int read() throws IOException {
+                        byte[] one = new byte[1];
+                        int n = read(one, 0, 1);
+                        return n == -1 ? -1 : one[0] & 0xFF;
+                    }
+
+                    @Override
+                    public int read(byte[] b, int off, int len) throws IOException {
+                        if (!thrown && read + len > at) {
+                            if (read < at) {
+                                int n = super.read(b, off, (int) (at - read));
+                                read += Math.max(0, n);
+                                return n;
+                            }
+                            thrown = true;
+                            throw new java.net.SocketTimeoutException("Read timed out");
+                        }
+                        int n = super.read(b, off, len);
+                        read += Math.max(0, n);
+                        return n;
+                    }
+                };
+            }
+        };
+    }
+
+    @Test
+    public void aReadThatFailsOnceDuringExtractionIsTheStoresFailureNotTheBundles() throws Exception {
+        // 2a2186f-F1: the extractor reports a failed source read as ARCHIVE_GZIP_TRUNCATED, and
+        // a read that then goes on leaves the digest intact; only the remembered failure tells.
+        ValidationQueue queue = new ValidationQueue(jdbc, settings(3));
+        UUID b = validating("shiny", validArchive())[1];
+        assertEquals(BundleValidation.Result.STORAGE_FAILED,
+            run(validation(queue, throwsOnceAt(20)), queue.claim("v").orElseThrow()));
+        Map<String, Object> r = row(b);
+        assertEquals("VALIDATING", r.get("state"));
+        assertNull(r.get("rejection_rule"));
+        assertTrue(((String) r.get("validation_storage_error")).contains("Read timed out"),
+            (String) r.get("validation_storage_error"));
+        due(b);
+        assertEquals(BundleValidation.Result.VALIDATED, run(validation(queue, new Faults()), queue.claim("v").orElseThrow()));
+    }
+
+    @Test
+    public void aReadThatFailsOnceWhileDrainingAfterARejectionIsTheStoresFailure() throws Exception {
+        ValidationQueue queue = new ValidationQueue(jdbc, settings(3));
+        Map<String, byte[]> payload = TarArchives.shinyPayload();
+        byte[] noise = new byte[4 * 1024 * 1024];
+        new java.util.Random(11).nextBytes(noise);
+        payload.put("data.bin", noise);
+        TarArchives tar = TarArchives.archive().file("manifest.json", TarArchives.manifestFor(payload))
+            .file("app/app.R", "library(shinx)\n".getBytes(StandardCharsets.UTF_8))
+            .file("app/renv.lock", payload.get("renv.lock"))
+            .file("app/data.bin", noise);
+        UUID b = validating("shiny", gzip(tar.end()))[1];
+        // Far past the bad member, so only the drain reaches it.
+        assertEquals(BundleValidation.Result.STORAGE_FAILED,
+            run(validation(queue, throwsOnceAt(3L * 1024 * 1024)), queue.claim("v").orElseThrow()));
+        assertEquals("VALIDATING", row(b).get("state"));
+        assertTrue(((String) row(b).get("validation_storage_error")).contains("Read timed out"));
+    }
+
+    @Test
+    public void anOrderlyStopGivesItsClaimsBackWithNoLapseAndFencesTheRunItLeaves() throws Exception {
+        // 2a2186f-F2: a read that ignores interrupts, so only closing the source ends it.
+        ValidationQueue queue = new ValidationQueue(jdbc, settings(3));
+        UUID b = validating("shiny", validArchive())[1];
+        CountDownLatch inside = new CountDownLatch(1);
+        Faults blocking = new Faults() {
+            @Override
+            public InputStream open(String bucket, String key) {
+                return new InputStream() {
+                    final CountDownLatch closed = new CountDownLatch(1);
+
+                    @Override
+                    public int read() throws IOException {
+                        return read(new byte[1], 0, 1);
+                    }
+
+                    @Override
+                    public int read(byte[] buf, int off, int len) throws IOException {
+                        inside.countDown();
+                        while (true) {
+                            try {
+                                closed.await();
+                                throw new IOException("closed");
+                            } catch (InterruptedException ignored) {
+                                // A blocking socket read does not answer an interrupt either.
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void close() {
+                        closed.countDown();
+                    }
+                };
+            }
+        };
+        ValidationSettings one = new ValidationSettings(1, Duration.ofSeconds(300), Duration.ofSeconds(30),
+            Duration.ofMinutes(30), 3, Duration.ofSeconds(15), Optional.of(workspace));
+        BundleValidator validator = new BundleValidator(queue, validation(queue, blocking), one);
+        validator.start();
+        validator.wake();
+        assertTrue(inside.await(30, java.util.concurrent.TimeUnit.SECONDS), "the validator is mid-read");
+        long started = System.nanoTime();
+        validator.stop();
+        assertTrue(Duration.ofNanos(System.nanoTime() - started).compareTo(Duration.ofSeconds(20)) < 0,
+            "closing the source ended the blocked read");
+        Map<String, Object> r = row(b);
+        assertEquals("VALIDATING", r.get("state"));
+        assertNull(r.get("validation_owner"), "given back, not left to lapse");
+        assertNull(r.get("validation_storage_error"), "a shutdown is not a storage failure");
+        ValidationQueue.Claimed next = queue.claim("next").orElseThrow(() -> new AssertionError("claimable at once"));
+        assertEquals(0, ((Number) row(b).get("validation_claims")).intValue(), "the takeover is not a lapse");
+        assertEquals(BundleValidation.Result.VALIDATED, run(validation(queue, new Faults()), next));
     }
 
     // ------------------------------------------------------------------ re-running

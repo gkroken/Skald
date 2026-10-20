@@ -113,6 +113,20 @@ public class BundleValidator {
         if (ticks != null) {
             ticks.shutdownNow();
         }
+        // Give back every claim held here before waiting for anything: a blocked store read or
+        // a long extraction does not answer an interrupt, and a claim left to lapse would cost
+        // its bundle a delay of up to a lease and one of its max-claims lapses (2a2186f-F2).
+        // Marking it lost first makes the run end FENCED, not as a storage failure, when
+        // closing its source breaks the read.
+        for (Map.Entry<ValidationQueue.Claimed, Active> e : active.entrySet()) {
+            lose(e.getKey(), e.getValue());
+            try {
+                queue.relinquished(e.getKey());
+            } catch (RuntimeException ex) {
+                log.warn("could not give back the validation claim on bundle {} at shutdown; it lapses"
+                        + " after its lease: {}", e.getKey().bundleId(), ex.toString());
+            }
+        }
         for (Thread t : threads) {
             t.interrupt();
         }

@@ -107,8 +107,10 @@ public class BundleValidation {
         BundleExtractor.Extracted extracted = null;
         try {
             CountingDigestStream archive;
+            StoreReads reads;
             try {
-                archive = new CountingDigestStream(new StoreReads(store.open(bucket, c.objectKey())));
+                reads = new StoreReads(store.open(bucket, c.objectKey()));
+                archive = new CountingDigestStream(reads);
             } catch (ObjectStoreException e) {
                 return storage(c, "could not open the stored archive: " + e.getMessage());
             }
@@ -131,6 +133,13 @@ public class BundleValidation {
             }
             if (lost.getAsBoolean()) {
                 return Result.FENCED;
+            }
+            // The extractor turns a failed read of its source into ARCHIVE_GZIP_TRUNCATED, which
+            // would be a verdict on the bundle. A read that failed once and then went on (a
+            // socket read timeout does that) leaves every byte and the digest intact, so only
+            // remembering the failure itself keeps the store's fault the store's (2a2186f-F1).
+            if (reads.failure() != null) {
+                return storage(c, "the stored archive could not be read: " + reads.failure());
             }
             String digest = archive.sha256();
             if (archive.count() != c.objectBytes() || !digest.equals(c.objectSha256())) {
@@ -233,10 +242,20 @@ public class BundleValidation {
         }
     }
 
-    /** Tags every failure reading the stored archive as the store's. */
+    /**
+     * Tags every failure reading the stored archive as the store's, and remembers the first
+     * one, because whoever reads this stream may catch the tag and report something else.
+     */
     private static final class StoreReads extends java.io.FilterInputStream {
+        private volatile String failure;
+
         StoreReads(InputStream in) {
             super(in);
+        }
+
+        /** The first read failure seen, or null. */
+        String failure() {
+            return failure;
         }
 
         @Override
@@ -244,9 +263,9 @@ public class BundleValidation {
             try {
                 return in.read();
             } catch (IOException e) {
-                throw new StoreReadFailed(e);
+                throw failed(e);
             } catch (RuntimeException e) {
-                throw new StoreReadFailed(new IOException(e.toString(), e));
+                throw failed(new IOException(e.toString(), e));
             }
         }
 
@@ -255,10 +274,17 @@ public class BundleValidation {
             try {
                 return in.read(b, off, len);
             } catch (IOException e) {
-                throw new StoreReadFailed(e);
+                throw failed(e);
             } catch (RuntimeException e) {
-                throw new StoreReadFailed(new IOException(e.toString(), e));
+                throw failed(new IOException(e.toString(), e));
             }
+        }
+
+        private StoreReadFailed failed(IOException e) {
+            if (failure == null) {
+                failure = String.valueOf(e.getMessage());
+            }
+            return new StoreReadFailed(e);
         }
     }
 }

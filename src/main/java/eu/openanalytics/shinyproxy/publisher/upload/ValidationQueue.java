@@ -184,6 +184,23 @@ public class ValidationQueue {
     }
 
     /**
+     * An orderly stop gives the claim back (2a2186f-F2): owner cleared and claimable at once,
+     * no storage error recorded, and -- because the owner is cleared rather than left to
+     * expire -- the next claim is not counted as a lapse. A shutdown is the one case where the
+     * platform knows the bundle did not end its validator. The generation is bumped as well, so
+     * a run that outlives the stop on this instance is fenced and cannot write a verdict after
+     * its claim was given back. False when the claim was no longer the caller's.
+     */
+    public boolean relinquished(Claimed c) {
+        return jdbc.update("UPDATE skald.bundle SET validation_owner = NULL,"
+                        + " validation_lease_expires_at = NULL, validation_retry_at = NULL,"
+                        + " validation_generation = validation_generation + 1, updated_at = now()"
+                        + " WHERE id = ? AND state = 'VALIDATING' AND validation_generation = ?"
+                        + " AND validation_owner = ?",
+                c.bundleId(), c.generation(), c.owner()) == 1;
+    }
+
+    /**
      * The three platform verdicts, in the precedence the spec records. Each UPDATE is one
      * statement, so a row is judged once; a row a validator still holds is fenced by the state
      * change itself.
