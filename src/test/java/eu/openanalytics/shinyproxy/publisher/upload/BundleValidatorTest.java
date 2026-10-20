@@ -314,6 +314,24 @@ public class BundleValidatorTest {
     }
 
     @Test
+    public void aClaimTakenAfterStopIsGivenBackAtOnce() throws Exception {
+        // cb9fa79 N1: a thread past its running check when stop() swept the active claims.
+        ValidationQueue queue = new ValidationQueue(jdbc, settings(3));
+        ValidationSettings one = new ValidationSettings(1, Duration.ofSeconds(300), Duration.ofSeconds(30),
+            Duration.ofMinutes(30), 3, Duration.ofSeconds(15), Optional.of(workspace));
+        BundleValidator validator = new BundleValidator(queue, validation(queue, new Faults()), one);
+        validator.start();
+        validator.stop();
+        UUID b = validating("shiny", validArchive())[1];
+        assertEquals(Optional.of(BundleValidation.Result.FENCED), validator.runOnce("late"));
+        Map<String, Object> r = row(b);
+        assertEquals("VALIDATING", r.get("state"));
+        assertNull(r.get("validation_owner"));
+        queue.claim("next").orElseThrow();
+        assertEquals(0, ((Number) row(b).get("validation_claims")).intValue());
+    }
+
+    @Test
     public void aRelinquishedClaimFencesItsOwnLaterWrites() throws Exception {
         // Held by the database, not only by the run's lost flag: a run that outlives an orderly
         // stop cannot write a verdict on a claim it gave back.

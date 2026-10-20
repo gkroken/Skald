@@ -78,6 +78,13 @@ public class UploadsConfig {
             return new BundleValidation(queue, store, bucket, limits, settings.workspaceOrDefault());
         }
 
+        @Bean
+        public BundleService bundleService(JdbcTemplate jdbc, ObjectStore store, ExtractionLimits limits,
+                                           BundleValidator validator,
+                                           @Value("${skald.builds.worker.bundle-bucket:skald-bundles}") String bucket) {
+            return new BundleService(jdbc, store, bucket, limits, validator::wake);
+        }
+
         @Bean(initMethod = "start", destroyMethod = "stop")
         public BundleValidator bundleValidator(ValidationQueue queue, BundleValidation validation,
                                                ValidationSettings settings) {

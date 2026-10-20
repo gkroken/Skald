@@ -71,6 +71,8 @@ public class BundleValidator {
     private final Map<ValidationQueue.Claimed, Active> active = new ConcurrentHashMap<>();
     private final List<Thread> threads = new ArrayList<>();
     private volatile boolean running;
+    /** Set by start(); runOnce called directly (tests) runs whether or not the loop is running. */
+    private volatile boolean started;
     private ScheduledExecutorService ticks;
 
     /** A claim being worked on, and how to stop it early. */
@@ -90,6 +92,7 @@ public class BundleValidator {
         Path workspace = settings.workspaceOrDefault();
         Files.createDirectories(workspace);
         running = true;
+        started = true;
         ticks = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "skald-validation-ticks");
             t.setDaemon(true);
@@ -157,6 +160,13 @@ public class BundleValidator {
         ValidationQueue.Claimed c = claimed.get();
         Active a = new Active();
         active.put(c, a);
+        if (!running && started) {
+            // stop() ran between this thread's check and its claim, and its sweep of the
+            // active claims has already passed: give this one back too (cb9fa79 N1).
+            active.remove(c);
+            queue.relinquished(c);
+            return Optional.of(BundleValidation.Result.FENCED);
+        }
         try {
             return Optional.of(validation.run(c, a.lost::get, a.source::set));
         } finally {
