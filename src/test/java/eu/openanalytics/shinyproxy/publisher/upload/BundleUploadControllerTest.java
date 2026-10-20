@@ -287,6 +287,8 @@ public class BundleUploadControllerTest {
         assertEquals("BAD_REQUEST", code(call(admin, create(c, "application/json", "[]"))));
         assertEquals("BAD_REQUEST", code(call(admin, create(c, "application/json", "{\"a\":1,\"a\":2}"))));
         assertEquals("BAD_REQUEST", code(call(admin, create(c, "application/json", "{"))));
+        assertEquals("BAD_REQUEST", code(call(admin, create(c, "application/json", "{} {\"x\":1}"))));
+        assertEquals(0L, jdbc.queryForObject("SELECT count(*) FROM skald.bundle", Long.class), "nothing was created");
     }
 
     // ------------------------------------------------------------------ the upload's own refusals

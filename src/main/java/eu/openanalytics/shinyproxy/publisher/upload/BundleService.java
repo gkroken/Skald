@@ -221,11 +221,15 @@ public class BundleService {
 
     /** Refuses unless the row is UPLOADING and inside its deadline; past it, rejects it first. */
     private void requireUploading(UUID contentId, UUID bundleId) {
-        jdbc.update("UPDATE skald.bundle SET state = 'REJECTED', rejection_rule = 'UPLOAD_ABANDONED',"
+        int abandoned = jdbc.update("UPDATE skald.bundle SET state = 'REJECTED', rejection_rule = 'UPLOAD_ABANDONED',"
                 + " rejection_detail = 'no complete upload arrived before the upload deadline; upload the bundle"
                 + " again under a new bundle id', finished_at = now(), updated_at = now()"
                 + " WHERE id = ? AND content_id = ? AND state = 'UPLOADING' AND upload_deadline < now()",
                 bundleId, contentId);
+        if (abandoned == 1) {
+            // The same trail as the reaper's rejection (41f7f6e N2).
+            audit("skald-reaper", "bundle.rejected", bundleId, Map.of("rule", "UPLOAD_ABANDONED"));
+        }
         List<String> state = jdbc.queryForList("SELECT state FROM skald.bundle WHERE id = ? AND content_id = ?",
                 String.class, bundleId, contentId);
         if (state.isEmpty()) {

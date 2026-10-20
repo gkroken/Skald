@@ -59,6 +59,9 @@ final class TransportJson {
     static final ObjectMapper JSON = JsonMapper.builder()
             .enable(JsonWriteFeature.ESCAPE_NON_ASCII)
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+            // readTree returns the FIRST value and ignores what follows it, so `{} {"x":1}` would
+            // pass as {} with the unknown field dropped (41f7f6e-F1).
+            .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
             .build();
 
     /** A JSON request body is small: these endpoints take a few fields. */
@@ -147,7 +150,7 @@ final class TransportJson {
         try {
             node = JSON.readTree(bytes);
         } catch (IOException e) {
-            throw new TransportException(TransportError.BAD_REQUEST, "the request body is not JSON (or repeats a key)");
+            throw new TransportException(TransportError.BAD_REQUEST, "the request body is not one JSON value (or repeats a key)");
         }
         if (node == null || !node.isObject()) {
             throw new TransportException(TransportError.BAD_REQUEST, "the request body must be a JSON object");

@@ -38,7 +38,7 @@ public class TransportJsonTest {
     @Test
     public void nonAsciiLeavesAsAnEscapeNeverRaw() {
         // A bidi override, a C1 control and an ordinary accented letter.
-        ResponseEntity<byte[]> r = TransportJson.success(200, Map.of("t", "a‮b\u0085cé"), null);
+        ResponseEntity<byte[]> r = TransportJson.success(200, Map.of("t", "a\u202Eb\u0085c\u00e9"), null);
         String wire = new String(r.getBody(), StandardCharsets.ISO_8859_1);
         assertTrue(wire.chars().allMatch(ch -> ch < 0x80), wire);
         assertTrue(wire.contains("\\u202E") && wire.contains("\\u0085") && wire.contains("\\u00E9"), wire);
@@ -57,6 +57,18 @@ public class TransportJsonTest {
         once.setContentType("application/json; charset=utf-8");
         once.setContent("{\"bundleId\":\"a\"}".getBytes(StandardCharsets.UTF_8));
         assertEquals("a", TransportJson.readObject(once, "bundleId").path("bundleId").asText());
+    }
+
+    @Test
+    public void anythingAfterTheBodysOneValueIsRefused() {
+        for (String body : new String[] {"{} {\"x\":1}", "{}garbage", "{}]"}) {
+            MockHttpServletRequest r = new MockHttpServletRequest("POST", "/x");
+            r.setContentType("application/json");
+            r.setContent(body.getBytes(StandardCharsets.UTF_8));
+            TransportException e = org.junit.jupiter.api.Assertions.assertThrows(TransportException.class,
+                () -> TransportJson.readObject(r), body);
+            assertEquals(TransportError.BAD_REQUEST, e.code(), body);
+        }
     }
 
     @Test

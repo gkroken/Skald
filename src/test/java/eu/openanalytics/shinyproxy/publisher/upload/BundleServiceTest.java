@@ -206,6 +206,8 @@ public class BundleServiceTest {
         assertEquals(TransportError.BUNDLE_NOT_UPLOADING, e.code());
         assertEquals("REJECTED", e.extra().get("state"));
         assertEquals("UPLOAD_ABANDONED", s.status(c, b).get("rejection") instanceof Map<?, ?> m ? m.get("rule") : null);
+        assertEquals(1L, jdbc.queryForObject("SELECT count(*) FROM skald.audit_event WHERE action = 'bundle.rejected'"
+            + " AND subject_id = ?", Long.class, b.toString()), "audited like the reaper's rejection");
     }
 
     // ------------------------------------------------------------------ the client's failures
