@@ -7,7 +7,8 @@ the behavioural overrides that change upstream without editing it.
 Three categories, kept separate on purpose:
 
 - **Modified upstream files** — a diff against an Open Analytics source file. Each one is a
-  permanent merge cost. There are none yet, and the aim is to keep it that way.
+  permanent merge cost. No upstream source file is modified, and the aim is to keep it that
+  way; three build and meta files are, listed below (ef603de N1).
 - **Behavioural overrides** — our own code, in our own package, that changes how an
   upstream component behaves at runtime. Cheaper than a diff, but still a coupling to
   upstream internals, so each one is recorded here with what it depends on.
@@ -18,7 +19,16 @@ Three categories, kept separate on purpose:
 
 ## Modified upstream files
 
-None.
+No file under `src/` (checked with `git diff --diff-filter=MD <merge-base> -- src`). Three
+files at the root are modified:
+
+- `pom.xml`: Skald's dependencies, plugins, the second `licenseSet` for Skald's own headers,
+  and test settings. A notice at the top says it is modified; each addition is marked
+  `Skald:` inline.
+- `.gitignore`: local build caches, Python bytecode, the fuzzing corpus and the review
+  workflow's files.
+- `README.md`: replaced by Skald's README; upstream's is kept unchanged as
+  `README-shinyproxy.md`.
 
 ## Behavioural overrides
 

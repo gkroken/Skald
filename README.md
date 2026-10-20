@@ -70,9 +70,10 @@ java -jar target/shinyproxy-<version>-exec.jar --validate-config
 Apache License 2.0; see [`LICENSE`](LICENSE).
 
 Skald is built on ShinyProxy and ContainerProxy, Copyright (C) 2016-2026 Open Analytics NV,
-also under Apache 2.0. Their files keep their original headers; Skald modifies none of them
-(it overrides behaviour from its own packages instead, each override listed in
-[`docs/UPSTREAM_CHANGES.md`](docs/UPSTREAM_CHANGES.md)). Skald is not affiliated with or
+also under Apache 2.0. Their files keep their original headers. Skald modifies no upstream
+source file; it modifies three upstream build and meta files (`pom.xml`, `.gitignore`,
+`README.md`), and otherwise overrides behaviour from its own packages. Both are listed in
+[`docs/UPSTREAM_CHANGES.md`](docs/UPSTREAM_CHANGES.md). Skald is not affiliated with or
 endorsed by Open Analytics; the code keeps the ShinyProxy name, the product does not (see
 ADR-0002 in
 [`docs/DECISIONS.md`](docs/DECISIONS.md)). Shiny is a trademark of Posit Software, PBC.
