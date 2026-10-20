@@ -2945,6 +2945,180 @@ below are marked passed by this planning document.
       is finished by the sweep only after the sweep grace, so a reader can sit on a head
       that will not grow for up to grace + period (25 min at the defaults); the log view
       should say "finishing" for a settled build with no final record yet.
+      **T8 plan (design, 2026-10-20; the shapes below need the user's sign-off before any
+      code).** The nine endpoints, their paths, methods, media types and success codes are
+      frozen in `spec/admin-transport-v1.json` (T1) and do not change. What T1 left open, and
+      this plan fixes: request and response bodies, the error shape, the log cursor and the
+      replay and stream formats, and the rules for auth, CSRF and untrusted text. After
+      sign-off the shapes are added to that spec file as additive keys (the frozen keys stay
+      byte for byte) and `dev/schema-fixture-check.py` checks them.
+
+      *Envelope and naming.* Every JSON body uses ContainerProxy's `ApiResponse` envelope,
+      `{"status": "success", "data": ...}`, as spine #1's `/admin/content` does, with
+      camelCase field names like its `activeSpecId`. One admin API, one convention. A
+      refusal is `{"status": "fail", "data": {"code", "message", "retryable", ...}}`, and
+      a server-side error uses `"status": "error"` with the same `data`. Spine #1 puts a bare string in
+      `data`; the new endpoints use an object because #3's CLI must branch on `code`, never
+      on message text. Spine #1's own errors are left as they are. Request bodies are
+      strict: an unknown field is 400 `BAD_REQUEST`, as in the manifest.
+
+      *Untrusted text.* Rejection details, error details and log lines come from bundle or
+      build output. JSON responses are written with non-ASCII escaped, so every byte on the
+      wire is ASCII and a bidi override or C1 control arrives as `\uXXXX`, never raw. The
+      text view neutralises the same set (Cc except tab, Cf, Zl, Zp, and default-ignorables:
+      the `InvisibleCharacters` rule) as `\x{1B}`. Every log response carries
+      `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none';
+      sandbox`, so a browser opened on a log URL cannot be made to render it as a page.
+
+      *bundle.create.* `POST .../bundles`, body `{}` (JSON, so a cross-site form cannot send
+      it; no fields in v1). 201:
+      `{id, contentId, state: "UPLOADING", uploadUrl, uploadDeadline, maxBytes}`. The
+      deadline is one hour (the incomplete-upload rule); the reaper moves an UPLOADING bundle
+      past it to REJECTED, rule `UPLOAD_ABANDONED`. `maxBytes` is the configured
+      `max_compressed_bytes`, so a client can refuse locally before sending anything.
+
+      *bundle.upload.* `PUT .../bundles/{bundleId}/content`, `Content-Type: application/gzip`,
+      `X-Skald-Upload: 1`, and `Content-Length` (required: 411 without it; 413
+      `BUNDLE_TOO_LARGE` before any byte is read when it is over `maxBytes`). The body
+      streams to the bundle bucket and is counted against `Content-Length`. 200, once the
+      receipt is committed: the bundle status with `state: "VALIDATING"`. **Validation is
+      asynchronous**, on a bounded executor (`skald.bundles.validation.parallel`, default 2).
+      A request thread could be held for a minute by a bundle near the 2 GiB expanded
+      limit, and its client may disconnect half-way. The client polls bundle.status; a small
+      bundle is VALIDATED within a second. Refusals: 409 `BUNDLE_NOT_UPLOADING` with the
+      current state (repeat PUT, different bytes, or the loser of two concurrent PUTs); 400
+      `UPLOAD_INCOMPLETE` when fewer bytes than `Content-Length` arrive. The bundle stays
+      UPLOADING and the same PUT may be sent again. 503 `STORAGE_UNAVAILABLE`,
+      `retryable: true`, with `Retry-After`, for the store's "outcome unknown", the
+      unexplained `400 IncompleteBody`, and throttling that outlasted the SDK's retries (the
+      Q4 risk row). The bundle stays UPLOADING, and that is never a verdict on the bundle.
+      A replay after an unknown outcome finds the receipt already committed with the same
+      digest, so it goes on; with a different digest it is 409.
+
+      *bundle.status.* 200: `{id, contentId, state, createdBy, createdAt, updatedAt,
+      finishedAt, uploadDeadline, archive: {sha256, bytes} | null, manifestSha256,
+      inventory: {files, bytes} | null, rejection: {rule, detail} | null}`. `rule` is the
+      `BundleRule` id (S1..S11 and the extractor's), so "S5: ..." reaches the publisher as
+      the plan requires. S9 (type equals `content.type`) is checked here, at validation,
+      which closes that rule's "owed" row.
+
+      *build.create.* `POST .../builds`,
+      `{bundleId, idempotencyKey, retryOf?}`. `retryOf` names a terminal attempt of the
+      same content item; `bundleId` may then be left out and defaults to that attempt's
+      bundle, and naming a different one is 400 (a retry reuses the bundle,
+      lifecycle-v1). `retryOf` is part of the input fingerprint, so one key with a
+      different `retryOf` is 409. 202 with `Location` and the build status (below). Same key, same inputs:
+      202 with the same build, `created: false`, so a client whose reply was lost gets its
+      own attempt again (T6 carry 5). Refusals are `AdmissionRefusal`'s, one code each:
+      `KEY_INVALID` 400, `CONTENT_NOT_FOUND` / `BUNDLE_NOT_FOUND` 404,
+      `BUNDLE_NOT_VALIDATED` 409 (with the bundle's state), `KEY_REUSED_WITH_DIFFERENT_INPUTS`
+      409, `PUBLISHER_LIMIT` 429, `QUEUE_FULL` 503 `retryable`. A superseded queued attempt
+      is named in `supersededBuildId`.
+
+      *build.status* and the items of *build.list*: `{id, contentId, bundleId, retryOf,
+      supersededBy, state, createdBy, createdAt, startedAt, publishingAt, finishedAt,
+      deadlineAt, error: {code, detail} | null, image, recipe, effectiveLimits,
+      cancel: {requestedAt, outcome} | null, log: {state, final}, links: {self, logs,
+      stream, cancel}}`. Left out on purpose: lease owner, generation and the worker handle,
+      which are internals and name infrastructure. `cancel.outcome` is `requested`,
+      `cancelled`, or `too_late`, the last one shown as "cancel requested; the build had
+      already finished" (T5 carry 4). `log.state` is `pending` (nothing written yet), `live`,
+      `finishing` (the build has settled and there is no final record yet, which can last
+      up to the sweep grace plus its period, 25 min by default: T7 carry), or `final`, with
+      `final: {outcome, complete, truncated}` from final.json. `image` stays null until T9
+      gives success.
+      build.list: newest first, `?limit=` (default 50, max 200), `?state=` (repeatable),
+      `?before=<buildId>` (keyset on created_at, id); 200 `{items, next}`, where `next` is
+      the `before` value for the next page, or null.
+
+      *The log cursor.* An opaque string, documented as `<chunk sequence>.<record index>`
+      (`"12.37"`) so a person can read it, but clients must not build one. It names a
+      position after one record; `0.0` (or no cursor) is the start. Readers serve only
+      chunks the log advertises (final.json once it exists, else index.json), never past
+      a hole, so a cursor handed out is always valid again later. A malformed cursor is 400
+      `CURSOR_INVALID`; one past what is advertised waits (stream) or returns nothing
+      (replay), never an error, since the reader may only be ahead of the index. A log
+      removed by retention (90 days) is 410 `LOG_EXPIRED`.
+
+      *build.logs.replay.* `GET .../logs?after=<cursor>&limit=<records>`, picked by
+      `Accept`; no Accept, or `*/*`, gets text/plain, so plain curl works. Both carry
+      `X-Skald-Log-State` (as above), `X-Skald-Build-State` and, when more is advertised,
+      `X-Skald-Next-Cursor`.
+      `application/x-ndjson`: one record per line, the stored record plus its position:
+      `{"cursor":"3.17","n":412,"t":"...","cut":true}` for a line (`cut` only when it was
+      shortened), `{"cursor":"3.18","gap":{"lines":L,"bytes":B}}` for the head/tail marker
+      (renamed from the stored `cut` object so the two meanings of `cut` do not share a
+      key), and, when the reader has reached the end of a final log, a last record
+      `{"end":{"outcome","complete","truncated","buildState"}}`. Default limit 1000, max
+      10000.
+      `text/plain`: one line per record, `<n right-aligned> | <text>`, and a shortened line
+      ends in ` [cut]`. Platform lines have no ` | `, so build output cannot pass for one:
+      `----- skald: L lines (B bytes) dropped here; head and tail kept -----` and, at the
+      end, `----- skald: log final: FAILED:BUILD_FAILED, complete -----`. No default limit:
+      a log is bounded by its head and tail budgets, and it streams from storage.
+      An attempt with no log yet (QUEUED) is 200 and empty, with state `pending`.
+
+      *build.logs.stream* (SSE). `GET .../logs/stream`, resumed from `Last-Event-ID` or
+      `?after=` (the same cursor). Events: `line` and `gap` (id = cursor, data = the ndjson
+      record), `state` when the build or log state changes, and `end` (the same data as
+      the ndjson end record), after which the server closes. A client must close on `end`;
+      a reconnect after it gets `end` again at once. `retry: 5000`, a `: keepalive`
+      comment every 15 s. The stream is pull-based: each subscriber reads committed
+      chunks from storage when its previous write has gone out, polling the index each
+      second (chunks flush at most every 2 s). Nothing the build writes waits for a reader,
+      and a slow reader holds no buffer beyond the chunk it is sending. Bounds, all
+      configurable: 64 open streams per instance, 8 per user (429 `STREAM_LIMIT`), 30 min
+      per connection, then the server closes without `end` and the client resumes by
+      cursor. A storage outage sends `state` with `logState: "storage_unavailable"` and
+      keeps retrying with backoff until the connection limit; it does not end the stream.
+
+      *build.cancel.* `POST .../cancel`, body `{}` (JSON for the CSRF rule). 202
+      `{outcome, build}`: `cancelled` (it was QUEUED) or `requested` (RUNNING; final once
+      the worker is confirmed stopped). 409 `CANCEL_REFUSED_PUBLISHING`; 409
+      `CANCEL_TOO_LATE` ("the build had already finished") when the cancel arrived after
+      the driver finished; 409 `ALREADY_FINISHED` for a terminal attempt never asked to
+      cancel. A repeated cancel returns the first one's outcome: a CANCELLED attempt with
+      a cancel request gives 202 `cancelled` again, and a RUNNING one gives `requested`
+      again (T6 carry 5).
+
+      *Auth, CSRF and IDs.* Admins only, as T1 froze it: `/admin/**` is gated by
+      `UISecurityConfig`, with no second matcher. A non-admin gets upstream's 403; a
+      signed-out caller gets the redirect to log in (302). Those two responses are
+      upstream's, not this envelope. Every lookup is by `(contentId, id)` together, so another
+      content item's bundle, build or log is a 404 identical to a missing one, never a 403
+      (no oracle), and log objects are only reached through keys built from that pair. The
+      CSRF rule is T1's and unchanged: every body is `application/json` or, for the upload,
+      `application/gzip` plus `X-Skald-Upload`. Form types are 415 and a missing header is
+      400 `UPLOAD_HEADER_MISSING`. The GET endpoints change nothing. Cross-origin reads of
+      them, EventSource included, are refused by CORS for any origin the deployment has
+      not configured. No CORS change, and no change to the CSRF matcher. Audit:
+      `bundle.create`, `bundle.upload`, `bundle.validated` / `bundle.rejected`,
+      `build.create` (the existing `build.cancel.*` stays).
+
+      *Not in T8.* No bundle list endpoint (a build names its bundle). No log download as a
+      file. No UI. **Placeholder only, not designed and not approved:** the binary re-open
+      endpoint (`POST /admin/binaries/{id}/reopen`, PRESENT_FOREIGN rows only;
+      decision_binary_retry), which waits for its own sign-off.
+
+      *Carried items, placed:* (1) rejection logging names the rule and getMessage(),
+      never the throwable chain (18368a9 N1); (2) the upload adapter stream fails closed on
+      a 0-byte read before GzipMember sees it (b991250); (3) `requireUtf8FileNames()` runs
+      when the upload service starts, and the deployment notes require a UTF-8 locale
+      (t5-f4f5f32-F4); (4) `cancel.outcome = too_late`; (5) the HTTP half of the crash
+      boundaries: a lost reply after commit, retried, gets the same attempt, the same
+      bundle state, or the same cancel outcome; T7's `finishing` log state; the Q4
+      storage-outcome row (503 `STORAGE_UNAVAILABLE`, tested with "outcome unknown",
+      IncompleteBody and a 503 SlowDown injected, each ending in a correct replayed
+      outcome).
+
+      *Order of work after sign-off*, one reviewed commit each: (a) the shapes into
+      `spec/admin-transport-v1.json` plus the fixture checker; (b) the upload service and
+      bundle endpoints (validation executor, reaper rule, S9); (c) build create, status,
+      list and cancel; (d) log replay (cursor, both formats, neutraliser); (e) the SSE
+      stream; (f) T2's whole corpus through HTTP, Alice allow / Bob deny / signed-out deny
+      per endpoint with deny cases first, cross-content IDs and cursors, hostile-origin
+      form and fetch beside a real authorised upload, MinIO broken mid-log, clients
+      disconnected and resumed, `dev/smoke.sh` extended; then the full suite to close T8.
 
 - [ ] **T9. Managed publication and unchanged runtime semantics.** Depends T7/T8.
       Wire successful builds into the shared version allocator with explicit activation.
