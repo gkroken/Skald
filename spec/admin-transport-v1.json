@@ -271,6 +271,7 @@
       "keepalive_seconds": 15,
       "index_poll_seconds": 1,
       "after_end": "the server closes; a reconnect gets end again at once",
+      "end_without_log": "an attempt that ended without running (log state none) has no log and never will: its end record has outcome null, so replay ends with it and a stream sends it at once and closes (8dc88f1-F1); text: ----- skald: no log: the attempt ended <state> without running -----",
       "model": "pull: each subscriber reads committed chunks from storage when its previous write has gone out. Nothing the build writes waits for a reader.",
       "supersedes": "the build.logs.stream note's 'bounded subscriber queue': there is no queue at all, which is the stronger form of the same bound. The frozen note is left unedited.",
       "limits": {"per_instance": 64, "per_user": 8, "connection_minutes": 30, "keys": "skald.builds.log-stream.per-instance, per-user, connection (spec/configuration-v1.json)"},

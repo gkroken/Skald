@@ -856,6 +856,10 @@ public class BuildControllerTest {
         Reply none = call(admin, logs(never[0], never[1], "", null));
         assertEquals(200, none.status());
         assertEquals("none", none.raw().header("X-Skald-Log-State"));
+        // No log will ever come, and the end record says so (8dc88f1-F1).
+        assertEquals("----- skald: no log: the attempt ended CANCELLED without running -----\n", none.text());
+        assertEquals("{\"end\":{\"outcome\":null,\"complete\":false,\"truncated\":false,\"buildState\":\"CANCELLED\"}}\n",
+            call(admin, logs(never[0], never[1], "", "application/x-ndjson")).text());
     }
 
     @Test
@@ -1216,6 +1220,33 @@ public class BuildControllerTest {
             assertEquals(null, events.next());
         }
         assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5), "end again at once");
+        awaitOpenStreams(0);
+    }
+
+    /**
+     * An attempt that ended without running has no log and never will: its stream ends at
+     * once, and so does every reconnect, holding no slot (8dc88f1-F1).
+     */
+    @Test
+    public void aStreamOfAnAttemptThatNeverRanEndsAtOnce() throws Exception {
+        UUID c = content();
+        UUID bundle = bundle(c, "VALIDATED");
+        UUID superseded = newBuild(c, bundle);
+        newBuild(c, bundle);
+        assertEquals("CANCELLED", state(superseded));
+        for (int round = 0; round < 2; round++) {
+            long started = System.nanoTime();
+            try (Events events = open(stream(c, superseded, "", null))) {
+                Event state = events.nextEvent();
+                assertEquals("{\"buildState\":\"CANCELLED\",\"logState\":\"none\"}", state.data());
+                Event end = events.nextEvent();
+                assertEquals("end", end.name());
+                assertEquals("{\"end\":{\"outcome\":null,\"complete\":false,\"truncated\":false,"
+                    + "\"buildState\":\"CANCELLED\"}}", end.data());
+                assertEquals(null, events.next(), "the server closes");
+            }
+            assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5), "at once, round " + round);
+        }
         awaitOpenStreams(0);
     }
 

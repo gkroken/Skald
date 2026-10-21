@@ -276,8 +276,16 @@ public class BuildService {
                     "the log store could not be read; try again shortly");
             case "expired" -> throw new TransportException(TransportError.LOG_EXPIRED,
                     "build " + buildId + "'s log was removed by retention (" + LOG_RETENTION.toDays() + " days)");
-            case "none", "pending" -> {
+            case "pending" -> {
                 return new Replay(logState, buildState, List.of(), null, null);
+            }
+            case "none" -> {
+                // Ended without running: no log, and none will come. Said with the end record,
+                // outcome null, so a stream ends and a reconnect is answered at once (8dc88f1-F1).
+                com.fasterxml.jackson.databind.node.ObjectNode end = TransportJson.JSON.createObjectNode();
+                end.putObject("end").putNull("outcome").put("complete", false).put("truncated", false)
+                        .put("buildState", buildState);
+                return new Replay(logState, buildState, List.of(), end, null);
             }
             default -> { }
         }

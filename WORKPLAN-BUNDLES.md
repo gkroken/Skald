@@ -3260,7 +3260,14 @@ below are marked passed by this planning document.
       exceed per-instance. A client that leaves is noticed at the stream's next write, so
       its slot is freed within a keepalive (15 s) at most. The response also carries
       `Cache-Control: no-cache` and `X-Accel-Buffering: no`, so a buffering proxy does not
-      hold events back.
+      hold events back. An attempt that ended without running (`none`) gets an end record
+      with outcome null, in replay and in the stream, so the stream ends instead of waiting
+      for a log that cannot come (8dc88f1-F1). What guarantees final.json for every attempt
+      that ran: the driver's own finish (BUILT, STOPPED, FAILED:<CODE>), or, for an attempt
+      the platform lost (INTERRUPTED, TIMED_OUT), the reconciliation sweep, which writes
+      INTERRUPTED within its one-day window. A `finishing` stream therefore ends once a
+      worker-enabled instance has swept; an attempt lost while no such instance ran for a
+      whole day stays `finishing`, and its stream closes at the connection limit each time.
       build.list refuses an unknown query parameter (400), the GET counterpart of strict
       bodies, so a misspelt `?status=` does not quietly mean "no filter". Refusals carry the
       state they were decided on: `bundleState` on BUNDLE_NOT_VALIDATED, `retryOfState` on

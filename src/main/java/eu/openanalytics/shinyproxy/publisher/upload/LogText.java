@@ -67,7 +67,10 @@ final class LogText {
                 out.append('\n');
             }
         }
-        if (end != null) {
+        if (end != null && end.get("end").path("outcome").isNull()) {
+            out.append("----- skald: no log: the attempt ended ").append(neutralise(end.get("end").path("buildState").asText()))
+                    .append(" without running -----\n");
+        } else if (end != null) {
             JsonNode e = end.get("end");
             out.append("----- skald: log final: ").append(neutralise(e.path("outcome").asText()))
                     .append(e.path("complete").asBoolean() ? ", complete" : ", incomplete")
