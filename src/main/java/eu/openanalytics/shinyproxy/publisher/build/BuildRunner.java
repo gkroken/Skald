@@ -22,6 +22,9 @@
  */
 package eu.openanalytics.shinyproxy.publisher.build;
 
+import eu.openanalytics.shinyproxy.publisher.recipe.RecipeGenerator;
+import eu.openanalytics.shinyproxy.publisher.registry.RuntimeSpec;
+
 import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -56,8 +59,13 @@ public final class BuildRunner {
     public enum Result {
         /** Nothing to claim, or the running limit is reached. */
         IDLE,
-        /** The driver built an image; the attempt is PUBLISHING. */
+        /**
+         * The driver built an image; the attempt is PUBLISHING. Where the runner stops when it
+         * has no publication step: verifying and recording a version is the publisher's.
+         */
         PUBLISHING,
+        /** Published and recorded: SUCCEEDED, with one new version, not activated (T9). */
+        SUCCEEDED,
         /** The driver reported a failure, or threw. */
         FAILED,
         /** A requested cancellation was confirmed by the driver's stop. */
@@ -87,6 +95,13 @@ public final class BuildRunner {
         long publish(BuildDriver.Claimed build, String image) throws Exception;
     }
 
+    /** Records a verified attempt as a version: BuildCoordinator.succeed, a seam for tests. */
+    public interface Succeeder {
+        void succeed(Lease lease, String runtimeSpec);
+    }
+
+    private final Succeeder succeeder;
+
     /** The longest error detail written for a failed publication. */
     static final int DETAIL_MAX = 200;
 
@@ -97,9 +112,15 @@ public final class BuildRunner {
     }
 
     public BuildRunner(BuildCoordinator coordinator, CoordinatorSettings settings, Publishing publishing) {
+        this(coordinator, settings, publishing, coordinator::succeed);
+    }
+
+    BuildRunner(BuildCoordinator coordinator, CoordinatorSettings settings, Publishing publishing,
+                Succeeder succeeder) {
         this.coordinator = coordinator;
         this.settings = settings;
         this.publishing = publishing;
+        this.succeeder = succeeder;
     }
 
     /** Printable ASCII, at most {@link #DETAIL_MAX} characters. */
@@ -113,6 +134,42 @@ public final class BuildRunner {
             b.append(c >= 0x20 && c < 0x7f ? c : '?');
         }
         return b.toString();
+    }
+
+    /**
+     * PUBLISHING -> SUCCEEDED and the version, retried while the lease holds when the database
+     * is the problem (T9 (d)): succeed() is fenced and exactly once, so another try is safe.
+     * Past the lease the attempt is left to the reaper, which makes it INTERRUPTED -- never
+     * FAILED, which would need the database, and never a version. A fence (the attempt is no
+     * longer ours) propagates and is the caller's FENCED.
+     */
+    private Result succeed(Lease lease, String runtime, java.util.function.BooleanSupplier leaseGone) {
+        long pause = 250;
+        while (true) {
+            try {
+                succeeder.succeed(lease, runtime);
+                return Result.SUCCEEDED;
+            } catch (Fenced fenced) {
+                // A retry after a reply that was lost: the first try may have committed, and
+                // then this one is fenced by our own success (exactly once). Ask, don't guess.
+                if (coordinator.succeededUnder(lease)) {
+                    return Result.SUCCEEDED;
+                }
+                throw fenced;
+            } catch (org.springframework.dao.DataAccessException
+                     | org.springframework.transaction.TransactionException unavailable) {
+                if (leaseGone.getAsBoolean()) {
+                    return Result.INTERRUPTED;
+                }
+                try {
+                    Thread.sleep(pause);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return Result.INTERRUPTED;
+                }
+                pause = Math.min(pause * 2, Math.max(250, settings.renewEvery().toMillis()));
+            }
+        }
     }
 
     public Result runOnce(String owner, BuildDriver driver) {
@@ -227,7 +284,22 @@ public final class BuildRunner {
                     return Result.FAILED;
                 }
                 coordinator.markLogComplete(lease, cursor);
-                return Result.PUBLISHING;
+                // The version's runtime document, from the server's own provenance record
+                // (T9 (a)). A record that cannot give one fails the attempt here: a version
+                // that could never run is not one (it would also be refused by V6).
+                String runtime;
+                try {
+                    runtime = RuntimeSpec.fromProvenance(built.provenance(), RecipeGenerator.PORT).toJson();
+                } catch (RuntimeSpec.Refused noSpec) {
+                    coordinator.fail(lease, "RUNTIME_SPEC", detail(noSpec.getMessage()));
+                    return Result.FAILED;
+                }
+                // The lease alone decides whether to keep trying: a cancel requested now is too
+                // late (the attempt went on to PUBLISHING), and must not abandon a success.
+                return succeed(lease, runtime, () -> {
+                    stop.getAsBoolean();
+                    return lost.get();
+                });
             }
             if (outcome instanceof BuildDriver.Stopped) {
                 coordinator.confirmCancelled(lease);

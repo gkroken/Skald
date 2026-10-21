@@ -338,8 +338,8 @@ public class T7PassProbeTest {
 
     static boolean settled(Map<String, Object> row) {
         String state = (String) row.get("state");
-        return List.of("FAILED", "CANCELLED", "TIMED_OUT", "INTERRUPTED", "SUCCEEDED").contains(state)
-                || ("PUBLISHING".equals(state) && Boolean.TRUE.equals(row.get("log_complete")));
+        // PUBLISHING is not settled since T9 (b): a verified attempt goes on to SUCCEEDED.
+        return List.of("FAILED", "CANCELLED", "TIMED_OUT", "INTERRUPTED", "SUCCEEDED").contains(state);
     }
 
     private static ObjectNode result(ApplicationContext ctx, String name, App app, Map<String, Object> row)
@@ -543,7 +543,7 @@ public class T7PassProbeTest {
         Map<String, Object> row = build(ctx, name + "-" + app.fixture(), content, bundle, bound);
         ObjectNode r = result(ctx, name, app, row);
         r.put("pool_wait_seconds", waited);
-        assertEquals("PUBLISHING", row.get("state"), r.toString());
+        assertEquals("SUCCEEDED", row.get("state"), r.toString());
         Path log = OUT.resolve(r.path("log_file").asText());
         ObjectNode cache = r.putObject("cache");
         cache.put("restore", restore(app, log).name());
@@ -563,7 +563,7 @@ public class T7PassProbeTest {
                 UUID[] ids = store(ctx, app, payload(app));
                 Map<String, Object> row = build(ctx, "cold-" + app.fixture(), ids[0], ids[1], Duration.ofMinutes(40));
                 ObjectNode r = result(ctx, "cold", app, row);
-                assertEquals("PUBLISHING", row.get("state"), r.toString());
+                assertEquals("SUCCEEDED", row.get("state"), r.toString());
                 assertEquals(Boolean.TRUE, row.get("log_complete"), r.toString());
                 String image = (String) row.get("output_image");
                 assertTrue(image.matches(REGISTRY + ":5000/content/" + ids[0] + "@sha256:[0-9a-f]{64}"), image);
@@ -634,7 +634,7 @@ public class T7PassProbeTest {
             }
             // Every build recorded first, then judged: one failure keeps the others' timings (N2).
             for (ObjectNode r : rows) {
-                assertEquals("PUBLISHING", r.path("state").asText(), r.toString());
+                assertEquals("SUCCEEDED", r.path("state").asText(), r.toString());
             }
         });
     }
@@ -701,7 +701,7 @@ public class T7PassProbeTest {
             UUID[] y = store(ctx, PY, py);
             Map<String, Object> row = build(ctx, "cache-other-content-" + PY.fixture(), y[0], y[1], bound);
             ObjectNode other = result(ctx, "cache-other-content", PY, row);
-            assertEquals("PUBLISHING", row.get("state"), other.toString());
+            assertEquals("SUCCEEDED", row.get("state"), other.toString());
             Path log = OUT.resolve(other.path("log_file").asText());
             ObjectNode c = other.putObject("cache");
             c.put("restore", restore(PY, log).name());
@@ -938,7 +938,7 @@ public class T7PassProbeTest {
                 ids = store(ctx, PY, py);
                 row = build(ctx, "after-injections-" + PY.fixture(), ids[0], ids[1], Duration.ofMinutes(20));
                 ObjectNode after = result(ctx, "after-injections", PY, row);
-                assertEquals("PUBLISHING", row.get("state"), after.toString());
+                assertEquals("SUCCEEDED", row.get("state"), after.toString());
                 success[0] = decoded(OUT.resolve(after.path("log_file").asText()));
             });
 
@@ -1046,7 +1046,7 @@ public class T7PassProbeTest {
                 UUID[] ids = store(ctx, PY, payload(PY));
                 Map<String, Object> next = build(ctx, "restart-next-" + PY.fixture(), ids[0], ids[1], Duration.ofMinutes(20));
                 ObjectNode n = result(ctx, "restart-next", PY, next);
-                assertEquals("PUBLISHING", next.get("state"), n.toString());
+                assertEquals("SUCCEEDED", next.get("state"), n.toString());
             });
         }
     }

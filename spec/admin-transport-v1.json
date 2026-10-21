@@ -212,7 +212,8 @@
         "errors": ["BAD_REQUEST", "INVALID_ID", "KEY_INVALID", "CONTENT_NOT_FOUND", "BUNDLE_NOT_FOUND", "BUILD_NOT_FOUND", "BUNDLE_NOT_VALIDATED", "KEY_REUSED_WITH_DIFFERENT_INPUTS", "RETRY_BUNDLE_MISMATCH", "RETRY_NOT_TERMINAL", "PUBLISHER_LIMIT", "QUEUE_FULL", "UNSUPPORTED_MEDIA_TYPE"]
       },
       "build.status": {
-        "response": ["id", "contentId", "bundleId", "retryOf", "supersededBy", "state", "createdBy", "createdAt", "startedAt", "publishingAt", "finishedAt", "deadlineAt", "error", "image", "recipe", "effectiveLimits", "cancel", "log", "links"],
+        "response": ["id", "contentId", "bundleId", "retryOf", "supersededBy", "state", "createdBy", "createdAt", "startedAt", "publishingAt", "finishedAt", "deadlineAt", "error", "image", "version", "recipe", "effectiveLimits", "cancel", "log", "links"],
+        "version": "{number, specId, active} of the version a SUCCEEDED attempt became (T9 (b)); null otherwise. A success is staged, never activated by itself",
         "never": ["leaseOwner", "leaseGeneration", "workerHandle"],
         "cancel_outcomes": ["requested", "cancelled", "too_late", "overtaken"],
         "log_states": ["pending", "live", "finishing", "final"],

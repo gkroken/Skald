@@ -440,6 +440,7 @@ public class BuildService {
         // An image is the build's output only once it is SUCCEEDED; before that (PUBLISHING) or
         // after a failed publication it is not a result anyone should run.
         out.put("image", "SUCCEEDED".equals(state) ? r.get("output_image") : null);
+        out.put("version", version(contentId, id));
         out.put("recipe", json((String) r.get("recipe")));
         out.put("effectiveLimits", json((String) r.get("effective_limits")));
         out.put("cancel", cancel(state, r.get("cancel_requested_at")));
@@ -451,6 +452,26 @@ public class BuildService {
         links.put("stream", url.apply(self + "/logs/stream"));
         links.put("cancel", url.apply(self + "/cancel"));
         out.put("links", links);
+        return out;
+    }
+
+    /**
+     * The version a success became (T9 (b)): its number, its spec id, and whether it is the
+     * active one. Null for every other attempt; a success is staged, and activating it is an
+     * admin's explicit act.
+     */
+    private Map<String, Object> version(UUID contentId, UUID buildId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("SELECT v.version, (c.active_version_id = v.id) AS active"
+                + " FROM skald.content_version v JOIN skald.content c ON c.id = v.content_id"
+                + " WHERE v.build_id = ? AND v.content_id = ?", buildId, contentId);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        int number = ((Number) rows.get(0).get("version")).intValue();
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("number", number);
+        out.put("specId", eu.openanalytics.shinyproxy.publisher.registry.ContentSpecRepository.specId(contentId, number));
+        out.put("active", Boolean.TRUE.equals(rows.get(0).get("active")));
         return out;
     }
 

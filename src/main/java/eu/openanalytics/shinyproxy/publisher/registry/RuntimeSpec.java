@@ -99,6 +99,31 @@ public record RuntimeSpec(int port, String user, String language, String base) {
                 node.get("language").textValue(), node.get("base").textValue());
     }
 
+    /**
+     * The document for an image Skald built, from the build's own provenance record
+     * (skald.build-provenance/v1, written by the build driver): the base it was built from --
+     * catalog id, language, the catalog's uid and gid -- and the recipe's port. Never from the
+     * uploaded manifest. Refused when the record does not hold what a v1 document needs, so a
+     * build whose record lacks it fails rather than becoming a version that cannot run.
+     */
+    public static RuntimeSpec fromProvenance(Map<String, Object> provenance, int port) {
+        Object base = provenance == null ? null : provenance.get("base");
+        if (!(base instanceof Map<?, ?> b)) {
+            throw new Refused("the build's provenance names no base");
+        }
+        Object id = b.get("catalog_id");
+        Object language = b.get("language");
+        Object uid = b.get("uid");
+        Object gid = b.get("gid");
+        // Strings checked for the casts; a missing uid or gid ("null:null") is the schema's to refuse.
+        if (!(id instanceof String) || !(language instanceof String)) {
+            throw new Refused("the build's provenance does not name the base's id and language");
+        }
+        RuntimeSpec spec = new RuntimeSpec(port, uid + ":" + gid, (String) language, (String) id);
+        // Held to the schema now, at success, not when someone first starts the version.
+        return parse(spec.toJson());
+    }
+
     /** The document as stored: fixed key order, so one spec is always the same bytes. */
     public String toJson() {
         Map<String, Object> doc = new LinkedHashMap<>();

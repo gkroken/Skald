@@ -68,7 +68,10 @@ public class BuildCoordinatorTest {
 
     private static JdbcTemplate jdbc;
     private static final String DIGEST = "registry:5000/c@sha256:" + "c".repeat(64);
-    private static final Map<String, Object> PROVENANCE = Map.of("schema", "test");
+    // With the base record the build driver writes, from which a success's runtime document is
+    // derived (T9 (b)): a runner with a publication step now records a version.
+    private static final Map<String, Object> PROVENANCE = Map.of("schema", "test", "base",
+        Map.of("catalog_id", "r-shiny-4.6.1-amd64-r3", "language", "r", "uid", "999", "gid", "999"));
     private static final CoordinatorSettings ONE = CoordinatorSettings.DEFAULTS;
 
     @BeforeAll
@@ -467,14 +470,16 @@ public class BuildCoordinatorTest {
         BuildDriver built = (b, stop) -> new BuildDriver.Built(DIGEST, PROVENANCE);
 
         UUID verified = queued("alice");
-        assertEquals(BuildRunner.Result.PUBLISHING, new BuildRunner(coordinator, ONE, (b, image) -> {
+        assertEquals(BuildRunner.Result.SUCCEEDED, new BuildRunner(coordinator, ONE, (b, image) -> {
             assertEquals(DIGEST, image);
             return 7;
         }).runOnce("n1", built));
-        assertEquals("PUBLISHING", state(verified));
+        // Verified, then recorded as one staged version (T9 (b)).
+        assertEquals("SUCCEEDED", state(verified));
         assertEquals(Boolean.TRUE, jdbc.queryForObject("SELECT log_complete FROM skald.build WHERE id = ?", Boolean.class, verified));
         assertEquals(7L, jdbc.queryForObject("SELECT log_cursor FROM skald.build WHERE id = ?", Long.class, verified));
-        coordinator.fail(new Lease(verified, 1, "n1"), "TEST_DONE", "free the slot");
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.content_version WHERE build_id = ?",
+            Integer.class, verified));
 
         UUID refused = queued("alice");
         assertEquals(BuildRunner.Result.FAILED, new BuildRunner(coordinator, ONE, (b, image) -> {

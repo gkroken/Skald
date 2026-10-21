@@ -394,7 +394,7 @@ public class T7bProbeTest {
         // A: cold. Its success queues the lock's packages.
         Map<String, Object> a = build(ctx, "A", payload("A", null, false), true);
         record(ctx, "A", a);
-        assertEquals("PUBLISHING", a.get("state"), String.valueOf(a.get("error_detail")));
+        assertEquals("SUCCEEDED", a.get("state"), String.valueOf(a.get("error_detail")));
 
         // B: admitted at once, so the compiles yield to it (c18c5ab N1) while sources verify.
         Map<String, Object> bAdmitted = build(ctx, "B", payload("B", B_EXTRA, false), false);

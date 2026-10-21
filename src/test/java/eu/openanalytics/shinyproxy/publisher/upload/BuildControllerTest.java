@@ -89,7 +89,7 @@ public class BuildControllerTest {
     /** spec/admin-transport-v1.json shapes.bodies["build.status"].response, in its order. */
     private static final List<String> STATUS_FIELDS = List.of("id", "contentId", "bundleId", "retryOf",
         "supersededBy", "state", "createdBy", "createdAt", "startedAt", "publishingAt", "finishedAt", "deadlineAt",
-        "error", "image", "recipe", "effectiveLimits", "cancel", "log", "links");
+        "error", "image", "version", "recipe", "effectiveLimits", "cancel", "log", "links");
 
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES = TestPostgres.create();
@@ -490,6 +490,28 @@ public class BuildControllerTest {
         assertEquals("restore failed \u202e here", f.data().path("error").path("detail").asText());
         assertFalse(f.text().chars().anyMatch(ch -> ch > 0x7e), "the wire is ASCII: " + f.text());
         assertTrue(f.text().contains("\\u202E") || f.text().contains("\\u202e"), f.text());
+    }
+
+    /** A success names the version it became, staged until an admin activates it (T9 (b)). */
+    @Test
+    public void aSucceededAttemptNamesItsVersion() throws Exception {
+        UUID[] cb = at("SUCCEEDED", false);
+        assertTrue(call(admin, status(cb[0], cb[1])).data().path("version").isNull(), "no version recorded yet");
+        UUID v = UUID.randomUUID();
+        jdbc.update("INSERT INTO skald.content_version (id, content_id, version, image, spec_json, created_by, build_id)"
+            + " VALUES (?, ?, 1, ?, ?::jsonb, 'alice', ?)", v, cb[0], IMAGE,
+            new eu.openanalytics.shinyproxy.publisher.registry.RuntimeSpec(3838, "999:999", "r", "r-shiny-4.6.1-amd64-r3")
+                .toJson(), cb[1]);
+        JsonNode version = call(admin, status(cb[0], cb[1])).data().path("version");
+        assertEquals(List.of("number", "specId", "active"), fields(version));
+        assertEquals(1, version.path("number").asInt());
+        assertEquals(eu.openanalytics.shinyproxy.publisher.registry.ContentSpecRepository.specId(cb[0], 1),
+            version.path("specId").asText());
+        assertFalse(version.path("active").asBoolean(true));
+        jdbc.update("UPDATE skald.content SET active_version_id = ? WHERE id = ?", v, cb[0]);
+        assertTrue(call(admin, status(cb[0], cb[1])).data().path("version").path("active").asBoolean());
+        UUID[] failed = at("FAILED", false);
+        assertTrue(call(admin, status(failed[0], failed[1])).data().path("version").isNull());
     }
 
     @Test

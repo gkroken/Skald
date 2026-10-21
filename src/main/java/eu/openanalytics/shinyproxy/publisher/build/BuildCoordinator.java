@@ -320,6 +320,13 @@ public final class BuildCoordinator {
         });
     }
 
+    /** Whether the attempt this lease held is SUCCEEDED, by this lease (a replayed success's check). */
+    public boolean succeededUnder(Lease lease) {
+        return jdbc.queryForObject("SELECT count(*) FROM skald.build WHERE id = ? AND state = 'SUCCEEDED'"
+                + " AND lease_generation = ? AND lease_owner = ?", Integer.class,
+                lease.buildId(), lease.generation(), lease.owner()) == 1;
+    }
+
     /** The provenance as the JSON the column holds: a record with a string "schema". */
     private String provenance(Map<String, Object> provenance) {
         if (!(provenance.get("schema") instanceof String)) {
