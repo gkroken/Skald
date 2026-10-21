@@ -88,7 +88,7 @@ public class UntrustedRequestHeadersTest {
         return Map.of(
             "Authorization", List.of("Basic YWxpY2U6c2VjcmV0"),
             "Proxy-Authorization", List.of("Basic eA=="),
-            "Cookie", List.of("SESSION=abc; app=1", "jsessionid=def; theme=dark"),
+            "Cookie", List.of("SESSION=abc; app=1", "JSESSIONID=def; theme=dark"),
             "X-SP-UserId", List.of("alice"),
             "X-SP-UserGroups", List.of("ADMINS"),
             "X-SP-Something", List.of("forged"),
@@ -137,11 +137,12 @@ public class UntrustedRequestHeadersTest {
     @Test
     public void cookiesAreJudgedByNameOnly() {
         HeaderMap h = new HeaderMap();
-        h.add(new HttpString("Cookie"), "Session=1;JSESSIONID=2 ; ;session_extra=3; Xsession=4");
+        h.add(new HttpString("Cookie"), "SESSION=1;JSESSIONID=2 ; ;session_extra=3; Xsession=4; session=5; Session=6");
         h.add(new HttpString("Cookie"), "SESSION=only");
         UntrustedRequestHeaders.sanitise(h, Set.of(), SESSION);
-        assertEquals(List.of("session_extra=3; Xsession=4"), new ArrayList<>(h.get("Cookie")),
-            "a cookie whose name merely contains the session cookie's is the app's");
+        // By exact name (ec37449-F2): an app's own "session" (Flask's, Starlette's default) is the
+        // app's, and so is a name that merely contains the platform's.
+        assertEquals(List.of("session_extra=3; Xsession=4; session=5; Session=6"), new ArrayList<>(h.get("Cookie")));
         HeaderMap all = new HeaderMap();
         all.add(new HttpString("Cookie"), "SESSION=1; JSESSIONID=2");
         UntrustedRequestHeaders.sanitise(all, Set.of(), SESSION);

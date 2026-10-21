@@ -51,10 +51,16 @@ import java.util.function.Function;
  * <p>A built version runs a publisher's bundle, which is untrusted code. ContainerProxy
  * forwards every request header to the app, so without this the app received the viewer's
  * {@code Authorization} header -- with HTTP Basic, the viewer's password -- and the platform's
- * session cookie, with which code in the app could act as the viewer on the platform itself
- * (an admin viewing an app could have their session used against {@code /admin}). And an
- * {@code X-SP-*} header the client sent reached the app beside the engine's own, so an app
- * trusting the {@code X-SP-} prefix could be lied to.
+ * session cookie, which the app's SERVER code could replay to act as the viewer on the
+ * platform. And an {@code X-SP-*} header the client sent reached the app beside the engine's
+ * own, so an app trusting the {@code X-SP-} prefix could be lied to.
+ *
+ * <p><b>What this does not stop</b> (ec37449-F1, open, the user's decision): the HTML and
+ * JavaScript a built app serves run in the viewer's browser on the platform's own origin, so
+ * a same-origin {@code fetch('/admin/...')} carries the viewer's session without ever seeing
+ * it, and passes every CSRF check. Only origin isolation -- apps served from a separate site,
+ * with an app-scoped hand-off instead of the platform session -- closes that. This class
+ * protects the session from the app's server side only.
  *
  * <p>Applied where the engine proxies -- an Undertow handler in front of its proxy handler,
  * on every exchange it dispatched -- so every route to a built version is covered:
@@ -64,7 +70,9 @@ import java.util.function.Function;
  * the seams are Undertow's handler chain and ContainerProxy's public dispatcher attachment.
  *
  * <p>Removed: {@code Authorization} and {@code Proxy-Authorization}; the platform's session
- * cookies from {@code Cookie} (the app's own cookies stay); every {@code X-SP-*} header that is
+ * cookies from {@code Cookie}, by exact name -- cookie names are case-sensitive (RFC 6265
+ * 4.1.1), and an app's own {@code session} cookie (Flask's and Starlette's default) is the
+ * app's; every {@code X-SP-*} header that is
  * not one the engine set for this proxy (those it set replaced the client's already).
  */
 public final class UntrustedRequestHeaders implements HttpHandler {
@@ -173,7 +181,7 @@ public final class UntrustedRequestHeaders implements HttpHandler {
                     }
                     int eq = trimmed.indexOf('=');
                     String cookieName = (eq < 0 ? trimmed : trimmed.substring(0, eq)).trim();
-                    if (!sessionCookies.contains(cookieName.toUpperCase(Locale.ROOT))) {
+                    if (!sessionCookies.contains(cookieName)) {
                         parts.add(trimmed);
                     }
                 }

@@ -32,7 +32,6 @@ import org.springframework.boot.web.server.WebServerFactoryCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -50,10 +49,11 @@ public class UntrustedRequestHeadersConfig {
     public WebServerFactoryCustomizer<UndertowServletWebServerFactory> untrustedRequestHeaders(
             ObjectProvider<ProxyService> proxyService, ObjectProvider<IProxySpecProvider> specProvider,
             @Value("${server.servlet.session.cookie.name:}") String sessionCookie) {
-        // Spring Session's default, the servlet container's, and the configured name.
+        // Spring Session's default, the servlet container's, and the configured name, each
+        // exactly as the platform sets it: cookie names are case-sensitive (ec37449-F2).
         Set<String> sessionCookies = new TreeSet<>(Set.of("SESSION", "JSESSIONID"));
         if (!sessionCookie.isBlank()) {
-            sessionCookies.add(sessionCookie.trim().toUpperCase(Locale.ROOT));
+            sessionCookies.add(sessionCookie.trim());
         }
         Set<String> names = Set.copyOf(sessionCookies);
         return factory -> factory.addDeploymentInfoCustomizers(info -> info.addInnerHandlerChainWrapper(

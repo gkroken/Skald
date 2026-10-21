@@ -3387,6 +3387,28 @@ below are marked passed by this planning document.
       (as much again). **T9 does not close while the memory-swap item is open**, unless the
       user defers it explicitly. The frozen text says it is owed here.
 
+      *(c) as built* (ec37449 and its fix): the live run is T7PassProbeTest
+      #aBuiltVersionRunsThroughTheRealProxy (`dev/t7-pass-probe.py --test <it>`). It found
+      that a built app was handed the viewer's `Authorization` header and the platform's
+      session cookie, and a client's forged `X-SP-*` headers. UntrustedRequestHeaders now
+      removes them in front of the engine's proxy handler, for built versions only, on every
+      route. That protects the session from the app's SERVER side only. **Open, blocks v1,
+      the user's decision (ec37449-F1):**
+      - The HTML and JavaScript of every app are served on the platform's own origin, so a
+        built app's browser code can call `/admin` and every other app with the viewer's
+        session, past every CSRF check, and read the answers.
+      - The fix is origin isolation: apps on a separate site (a wildcard `*.apps.<domain>`
+        or a distinct registrable domain, per-app subdomains if apps must be isolated from
+        each other), with an app-scoped, short-lived hand-off instead of the platform
+        session. That is an architecture and deployment change (DNS, TLS, the auth
+        hand-off, how /c/ URLs work).
+      - Interim measures that do NOT work: a CSP sandbox without allow-same-origin (breaks
+        Shiny's WebSocket auth); SameSite (the request is same-site); per-request admin
+        tokens (same-origin JavaScript can fetch them).
+      - Not introduced by T9. Upstream ShinyProxy serves admin-curated apps the same way;
+        T9's live probe is where it became visible. T10's live acceptance gains the attack
+        row: a built app's JavaScript calling /admin as an admin viewer must fail.
+
 - [ ] **T10. Live acceptance, rollback, GC and final independent regression review.**
       Depends all above. **Signed provenance (user, 2026-10-10):** the SLSA attestation T7
       attaches is unsigned (SLSA Build L1, written inside the worker that runs the bundle's
