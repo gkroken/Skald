@@ -292,11 +292,81 @@ public class BuildCoordinatorTest {
             coordinator.cancel(contentOf(publishing), publishing, "alice"));
         assertEquals("PUBLISHING", state(publishing));
 
-        assertEquals(BuildCoordinator.CancelOutcome.ALREADY_FINISHED,
-            coordinator.cancel(contentOf(running), running, "alice"));
+        assertEquals(BuildCoordinator.CancelOutcome.CANCELLED,
+            coordinator.cancel(contentOf(running), running, "alice"),
+            "a retried cancel reports where that cancel got to (shapes.cancel_replay)");
         assertEquals(BuildCoordinator.CancelOutcome.NOT_FOUND,
             coordinator.cancel(contentOf(queued("bob")), running, "bob"),
             "a build was cancelled through another content item");
+    }
+
+    /**
+     * An attempt placed directly in {@code state}, with or without a cancel request on record,
+     * carrying what the schema requires of that state.
+     */
+    private static UUID at(String state, boolean requested) {
+        UUID build = queued("alice");
+        boolean leased = state.equals("RUNNING") || state.equals("PUBLISHING");
+        boolean terminal = !leased && !state.equals("QUEUED");
+        boolean image = state.equals("SUCCEEDED") || state.equals("PUBLISHING");
+        jdbc.update("UPDATE skald.build SET state = ?, lease_generation = 1,"
+            + " lease_owner = CASE WHEN ? THEN 'n' END, lease_expires_at = CASE WHEN ? THEN now() + interval '1 hour' END,"
+            + " deadline_at = now() + interval '1 hour', started_at = now(),"
+            + " finished_at = CASE WHEN ? THEN now() END,"
+            + " output_image = CASE WHEN ? THEN ? END, provenance = CASE WHEN ? THEN '{\"schema\": \"t\"}'::jsonb END,"
+            + " cancel_requested_at = CASE WHEN ? THEN now() END WHERE id = ?",
+            state, leased, leased, terminal, image, DIGEST, image, requested, build);
+        return build;
+    }
+
+    private static Object requestedAt(UUID build) {
+        return jdbc.queryForObject("SELECT cancel_requested_at FROM skald.build WHERE id = ?", Object.class, build);
+    }
+
+    /**
+     * Every row of spec/admin-transport-v1.json shapes.cancel_replies, each its own attempt:
+     * the outcome, and that nothing but QUEUED and RUNNING changes the row. QUEUED with a
+     * request cannot exist (a request moves it to CANCELLED), so that row is the plain one.
+     */
+    @Test
+    public void everyRowOfTheCancelTableAnswersAsTheSpecSays() {
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        Object[][] table = {
+            {"RUNNING", true, BuildCoordinator.CancelOutcome.REQUESTED},
+            {"PUBLISHING", false, BuildCoordinator.CancelOutcome.REFUSED_PUBLISHING},
+            {"PUBLISHING", true, BuildCoordinator.CancelOutcome.TOO_LATE},
+            {"CANCELLED", true, BuildCoordinator.CancelOutcome.CANCELLED},
+            {"CANCELLED", false, BuildCoordinator.CancelOutcome.ALREADY_FINISHED},
+            {"SUCCEEDED", true, BuildCoordinator.CancelOutcome.TOO_LATE},
+            {"SUCCEEDED", false, BuildCoordinator.CancelOutcome.ALREADY_FINISHED},
+            {"FAILED", true, BuildCoordinator.CancelOutcome.TOO_LATE},
+            {"FAILED", false, BuildCoordinator.CancelOutcome.ALREADY_FINISHED},
+            {"TIMED_OUT", true, BuildCoordinator.CancelOutcome.ALREADY_FINISHED},
+            {"TIMED_OUT", false, BuildCoordinator.CancelOutcome.ALREADY_FINISHED},
+            {"INTERRUPTED", true, BuildCoordinator.CancelOutcome.ALREADY_FINISHED},
+            {"INTERRUPTED", false, BuildCoordinator.CancelOutcome.ALREADY_FINISHED},
+        };
+        for (Object[] row : table) {
+            String state = (String) row[0];
+            boolean requested = (Boolean) row[1];
+            UUID build = at(state, requested);
+            Object before = requestedAt(build);
+            assertEquals(row[2], coordinator.cancel(contentOf(build), build, "alice"), state + " requested=" + requested);
+            assertEquals(state, state(build), state + " requested=" + requested + " changed state");
+            assertEquals(before, requestedAt(build), state + " requested=" + requested + " changed the request");
+        }
+        // The first RUNNING cancel records the request once; a retry neither moves it nor the state.
+        UUID running = at("RUNNING", false);
+        assertEquals(BuildCoordinator.CancelOutcome.REQUESTED, coordinator.cancel(contentOf(running), running, "alice"));
+        Object first = requestedAt(running);
+        assertTrue(first != null);
+        assertEquals(BuildCoordinator.CancelOutcome.REQUESTED, coordinator.cancel(contentOf(running), running, "alice"));
+        assertEquals(first, requestedAt(running));
+        // QUEUED: cancelled at once, with its request recorded, so a retry is the CANCELLED-requested row.
+        UUID queued = at("QUEUED", false);
+        assertEquals(BuildCoordinator.CancelOutcome.CANCELLED, coordinator.cancel(contentOf(queued), queued, "alice"));
+        assertEquals("CANCELLED", state(queued));
+        assertEquals(BuildCoordinator.CancelOutcome.CANCELLED, coordinator.cancel(contentOf(queued), queued, "alice"));
     }
 
     private String provenanceOf(UUID build) {

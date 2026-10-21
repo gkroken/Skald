@@ -401,4 +401,103 @@ public class BuildAdmissionTest {
         assertNotEquals(admit.fingerprint(new BuildAdmission.Inputs(b, ab)),
             admit.fingerprint(new BuildAdmission.Inputs(b, Map.of("a", "1", "b", "3"))));
     }
+    // ------------------------------------------------------------------ retries (T8 (c))
+
+    private static UUID finished(UUID build) {
+        jdbc.update("UPDATE skald.build SET state = 'FAILED', finished_at = now() WHERE id = ?", build);
+        return build;
+    }
+
+    @Test
+    public void aRetryReusesItsAttemptsBundleWhetherOrNotItNamesIt() {
+        UUID c = content();
+        UUID b = bundle(c, "VALIDATED");
+        BuildAdmission admit = admission(10, 3);
+        UUID failed = finished(admit.request(c, "alice", "k1", inputs(b)).buildId());
+        BuildAdmission.Admitted retry = admit.request(c, "alice", "k2",
+            new BuildAdmission.Inputs(null, Map.of("recipe", "r-shiny-renv"), failed));
+        assertTrue(retry.created());
+        assertEquals(b, jdbc.queryForObject("SELECT bundle_id FROM skald.build WHERE id = ?", UUID.class, retry.buildId()));
+        assertEquals(failed, jdbc.queryForObject("SELECT retry_of FROM skald.build WHERE id = ?", UUID.class,
+            retry.buildId()));
+        // The replay that names the bundle is the same request as the one that left it out.
+        BuildAdmission.Admitted named = admit.request(c, "alice", "k2",
+            new BuildAdmission.Inputs(b, Map.of("recipe", "r-shiny-renv"), failed));
+        assertFalse(named.created());
+        assertEquals(retry.buildId(), named.buildId());
+        assertEquals(retry.buildId(), admit.request(c, "alice", "k2",
+            new BuildAdmission.Inputs(null, Map.of("recipe", "r-shiny-renv"), failed)).buildId());
+        assertEquals(2, jdbc.queryForObject("SELECT count(*) FROM skald.build", Integer.class));
+        assertTrue(jdbc.queryForObject("SELECT detail_json::text FROM skald.audit_event WHERE action = 'build.admitted'"
+            + " AND subject_id = ?", String.class, retry.buildId().toString()).contains(failed.toString()));
+    }
+
+    @Test
+    public void aRetryNamingAnotherBundleIsRefused() {
+        UUID c = content();
+        UUID b = bundle(c, "VALIDATED");
+        UUID other = bundle(c, "VALIDATED");
+        BuildAdmission admit = admission(10, 3);
+        UUID failed = finished(admit.request(c, "alice", "k1", inputs(b)).buildId());
+        assertEquals(AdmissionRefusal.Reason.RETRY_BUNDLE_MISMATCH, refusal(() -> admit.request(c, "alice", "k2",
+            new BuildAdmission.Inputs(other, Map.of(), failed))));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.build", Integer.class));
+    }
+
+    @Test
+    public void aRetryOfAnotherContentItemsBuildIsNotFound() {
+        UUID mine = content();
+        UUID theirs = content();
+        BuildAdmission admit = admission(10, 3);
+        UUID b = bundle(theirs, "VALIDATED");
+        UUID failed = finished(admit.request(theirs, "alice", "k1", inputs(b)).buildId());
+        assertEquals(AdmissionRefusal.Reason.BUILD_NOT_FOUND, refusal(() -> admit.request(mine, "alice", "k2",
+            new BuildAdmission.Inputs(null, Map.of(), failed))));
+        assertEquals(AdmissionRefusal.Reason.BUILD_NOT_FOUND, refusal(() -> admit.request(mine, "alice", "k3",
+            new BuildAdmission.Inputs(null, Map.of(), UUID.randomUUID()))));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.build", Integer.class));
+    }
+
+    @Test
+    public void onlyAFinishedAttemptIsRetried() {
+        UUID c = content();
+        UUID b = bundle(c, "VALIDATED");
+        BuildAdmission admit = admission(10, 3);
+        UUID queued = admit.request(c, "alice", "k1", inputs(b)).buildId();
+        AdmissionRefusal refused = assertThrows(AdmissionRefusal.class, () -> admit.request(c, "alice", "k2",
+            new BuildAdmission.Inputs(null, Map.of(), queued)));
+        assertEquals(AdmissionRefusal.Reason.RETRY_NOT_TERMINAL, refused.reason());
+        assertEquals("QUEUED", refused.detail().get("retryOfState"));
+        jdbc.update("UPDATE skald.build SET state = 'RUNNING', lease_owner = 'n', lease_generation = 1,"
+            + " lease_expires_at = now() + interval '1 hour' WHERE id = ?", queued);
+        assertEquals(AdmissionRefusal.Reason.RETRY_NOT_TERMINAL, refusal(() -> admit.request(c, "alice", "k2",
+            new BuildAdmission.Inputs(null, Map.of(), queued))));
+        assertEquals(1, jdbc.queryForObject("SELECT count(*) FROM skald.build", Integer.class));
+    }
+
+    @Test
+    public void retryOfIsPartOfTheRequestsIdentity() {
+        UUID c = content();
+        UUID b = bundle(c, "VALIDATED");
+        BuildAdmission admit = admission(10, 3);
+        UUID failed = finished(admit.request(c, "alice", "k1", inputs(b)).buildId());
+        finished(admit.request(c, "alice", "k2", inputs(b)).buildId());
+        // k2 was a plain request for b; the same key as a retry of b's attempt is another request.
+        assertEquals(AdmissionRefusal.Reason.KEY_REUSED_WITH_DIFFERENT_INPUTS, refusal(() -> admit.request(c, "alice",
+            "k2", new BuildAdmission.Inputs(null, Map.of("recipe", "r-shiny-renv"), failed))));
+        assertThrows(IllegalArgumentException.class, () -> admit.request(c, "alice", "k3",
+            new BuildAdmission.Inputs(null, Map.of(), null)));
+    }
+
+    @Test
+    public void aFingerprintWithoutARetryIsTheOneStoredBeforeRetriesExisted() throws Exception {
+        UUID b = UUID.fromString("00000000-0000-4000-8000-000000000001");
+        String canonical = "{\"bundle_id\":\"" + b + "\",\"recipe\":{\"a\":\"1\"}}";
+        String expected = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+            .digest(canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        BuildAdmission admit = admission(10, 3);
+        assertEquals(expected, admit.fingerprint(new BuildAdmission.Inputs(b, Map.of("a", "1"))));
+        assertEquals(expected, admit.fingerprint(new BuildAdmission.Inputs(b, Map.of("a", "1"), null)));
+        assertNotEquals(expected, admit.fingerprint(new BuildAdmission.Inputs(b, Map.of("a", "1"), UUID.randomUUID())));
+    }
 }

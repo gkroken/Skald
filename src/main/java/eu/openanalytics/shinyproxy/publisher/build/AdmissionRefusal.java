@@ -35,6 +35,12 @@ public final class AdmissionRefusal extends RuntimeException {
         CONTENT_NOT_FOUND(404),
         /** No such bundle FOR THIS CONTENT ITEM: another item's bundle is not found here. */
         BUNDLE_NOT_FOUND(404),
+        /** retryOf names no attempt of THIS content item. */
+        BUILD_NOT_FOUND(404),
+        /** retryOf names an attempt that has not finished: there is nothing to retry yet. */
+        RETRY_NOT_TERMINAL(409),
+        /** retryOf reuses its attempt's bundle; naming another bundle is a different request. */
+        RETRY_BUNDLE_MISMATCH(400),
         /** The bundle exists but is not VALIDATED, so there is nothing safe to build. */
         BUNDLE_NOT_VALIDATED(409),
         /** The key was used before for different inputs (lifecycle: key + inputs). */
@@ -56,6 +62,7 @@ public final class AdmissionRefusal extends RuntimeException {
     }
 
     private final Reason reason;
+    private final java.util.Map<String, Object> detail = new java.util.LinkedHashMap<>();
 
     public AdmissionRefusal(Reason reason, String message) {
         super(message);
@@ -64,5 +71,15 @@ public final class AdmissionRefusal extends RuntimeException {
 
     public Reason reason() {
         return reason;
+    }
+
+    /** Adds a field the refusal carries to the client, such as the state that refused it. */
+    public AdmissionRefusal with(String field, Object value) {
+        detail.put(field, value);
+        return this;
+    }
+
+    public java.util.Map<String, Object> detail() {
+        return java.util.Collections.unmodifiableMap(detail);
     }
 }

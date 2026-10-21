@@ -50,15 +50,28 @@ import java.util.UUID;
  */
 public final class BuildCoordinator {
 
-    /** What a cancel request did. */
+    /**
+     * What a cancel request did: a function of the attempt's state and whether it already
+     * carries a request, read under the row lock (spec/admin-transport-v1.json
+     * shapes.cancel_replies). A retry of a cancel reports where that cancel has got to; it
+     * never makes a second request or a different transition.
+     */
     public enum CancelOutcome {
-        /** QUEUED: cancelled at once, nothing was running. */
+        /** QUEUED: cancelled at once, nothing was running. Or CANCELLED by an earlier request. */
         CANCELLED,
         /** RUNNING: recorded; the attempt is CANCELLED once the worker confirms it stopped. */
         REQUESTED,
-        /** PUBLISHING: refused (spec: cancel_refused_states); recovery is deleting the content. */
+        /** PUBLISHING with no request: refused (spec: cancel_refused_states); nothing recorded. */
         REFUSED_PUBLISHING,
-        /** Already terminal; nothing changed. */
+        /**
+         * A request was recorded while RUNNING, and the attempt went on to PUBLISHING,
+         * SUCCEEDED or FAILED: the driver finished before the stop.
+         */
+        TOO_LATE,
+        /**
+         * Terminal with no request of its own (a superseded attempt among them), or TIMED_OUT
+         * / INTERRUPTED whatever was requested; nothing changed.
+         */
         ALREADY_FINISHED,
         /** No such build for this content item. */
         NOT_FOUND
@@ -341,26 +354,30 @@ public final class BuildCoordinator {
     /** A user's cancel request, scoped to the content item the build belongs to. */
     public CancelOutcome cancel(UUID contentId, UUID buildId, String actor) {
         return tx.execute(status -> {
-            List<String> states = jdbc.queryForList("SELECT state FROM skald.build WHERE id = ?"
-                    + " AND content_id = ? FOR UPDATE", String.class, buildId, contentId);
-            if (states.isEmpty()) {
+            List<Map<String, Object>> rows = jdbc.queryForList("SELECT state,"
+                    + " cancel_requested_at IS NOT NULL AS requested FROM skald.build WHERE id = ?"
+                    + " AND content_id = ? FOR UPDATE", buildId, contentId);
+            if (rows.isEmpty()) {
                 return CancelOutcome.NOT_FOUND;
             }
-            String state = states.get(0);
-            CancelOutcome outcome;
-            if (state.equals("QUEUED")) {
-                jdbc.update("UPDATE skald.build SET state = 'CANCELLED', finished_at = now(),"
-                        + " cancel_requested_at = now(), updated_at = now() WHERE id = ?", buildId);
-                outcome = CancelOutcome.CANCELLED;
-            } else if (state.equals("RUNNING")) {
-                jdbc.update("UPDATE skald.build SET cancel_requested_at = coalesce(cancel_requested_at,"
-                        + " now()), updated_at = now() WHERE id = ?", buildId);
-                outcome = CancelOutcome.REQUESTED;
-            } else if (state.equals("PUBLISHING")) {
-                outcome = CancelOutcome.REFUSED_PUBLISHING;
-            } else {
-                outcome = CancelOutcome.ALREADY_FINISHED;
-            }
+            String state = (String) rows.get(0).get("state");
+            boolean requested = (Boolean) rows.get(0).get("requested");
+            CancelOutcome outcome = switch (state) {
+                case "QUEUED" -> {
+                    jdbc.update("UPDATE skald.build SET state = 'CANCELLED', finished_at = now(),"
+                            + " cancel_requested_at = now(), updated_at = now() WHERE id = ?", buildId);
+                    yield CancelOutcome.CANCELLED;
+                }
+                case "RUNNING" -> {
+                    jdbc.update("UPDATE skald.build SET cancel_requested_at = coalesce(cancel_requested_at,"
+                            + " now()), updated_at = now() WHERE id = ?", buildId);
+                    yield CancelOutcome.REQUESTED;
+                }
+                case "PUBLISHING" -> requested ? CancelOutcome.TOO_LATE : CancelOutcome.REFUSED_PUBLISHING;
+                case "CANCELLED" -> requested ? CancelOutcome.CANCELLED : CancelOutcome.ALREADY_FINISHED;
+                case "SUCCEEDED", "FAILED" -> requested ? CancelOutcome.TOO_LATE : CancelOutcome.ALREADY_FINISHED;
+                default -> CancelOutcome.ALREADY_FINISHED;
+            };
             audit(actor, "build.cancel." + outcome.name().toLowerCase(java.util.Locale.ROOT), buildId, Map.of());
             return outcome;
         });

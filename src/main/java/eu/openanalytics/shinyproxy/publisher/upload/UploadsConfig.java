@@ -22,8 +22,11 @@
  */
 package eu.openanalytics.shinyproxy.publisher.upload;
 
+import eu.openanalytics.shinyproxy.publisher.build.BuildAdmission;
+import eu.openanalytics.shinyproxy.publisher.build.BuildCoordinator;
 import eu.openanalytics.shinyproxy.publisher.bundle.ExtractionLimits;
 import eu.openanalytics.shinyproxy.publisher.config.Settings;
+import eu.openanalytics.shinyproxy.publisher.storage.BuildLogWriter;
 import eu.openanalytics.shinyproxy.publisher.storage.ObjectStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -83,6 +86,14 @@ public class UploadsConfig {
                                            BundleValidator validator,
                                            @Value("${skald.builds.worker.bundle-bucket:skald-bundles}") String bucket) {
             return new BundleService(jdbc, store, bucket, limits, validator::wake);
+        }
+
+        /** The log bucket is the worker's {@code skald.builds.worker.log-bucket}, for the reason above. */
+        @Bean
+        public BuildService buildService(JdbcTemplate jdbc, BuildAdmission admission, BuildCoordinator coordinator,
+                                         ObjectStore store,
+                                         @Value("${skald.builds.worker.log-bucket:skald-logs}") String logBucket) {
+            return new BuildService(jdbc, admission, coordinator, new BuildLogWriter(store, logBucket));
         }
 
         @Bean(initMethod = "start", destroyMethod = "stop")

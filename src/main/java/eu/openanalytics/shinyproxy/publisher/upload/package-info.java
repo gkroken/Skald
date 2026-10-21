@@ -25,5 +25,10 @@
  * transport and are validated as claimed, leased work that survives the instance that
  * accepted them. Every state change is a transition of {@code spec/lifecycle-v1.json}'s bundle
  * machine; the shapes are {@code spec/admin-transport-v1.json}'s {@code shapes}.
+ *
+ * <p>The rest of the admin transport for publishing lives here too, beside the shared
+ * envelope ({@link eu.openanalytics.shinyproxy.publisher.upload.TransportController}): the
+ * build endpoints ({@code BuildController}), which render the build package's admission
+ * and cancellation and read each attempt's log state from storage.
  */
 package eu.openanalytics.shinyproxy.publisher.upload;

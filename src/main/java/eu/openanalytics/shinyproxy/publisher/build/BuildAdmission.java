@@ -50,9 +50,14 @@ import java.util.regex.Pattern;
  *   <li>a global advisory lock, so the queue and per-publisher counts below are exact across
  *       content items, and then the content row, FOR UPDATE -- the same coordination lock
  *       version allocation and deletion take;</li>
+ *   <li>a retry ({@code retryOf}): the attempt it names must be this content item's, and its
+ *       bundle is the retry's -- named or left out, which is why the fingerprint is taken
+ *       only after this step (T8 (c));</li>
  *   <li>the idempotency key: a key seen before for the same inputs returns that attempt,
  *       whatever has happened since (even a full queue); for different inputs it is refused.
  *       Checked first so an HTTP retry is never turned into a refusal by the limits;</li>
+ *   <li>a retried attempt must be terminal (lifecycle-v1: a retry is a new attempt of a
+ *       finished one);</li>
  *   <li>the bundle: it must belong to this content item and be VALIDATED (an invariant the
  *       schema cannot hold, because it needs the bundle's row: a00a190 review N3);</li>
  *   <li>the limits, counting the QUEUED attempt about to be superseded as already gone;</li>
@@ -63,10 +68,17 @@ import java.util.regex.Pattern;
  */
 public final class BuildAdmission {
 
-    /** The inputs that decide whether two requests are the same request. */
-    public record Inputs(UUID bundleId, Map<String, String> recipe) {
+    /**
+     * The inputs that decide whether two requests are the same request. {@code bundleId} may
+     * be null only with {@code retryOf}, whose attempt's bundle it then is.
+     */
+    public record Inputs(UUID bundleId, Map<String, String> recipe, UUID retryOf) {
         public Inputs {
             recipe = recipe == null ? Map.of() : Map.copyOf(recipe);
+        }
+
+        public Inputs(UUID bundleId, Map<String, String> recipe) {
+            this(bundleId, recipe, null);
         }
     }
 
@@ -74,6 +86,8 @@ public final class BuildAdmission {
     public record Admitted(UUID buildId, boolean created, UUID superseded) { }
 
     private static final Pattern KEY = Pattern.compile("[\\x21-\\x7e]{1,200}");
+    private static final java.util.Set<String> TERMINAL =
+            java.util.Set.of("SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "INTERRUPTED");
     // Any constant: the one lock every admission takes, so counts are not raced.
     private static final long ADMISSION_LOCK = 0x5ca1dad0001L;
 
@@ -94,18 +108,41 @@ public final class BuildAdmission {
             throw new AdmissionRefusal(AdmissionRefusal.Reason.KEY_INVALID,
                     "an idempotency key is 1 to 200 printable ASCII characters");
         }
-        String fingerprint = fingerprint(inputs);
-        return tx.execute(status -> admit(contentId, actor, idempotencyKey, inputs, fingerprint));
+        if (inputs.bundleId() == null && inputs.retryOf() == null) {
+            throw new IllegalArgumentException("a build request names a bundle or the attempt it retries");
+        }
+        return tx.execute(status -> admit(contentId, actor, idempotencyKey, inputs));
     }
 
-    private Admitted admit(UUID contentId, String actor, String key, Inputs inputs,
-                           String fingerprint) {
+    private Admitted admit(UUID contentId, String actor, String key, Inputs requested) {
         jdbc.queryForObject("SELECT pg_advisory_xact_lock(?)", Object.class, ADMISSION_LOCK);
         if (jdbc.queryForList("SELECT id FROM skald.content WHERE id = ? FOR UPDATE",
                 contentId).isEmpty()) {
             throw new AdmissionRefusal(AdmissionRefusal.Reason.CONTENT_NOT_FOUND,
                     "no content item " + contentId);
         }
+
+        // A retry's bundle is its attempt's: resolved before the fingerprint, so a replay
+        // that leaves bundleId out and one that names it are the same request.
+        Inputs inputs = requested;
+        String retriedState = null;
+        if (requested.retryOf() != null) {
+            List<Map<String, Object>> retried = jdbc.queryForList("SELECT bundle_id, state FROM skald.build"
+                    + " WHERE id = ? AND content_id = ?", requested.retryOf(), contentId);
+            if (retried.isEmpty()) {
+                throw new AdmissionRefusal(AdmissionRefusal.Reason.BUILD_NOT_FOUND,
+                        "no build " + requested.retryOf() + " for this content item to retry");
+            }
+            UUID bundle = (UUID) retried.get(0).get("bundle_id");
+            if (requested.bundleId() != null && !requested.bundleId().equals(bundle)) {
+                throw new AdmissionRefusal(AdmissionRefusal.Reason.RETRY_BUNDLE_MISMATCH,
+                        "build " + requested.retryOf() + " built bundle " + bundle + "; a retry reuses it,"
+                                + " so leave bundleId out or name that one");
+            }
+            inputs = new Inputs(bundle, requested.recipe(), requested.retryOf());
+            retriedState = (String) retried.get(0).get("state");
+        }
+        String fingerprint = fingerprint(inputs);
 
         List<Map<String, Object>> seen = jdbc.queryForList("SELECT id, input_fingerprint"
                 + " FROM skald.build WHERE content_id = ? AND idempotency_key = ?", contentId, key);
@@ -116,6 +153,11 @@ public final class BuildAdmission {
             throw new AdmissionRefusal(AdmissionRefusal.Reason.KEY_REUSED_WITH_DIFFERENT_INPUTS,
                     "this idempotency key was used for a different build request");
         }
+        if (retriedState != null && !TERMINAL.contains(retriedState)) {
+            throw new AdmissionRefusal(AdmissionRefusal.Reason.RETRY_NOT_TERMINAL,
+                    "build " + inputs.retryOf() + " is " + retriedState + "; only a finished attempt is retried")
+                    .with("retryOfState", retriedState);
+        }
 
         List<String> bundle = jdbc.queryForList("SELECT state FROM skald.bundle"
                 + " WHERE id = ? AND content_id = ?", String.class, inputs.bundleId(), contentId);
@@ -125,7 +167,8 @@ public final class BuildAdmission {
         }
         if (!"VALIDATED".equals(bundle.get(0))) {
             throw new AdmissionRefusal(AdmissionRefusal.Reason.BUNDLE_NOT_VALIDATED,
-                    "bundle " + inputs.bundleId() + " is " + bundle.get(0) + ", not VALIDATED");
+                    "bundle " + inputs.bundleId() + " is " + bundle.get(0) + ", not VALIDATED")
+                    .with("bundleState", bundle.get(0));
         }
 
         List<Map<String, Object>> queued = jdbc.queryForList("SELECT id, created_by"
@@ -153,23 +196,34 @@ public final class BuildAdmission {
                     + " updated_at = now() WHERE id = ? AND state = 'QUEUED'", superseded);
         }
         UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO skald.build (id, content_id, bundle_id, created_by,"
-                + " idempotency_key, input_fingerprint, recipe) VALUES (?, ?, ?, ?, ?, ?, ?::jsonb)",
-                id, contentId, inputs.bundleId(), actor, key, fingerprint, json(inputs.recipe()));
+        jdbc.update("INSERT INTO skald.build (id, content_id, bundle_id, retry_of, created_by,"
+                + " idempotency_key, input_fingerprint, recipe) VALUES (?, ?, ?, ?, ?, ?, ?, ?::jsonb)",
+                id, contentId, inputs.bundleId(), inputs.retryOf(), actor, key, fingerprint, json(inputs.recipe()));
         if (superseded != null) {
             jdbc.update("UPDATE skald.build SET superseded_by = ? WHERE id = ?", id, superseded);
             audit(actor, "build.superseded", superseded, Map.of("by", id.toString()));
         }
-        audit(actor, "build.admitted", id, Map.of("content", contentId.toString(),
+        Map<String, String> detail = new TreeMap<>(Map.of("content", contentId.toString(),
                 "bundle", inputs.bundleId().toString()));
+        if (inputs.retryOf() != null) {
+            detail.put("retryOf", inputs.retryOf().toString());
+        }
+        audit(actor, "build.admitted", id, detail);
         return new Admitted(id, true, superseded);
     }
 
-    /** SHA-256 over the canonical JSON of the inputs: key order never changes the result. */
+    /**
+     * SHA-256 over the canonical JSON of the inputs: key order never changes the result.
+     * {@code retry_of} is in the document only when set, so every fingerprint stored before
+     * retries existed still matches its own request (keys are kept forever, decision 5).
+     */
     String fingerprint(Inputs inputs) {
         Map<String, Object> doc = new LinkedHashMap<>();
         doc.put("bundle_id", String.valueOf(inputs.bundleId()));
         doc.put("recipe", new TreeMap<>(inputs.recipe()));
+        if (inputs.retryOf() != null) {
+            doc.put("retry_of", inputs.retryOf().toString());
+        }
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                     .digest(canonical.writeValueAsString(doc).getBytes(StandardCharsets.UTF_8)));

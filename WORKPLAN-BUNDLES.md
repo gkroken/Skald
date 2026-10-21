@@ -3225,6 +3225,23 @@ below are marked passed by this planning document.
       every run (the point of 95e2185 N1), and re-serialising would store a manifest that
       differs from the publisher's. inventory.json is canonical as planned.
 
+      *(c) as built* (build.create/status/list/cancel): three additions to the text above,
+      each for the end user. `log.state` has three more values, recorded in the shapes as
+      `log_states_added`: `none` for an attempt that ended without running (cancelled or
+      superseded while QUEUED), which will never have a log, so `pending` would promise one;
+      `expired` for a terminal attempt past the 90-day retention with no final record;
+      `storage_unavailable` when the log store cannot be read, the stream's own word, so
+      that a status poll during a storage outage still reports the build's state instead of
+      a 503. A `final.json` once read is cached in memory (bounded): it is create-only, and
+      without the cache a list page would cost a storage round trip per item every time.
+      build.list refuses an unknown query parameter (400), the GET counterpart of strict
+      bodies, so a misspelt `?status=` does not quietly mean "no filter". Refusals carry the
+      state they were decided on: `bundleState` on BUNDLE_NOT_VALIDATED, `retryOfState` on
+      RETRY_NOT_TERMINAL, `state` on each cancel refusal. `supersededBuildId` is read from
+      the row, so a replay names what the first request superseded. The audit row for a
+      create stays T6's `build.admitted` (it now names `retryOf`), not a new
+      `build.create`.
+
 - [ ] **T9. Managed publication and unchanged runtime semantics.** Depends T7/T8.
       Wire successful builds into the shared version allocator with explicit activation.
       Consume only the server-generated `spec_json` contract; test its fingerprint and

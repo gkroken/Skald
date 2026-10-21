@@ -216,6 +216,7 @@
         "never": ["leaseOwner", "leaseGeneration", "workerHandle"],
         "cancel_outcomes": ["requested", "cancelled", "too_late", "overtaken"],
         "log_states": ["pending", "live", "finishing", "final"],
+        "log_states_added": {"none": "the attempt ended without running (cancelled or superseded while QUEUED): it never has a log", "expired": "terminal past the 90-day log retention with no final record left", "storage_unavailable": "the log store could not be read; the status still answers, as the stream does (stream.storage_outage)"},
         "errors": ["INVALID_ID", "CONTENT_NOT_FOUND", "BUILD_NOT_FOUND"]
       },
       "build.list": {
