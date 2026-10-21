@@ -69,7 +69,8 @@ public class LogStream {
     private final Map<String, AtomicInteger> perUser = new ConcurrentHashMap<>();
 
     public LogStream(BuildService service, StreamSettings settings) {
-        this(service, settings, Duration.ofSeconds(15), Duration.ofSeconds(1), Duration.ofSeconds(30));
+        // Backoff at most 10 s: with a read's 5 s budget the stream is never quiet past a keepalive.
+        this(service, settings, Duration.ofSeconds(15), Duration.ofSeconds(1), Duration.ofSeconds(10));
     }
 
     /** Test seam: the spec's keepalive and poll periods, shortened. */
@@ -165,7 +166,21 @@ public class LogStream {
                         sentState = state;
                         lastSent = System.nanoTime();
                     }
-                    sleep(backoff, deadline);
+                    // An outage is not silence: a proxy or client watching for life still sees
+                    // one within a keepalive, counting the next read's budget, which may hang too.
+                    long due = keepalive.minus(service.storeBudget()).toNanos();
+                    long wakeAt = System.nanoTime() + backoff.toNanos();
+                    while (!closed.get() && System.nanoTime() < Math.min(wakeAt, deadline)) {
+                        if (System.nanoTime() - lastSent >= due) {
+                            emitter.send(SseEmitter.event().comment("keepalive"));
+                            lastSent = System.nanoTime();
+                        }
+                        sleep(Duration.ofMillis(Math.min(100, Math.max(1, poll.toMillis()))), wakeAt);
+                    }
+                    if (System.nanoTime() - lastSent >= due) {
+                        emitter.send(SseEmitter.event().comment("keepalive"));
+                        lastSent = System.nanoTime();
+                    }
                     backoff = backoff.multipliedBy(2).compareTo(maxBackoff) > 0 ? maxBackoff : backoff.multipliedBy(2);
                     continue;
                 }

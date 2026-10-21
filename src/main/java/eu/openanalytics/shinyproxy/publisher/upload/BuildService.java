@@ -101,6 +101,51 @@ public class BuildService {
         this.logs = logs;
     }
 
+    /**
+     * How long one log-store read may take before it counts as the store being unavailable.
+     * A hung store (paused, not refusing) otherwise holds a read for the S3 client's socket
+     * timeout times its attempts, about 90 s: a status poll would hang and a stream go silent,
+     * neither saying storage_unavailable (found probing f859b52).
+     */
+    static final Duration STORE_BUDGET = Duration.ofSeconds(5);
+    private volatile Duration storeBudget = STORE_BUDGET;
+    private static final java.util.concurrent.ExecutorService READS =
+            java.util.concurrent.Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("skald-log-read-", 0).factory());
+
+    /** The budget of one log-store read. */
+    Duration storeBudget() {
+        return storeBudget;
+    }
+
+    /** Test seam: a shorter budget. */
+    BuildService withStoreBudget(Duration budget) {
+        this.storeBudget = budget;
+        return this;
+    }
+
+    /**
+     * One store read within the budget. Past it the read is abandoned -- interrupted, and
+     * left to end at the client's own timeout -- and the caller sees a storage failure.
+     */
+    private <T> T bounded(java.util.concurrent.Callable<T> read) {
+        java.util.concurrent.Future<T> f = READS.submit(read);
+        try {
+            return f.get(storeBudget.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            f.cancel(true);
+            throw new ObjectStoreException("the log store did not answer within " + storeBudget.toSeconds() + " s");
+        } catch (java.util.concurrent.ExecutionException e) {
+            if (e.getCause() instanceof RuntimeException r) {
+                throw r;
+            }
+            throw new ObjectStoreException("the log store could not be read", e.getCause());
+        } catch (InterruptedException e) {
+            f.cancel(true);
+            Thread.currentThread().interrupt();
+            throw new ObjectStoreException("interrupted while reading the log store", e);
+        }
+    }
+
     /** What a create resolved to: the attempt's status and whether this request made it. */
     public record Created(Map<String, Object> status, boolean created, UUID superseded) { }
 
@@ -293,11 +338,12 @@ public class BuildService {
         try {
             LogFinal fin = finalOf(contentId, buildId, false).orElse(null);
             long advertised = fin != null ? fin.lastSequence()
-                    : logs.readIndex(contentId, buildId).map(i -> i.lastSequence()).orElse(0L);
+                    : bounded(() -> logs.readIndex(contentId, buildId)).map(i -> i.lastSequence()).orElse(0L);
             long sequence = Math.max(1, from.sequence());
             long skip = from.sequence() == 0 ? 0 : from.record();
             for (; sequence <= advertised; sequence++, skip = 0) {
-                byte[] chunk = logs.readChunk(contentId, buildId, sequence).orElseThrow(() ->
+                long at = sequence;
+                byte[] chunk = bounded(() -> logs.readChunk(contentId, buildId, at)).orElseThrow(() ->
                         new ObjectStoreException("an advertised chunk is not in the store"));
                 List<String> lines = chunkLines(chunk);
                 for (int i = (int) Math.min(skip, lines.size()); i < lines.size(); i++) {
@@ -462,7 +508,7 @@ public class BuildService {
                 } else if (terminal) {
                     logState = "finishing";
                 } else {
-                    logState = logs.readIndex(contentId, buildId).isPresent() ? "live" : "pending";
+                    logState = bounded(() -> logs.readIndex(contentId, buildId)).isPresent() ? "live" : "pending";
                 }
             } catch (ObjectStoreException e) {
                 log.warn("build {}: the log store could not be read: {}", buildId, e.getMessage());
@@ -492,7 +538,7 @@ public class BuildService {
         if (cached != null) {
             return Optional.of(cached);
         }
-        Optional<LogFinal> read = logs.readFinal(contentId, buildId);
+        Optional<LogFinal> read = bounded(() -> logs.readFinal(contentId, buildId));
         read.ifPresent(f -> finals.put(buildId, f));
         return read;
     }

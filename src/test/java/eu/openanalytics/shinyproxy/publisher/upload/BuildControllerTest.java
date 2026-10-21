@@ -1415,4 +1415,116 @@ public class BuildControllerTest {
         assertEquals(0, streams.openStreams());
         streams.open(cb[0], cb[1], "cat", null);
     }
+    // ------------------------------------------------------------------ a hung store (found probing f859b52)
+
+    /** A store whose reads block while hung: a paused MinIO, which never refuses, only waits. */
+    private static ForwardingObjectStore hanging(boolean[] hung) {
+        return new ForwardingObjectStore(objects.store) {
+            @Override
+            public Optional<StoredObject> head(String bucket, String key) {
+                long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
+                while (hung[0] && System.nanoTime() < until) {
+                    try {
+                        Thread.sleep(20);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new ObjectStoreException("interrupted");
+                    }
+                }
+                return super.head(bucket, key);
+            }
+        };
+    }
+
+    @Test
+    public void aHungStoreIsUnavailableWithinTheBudgetForStatusListAndReplay() throws Exception {
+        UUID c = content();
+        UUID bundle = bundle(c, "VALIDATED");
+        UUID first = null;
+        for (int i = 0; i < 4; i++) {
+            UUID b = newBuild(c, bundle);
+            place(b, "RUNNING", false);
+            first = first == null ? b : first;
+        }
+        boolean[] hung = {true};
+        BuildService service = new BuildService(jdbc, app.getBean(BuildAdmission.class),
+            app.getBean(BuildCoordinator.class), new BuildLogWriter(hanging(hung), LOGS))
+            .withStoreBudget(Duration.ofMillis(300));
+        try {
+            long t0 = System.nanoTime();
+            assertEquals("storage_unavailable", ((Map<?, ?>) service.status(c, first, p -> p).get("log")).get("state"));
+            Map<String, Object> page = service.list(c, List.of(), null, 50, p -> p);
+            for (Object item : (List<?>) page.get("items")) {
+                assertEquals("storage_unavailable", ((Map<?, ?>) ((Map<?, ?>) item).get("log")).get("state"));
+            }
+            UUID b = first;
+            TransportException e = org.junit.jupiter.api.Assertions.assertThrows(TransportException.class,
+                () -> service.replay(c, b, null, -1));
+            assertEquals(TransportError.STORAGE_UNAVAILABLE, e.code());
+            long ms = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+            // Three requests, each giving up after one 300 ms read: not the client's ~90 s.
+            assertTrue(ms < 3000, ms + " ms");
+        } finally {
+            hung[0] = false;
+        }
+        assertEquals("pending", ((Map<?, ?>) service.status(c, first, p -> p).get("log")).get("state"));
+    }
+
+    @Test
+    public void aStreamOverAHungStoreSaysSoAndKeepsTalkingThenCarriesOn() throws Exception {
+        UUID[] cb = liveLog();
+        boolean[] hung = {false};
+        BuildService service = new BuildService(jdbc, app.getBean(BuildAdmission.class),
+            app.getBean(BuildCoordinator.class), new BuildLogWriter(hanging(hung), LOGS))
+            // A read budget near the keepalive, so a keepalive left until after the next read
+            // would leave the stream quiet for ~900 ms; counting the budget keeps it near 400.
+            .withStoreBudget(Duration.ofMillis(400));
+        Recorder recorder = new Recorder();
+        LogStream streams = new LogStream(service, new StreamSettings(4, 4, Duration.ofSeconds(8)),
+            Duration.ofMillis(500), Duration.ofMillis(100), Duration.ofMillis(300)) {
+            @Override
+            org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter(long timeoutMillis) {
+                return recorder;
+            }
+        };
+        streams.open(cb[0], cb[1], "u", null);
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (recorder.sent.stream().noneMatch(x -> x.contains("id:2.3")) && System.nanoTime() < until) {
+            Thread.sleep(50);
+        }
+        int before = recorder.sent.size();
+        hung[0] = true;
+        long hungAt = System.nanoTime();
+        until = hungAt + TimeUnit.SECONDS.toNanos(3);
+        while (recorder.sent.stream().noneMatch(x -> x.contains("storage_unavailable")) && System.nanoTime() < until) {
+            Thread.sleep(20);
+        }
+        long saidMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - hungAt);
+        assertTrue(recorder.sent.stream().anyMatch(x -> x.contains("storage_unavailable")), "never said: " + recorder.sent);
+        assertTrue(saidMs < 2000, "said after " + saidMs + " ms");
+        // Watch the hang for 3 s: never more than a keepalive (500 ms) between two writes.
+        long last = System.nanoTime();
+        int seen = recorder.sent.size();
+        long longest = 0;
+        long watchUntil = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (System.nanoTime() < watchUntil) {
+            if (recorder.sent.size() != seen) {
+                seen = recorder.sent.size();
+                last = System.nanoTime();
+            }
+            longest = Math.max(longest, System.nanoTime() - last);
+            Thread.sleep(10);
+        }
+        List<String> during = new ArrayList<>(recorder.sent.subList(before, recorder.sent.size()));
+        assertTrue(during.stream().filter(x -> x.contains(":keepalive")).count() >= 3,
+            "a hung store is not silence: " + during);
+        assertTrue(TimeUnit.NANOSECONDS.toMillis(longest) <= 650, "quiet for " + TimeUnit.NANOSECONDS.toMillis(longest)
+            + " ms during the hang");
+        hung[0] = false;
+        logs.appendChunk(cb[0], cb[1], 3, records(line(11, "eleven")));
+        logs.publishIndex(cb[0], cb[1], 1);
+        assertTrue(recorder.done.await(15, TimeUnit.SECONDS));
+        String all = String.join("", recorder.sent);
+        assertTrue(all.indexOf("id:3.1") > all.indexOf("storage_unavailable"), "carried on: " + all);
+    }
 }

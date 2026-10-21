@@ -275,7 +275,7 @@
       "model": "pull: each subscriber reads committed chunks from storage when its previous write has gone out. Nothing the build writes waits for a reader.",
       "supersedes": "the build.logs.stream note's 'bounded subscriber queue': there is no queue at all, which is the stronger form of the same bound. The frozen note is left unedited.",
       "limits": {"per_instance": 64, "per_user": 8, "connection_minutes": 30, "keys": "skald.builds.log-stream.per-instance, per-user, connection (spec/configuration-v1.json)"},
-      "storage_outage": "a state event with logState storage_unavailable, then retries with backoff until the connection limit"
+      "storage_outage": "a state event with logState storage_unavailable, then retries with backoff until the connection limit", "store_budget": "each log-store read is given 5 s; past it the store counts as unavailable, so a hung store (paused, not refusing) is reported within seconds by status, list, replay (503) and the stream, and the stream keeps its keepalives through the outage"
     },
     "cancel_replies": [
       {"state": "QUEUED",      "requested": false, "status": 202, "outcome": "cancelled"},
