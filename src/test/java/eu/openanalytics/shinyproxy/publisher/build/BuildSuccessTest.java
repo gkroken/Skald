@@ -193,6 +193,180 @@ public class BuildSuccessTest {
         assertEquals(0, versions(build));
     }
 
+    /**
+     * A TCP forwarder to PostgreSQL on a port of its own that stays the same, so the database
+     * can go away and come back at one address: down, it refuses every new connection and
+     * resets the open ones, which is what the driver meets when the database host is gone.
+     */
+    private static final class Outage implements AutoCloseable {
+        private final int port;
+        private final java.util.Set<java.net.Socket> open = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        private volatile java.net.ServerSocket server;
+
+        Outage() throws java.io.IOException {
+            try (java.net.ServerSocket probe = new java.net.ServerSocket(0)) {
+                port = probe.getLocalPort();
+            }
+            up();
+        }
+
+        String url() {
+            return POSTGRES.getJdbcUrl().replaceFirst("//[^/]+/", "//localhost:" + port + "/");
+        }
+
+        synchronized void up() throws java.io.IOException {
+            java.net.ServerSocket s = new java.net.ServerSocket();
+            s.setReuseAddress(true);
+            s.bind(new java.net.InetSocketAddress("localhost", port));
+            server = s;
+            Thread accept = new Thread(() -> {
+                while (!s.isClosed()) {
+                    try {
+                        java.net.Socket client = s.accept();
+                        java.net.Socket db = new java.net.Socket(POSTGRES.getHost(), POSTGRES.getFirstMappedPort());
+                        open.add(client);
+                        open.add(db);
+                        pipe(client, db);
+                        pipe(db, client);
+                    } catch (java.io.IOException closed) {
+                        return;
+                    }
+                }
+            });
+            accept.setDaemon(true);
+            accept.start();
+        }
+
+        private void pipe(java.net.Socket from, java.net.Socket to) {
+            Thread t = new Thread(() -> {
+                try {
+                    from.getInputStream().transferTo(to.getOutputStream());
+                } catch (java.io.IOException ignored) {
+                    // one side closed
+                } finally {
+                    try {
+                        from.close();
+                        to.close();
+                    } catch (java.io.IOException ignored) {
+                        // closing
+                    }
+                }
+            });
+            t.setDaemon(true);
+            t.start();
+        }
+
+        synchronized void down() throws java.io.IOException {
+            server.close();
+            for (java.net.Socket s : open) {
+                try {
+                    s.setSoLinger(true, 0);
+                    s.close();
+                } catch (java.io.IOException alreadyClosed) {
+                    // the other side went first
+                }
+            }
+            open.clear();
+        }
+
+        @Override
+        public void close() throws java.io.IOException {
+            down();
+        }
+    }
+
+    /**
+     * The database really goes away under succeed() (00cfc58 N1): the driver's own failure and
+     * Spring's own translation of it are what the runner meets, not an exception a test made
+     * up. It must land in mayHeal, be retried, and end in one version once the database is back.
+     */
+    @Test
+    public void aRealDatabaseOutageAtSuccessIsRetriedUntilItReturns() throws Exception {
+        UUID build = queued();
+        try (Outage outage = new Outage()) {
+            JdbcTemplate through = new JdbcTemplate(new DriverManagerDataSource(outage.url(), POSTGRES.getUsername(),
+                POSTGRES.getPassword()));
+            BuildCoordinator coordinator = new BuildCoordinator(through, ONE);
+            java.util.List<Throwable> met = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            AtomicInteger tries = new AtomicInteger();
+            Thread restore = new Thread(() -> {
+                try {
+                    Thread.sleep(2500);
+                    outage.up();
+                } catch (InterruptedException | java.io.IOException e) {
+                    met.add(e);
+                }
+            });
+            BuildRunner runner = new BuildRunner(coordinator, ONE, VERIFIED, (lease, runtime) -> {
+                if (tries.incrementAndGet() == 1) {
+                    try {
+                        outage.down();
+                    } catch (java.io.IOException e) {
+                        throw new IllegalStateException(e);
+                    }
+                    restore.start();
+                }
+                try {
+                    coordinator.succeed(lease, runtime);
+                } catch (RuntimeException e) {
+                    met.add(e);
+                    throw e;
+                }
+            });
+            try {
+                BuildRunner.Result result = runner.runOnce("n1", BUILT);
+                assertEquals(BuildRunner.Result.SUCCEEDED, result, "met: " + met);
+            } finally {
+                restore.join(30_000);
+            }
+            assertTrue(!met.isEmpty(), "the outage was never met");
+            for (Throwable e : met) {
+                assertTrue(BuildRunner.mayHeal(e), "a real outage read as a refusal: " + e);
+            }
+            assertTrue(tries.get() >= 2, "retried");
+        }
+        assertEquals("SUCCEEDED", state(build));
+        assertEquals(1, versions(build));
+    }
+
+    /**
+     * The worker dies between the complete log and the success: nothing calls succeed(), the
+     * lease lapses, and the reaper makes the attempt INTERRUPTED with no version -- a verified,
+     * logged image does not become a version by itself.
+     */
+    @Test
+    public void aWorkerKilledBetweenTheLogAndTheSuccessLeavesNoVersion() {
+        UUID build = queued();
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        Lease lease = coordinator.claim("n1").orElseThrow().lease();
+        coordinator.toPublishing(lease, DIGEST, PROVENANCE);
+        coordinator.markLogComplete(lease, 3);
+        // ...and the process is gone: no renewal, no succeed().
+        jdbc.update("UPDATE skald.build SET lease_expires_at = now() - interval '1 second' WHERE id = ?", build);
+        assertEquals(1, coordinator.reap());
+        assertEquals("INTERRUPTED", state(build));
+        assertEquals(0, versions(build));
+        assertEquals(false, coordinator.succeededUnder(lease));
+    }
+
+    /** A push or log failure (the publication check, or the driver) is FAILED and never a version. */
+    @Test
+    public void aFailedPublicationOrBuildMakesNoVersion() {
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, ONE);
+        UUID unverified = queued();
+        assertEquals(BuildRunner.Result.FAILED, new BuildRunner(coordinator, ONE, (b, image) -> {
+            throw new IllegalStateException("the registry has no such manifest");
+        }).runOnce("n1", BUILT));
+        assertEquals("PUBLISH_VERIFY", jdbc.queryForObject("SELECT error_code FROM skald.build WHERE id = ?",
+            String.class, unverified));
+        assertEquals(0, versions(unverified));
+        UUID failed = queued();
+        assertEquals(BuildRunner.Result.FAILED, new BuildRunner(coordinator, ONE, VERIFIED).runOnce("n1",
+            (b, stop) -> new BuildDriver.Failed("LOG_FAILED", "the log could not be written", PROVENANCE)));
+        assertEquals("FAILED", state(failed));
+        assertEquals(0, versions(failed));
+    }
+
     /** What may heal, and what may not: the classes the retry is limited to. */
     @Test
     public void onlyAFailureThatMayHealIsRetried() {

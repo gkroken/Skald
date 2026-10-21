@@ -162,6 +162,15 @@ public class ContentAdminControllerTest {
             Assertions.assertEquals(200, rollback.code(), body(rollback));
         }
         Assertions.assertEquals(List.of(specIdOf(id, 1)), registryIds(), "rollback did not take effect");
+        // A client whose reply was lost sends the same activation again (T9 (d)): the same
+        // answer, nothing else moved.
+        try (Response again = put(admin, "/admin/content/" + id + "/active-version",
+            """
+            {"version":1}
+            """)) {
+            Assertions.assertEquals(200, again.code(), body(again));
+        }
+        Assertions.assertEquals(List.of(specIdOf(id, 1)), registryIds(), "a repeated activation moved something");
         Assertions.assertNotNull(specProvider.getSpec(specIdOf(id, 1)), "the active version resolves");
         Assertions.assertNull(specProvider.getSpec(specIdOf(id, 2)),
             "with nothing running on it, the rolled-back-from version must stop resolving — "
