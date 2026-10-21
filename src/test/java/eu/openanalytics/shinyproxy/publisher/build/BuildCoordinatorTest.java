@@ -351,7 +351,9 @@ public class BuildCoordinatorTest {
             boolean requested = (Boolean) row[1];
             UUID build = at(state, requested);
             Object before = requestedAt(build);
-            assertEquals(row[2], coordinator.cancel(contentOf(build), build, "alice"), state + " requested=" + requested);
+            BuildCoordinator.CancelDecision decision = coordinator.decideCancel(contentOf(build), build, "alice");
+            assertEquals(row[2], decision.outcome(), state + " requested=" + requested);
+            assertEquals(state, decision.state(), state + " requested=" + requested + ": not the locked state");
             assertEquals(state, state(build), state + " requested=" + requested + " changed state");
             assertEquals(before, requestedAt(build), state + " requested=" + requested + " changed the request");
         }
@@ -364,7 +366,8 @@ public class BuildCoordinatorTest {
         assertEquals(first, requestedAt(running));
         // QUEUED: cancelled at once, with its request recorded, so a retry is the CANCELLED-requested row.
         UUID queued = at("QUEUED", false);
-        assertEquals(BuildCoordinator.CancelOutcome.CANCELLED, coordinator.cancel(contentOf(queued), queued, "alice"));
+        assertEquals(new BuildCoordinator.CancelDecision(BuildCoordinator.CancelOutcome.CANCELLED, "QUEUED"),
+            coordinator.decideCancel(contentOf(queued), queued, "alice"), "decided on QUEUED, not the state after");
         assertEquals("CANCELLED", state(queued));
         assertEquals(BuildCoordinator.CancelOutcome.CANCELLED, coordinator.cancel(contentOf(queued), queued, "alice"));
     }

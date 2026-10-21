@@ -74,7 +74,7 @@ public class BuildService {
 
     private final JdbcTemplate jdbc;
     private final BuildAdmission admission;
-    private final BuildCoordinator coordinator;
+    private final Canceller canceller;
     private final BuildLogWriter logs;
     private final Map<UUID, LogFinal> finals = Collections.synchronizedMap(
             new LinkedHashMap<>(256, 0.75f, true) {
@@ -86,9 +86,18 @@ public class BuildService {
 
     public BuildService(JdbcTemplate jdbc, BuildAdmission admission, BuildCoordinator coordinator,
                         BuildLogWriter logs) {
+        this(jdbc, admission, coordinator::decideCancel, logs);
+    }
+
+    /** The coordinator's cancel decision; a seam so a test can move the row on after it commits. */
+    interface Canceller {
+        BuildCoordinator.CancelDecision decide(UUID contentId, UUID buildId, String actor);
+    }
+
+    BuildService(JdbcTemplate jdbc, BuildAdmission admission, Canceller canceller, BuildLogWriter logs) {
         this.jdbc = jdbc;
         this.admission = admission;
-        this.coordinator = coordinator;
+        this.canceller = canceller;
         this.logs = logs;
     }
 
@@ -129,7 +138,7 @@ public class BuildService {
         if (rows.isEmpty()) {
             throw notFound(contentId, buildId);
         }
-        return item(rows.get(0), url);
+        return item(rows.get(0), url, new StoreReads());
     }
 
     /** A page of build.list: newest first, keyset on (created_at, id). */
@@ -167,8 +176,9 @@ public class BuildService {
         args.add(limit + 1);
         List<Map<String, Object>> rows = jdbc.queryForList(sql.toString(), args.toArray());
         List<Map<String, Object>> items = new ArrayList<>();
+        StoreReads reads = new StoreReads();
         for (Map<String, Object> row : rows.subList(0, Math.min(limit, rows.size()))) {
-            items.add(item(row, url));
+            items.add(item(row, url, reads));
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("items", items);
@@ -178,17 +188,20 @@ public class BuildService {
 
     /** What a cancel did: the outcome word and the attempt after it. A refusal is thrown. */
     public Map<String, Object> cancel(UUID contentId, UUID buildId, String actor, UnaryOperator<String> url) {
-        BuildCoordinator.CancelOutcome outcome = coordinator.cancel(contentId, buildId, actor);
+        BuildCoordinator.CancelDecision decision = canceller.decide(contentId, buildId, actor);
+        BuildCoordinator.CancelOutcome outcome = decision.outcome();
         if (outcome == BuildCoordinator.CancelOutcome.NOT_FOUND) {
             throw notFound(contentId, buildId);
         }
-        Map<String, Object> build = status(contentId, buildId, url);
-        Object state = build.get("state");
+        // A refusal names the state it was decided on, read under the row lock; a read now
+        // may already see the attempt moved on (9baa932-F1). A 202 reports the attempt as it
+        // is after the cancel.
+        String state = decision.state();
         switch (outcome) {
             case CANCELLED, REQUESTED -> {
                 Map<String, Object> out = new LinkedHashMap<>();
                 out.put("outcome", outcome == BuildCoordinator.CancelOutcome.CANCELLED ? "cancelled" : "requested");
-                out.put("build", build);
+                out.put("build", status(contentId, buildId, url));
                 return out;
             }
             case REFUSED_PUBLISHING -> throw new TransportException(TransportError.CANCEL_REFUSED_PUBLISHING,
@@ -203,7 +216,12 @@ public class BuildService {
 
     // ------------------------------------------------------------------ the shape
 
-    private Map<String, Object> item(Map<String, Object> r, UnaryOperator<String> url) {
+    /** Storage reads within one request: after the first failure, no more are made. */
+    private static final class StoreReads {
+        boolean down;
+    }
+
+    private Map<String, Object> item(Map<String, Object> r, UnaryOperator<String> url, StoreReads reads) {
         UUID id = (UUID) r.get("id");
         UUID contentId = (UUID) r.get("content_id");
         String state = (String) r.get("state");
@@ -233,7 +251,7 @@ public class BuildService {
         out.put("recipe", json((String) r.get("recipe")));
         out.put("effectiveLimits", json((String) r.get("effective_limits")));
         out.put("cancel", cancel(state, r.get("cancel_requested_at")));
-        out.put("log", log(contentId, id, state, r.get("started_at"), r.get("finished_at")));
+        out.put("log", log(contentId, id, state, r.get("started_at"), r.get("finished_at"), reads));
         String self = "/admin/content/" + contentId + "/builds/" + id;
         Map<String, Object> links = new LinkedHashMap<>();
         links.put("self", url.apply(self));
@@ -273,7 +291,8 @@ public class BuildService {
      * record); {@code none} for an attempt that never ran, and {@code expired} past retention.
      * A store that cannot be read is {@code storage_unavailable}: the status still answers.
      */
-    private Map<String, Object> log(UUID contentId, UUID buildId, String state, Object startedAt, Object finishedAt) {
+    private Map<String, Object> log(UUID contentId, UUID buildId, String state, Object startedAt, Object finishedAt,
+                                    StoreReads reads) {
         boolean terminal = TERMINAL.contains(state);
         String logState;
         LogFinal fin = null;
@@ -281,12 +300,18 @@ public class BuildService {
             // Nothing is written before a claim: QUEUED is pending, and an attempt that ended
             // without running (cancelled or superseded while queued) never has a log.
             logState = terminal ? "none" : "pending";
+        } else if (reads.down) {
+            // One failed read already this request: the rest would each wait out the SDK's
+            // retries for the same answer (9baa932 N2).
+            logState = "storage_unavailable";
         } else {
+            boolean pastRetention = terminal
+                    && ((Timestamp) finishedAt).toInstant().isBefore(Instant.now().minus(LOG_RETENTION));
             try {
-                fin = finalOf(contentId, buildId).orElse(null);
+                fin = finalOf(contentId, buildId, pastRetention).orElse(null);
                 if (fin != null) {
                     logState = "final";
-                } else if (terminal && ((Timestamp) finishedAt).toInstant().isBefore(Instant.now().minus(LOG_RETENTION))) {
+                } else if (pastRetention) {
                     logState = "expired";
                 } else if (terminal) {
                     logState = "finishing";
@@ -295,6 +320,7 @@ public class BuildService {
                 }
             } catch (ObjectStoreException e) {
                 log.warn("build {}: the log store could not be read: {}", buildId, e.getMessage());
+                reads.down = true;
                 logState = "storage_unavailable";
             }
         }
@@ -311,8 +337,12 @@ public class BuildService {
         return out;
     }
 
-    private Optional<LogFinal> finalOf(UUID contentId, UUID buildId) {
-        LogFinal cached = finals.get(buildId);
+    /**
+     * Past retention the store is asked, never the cache: retention may have deleted the
+     * record, and the status must then say expired, as replay does (9baa932 N1).
+     */
+    private Optional<LogFinal> finalOf(UUID contentId, UUID buildId, boolean pastRetention) {
+        LogFinal cached = pastRetention ? null : finals.get(buildId);
         if (cached != null) {
             return Optional.of(cached);
         }

@@ -563,6 +563,83 @@ public class BuildControllerTest {
         assertEquals("pending", ((Map<?, ?>) service.status(running[0], running[1], p -> p).get("log")).get("state"));
     }
 
+    /** One failed read ends a request's storage reads: the rest of the page is not asked (9baa932 N2). */
+    @Test
+    public void aListStopsReadingTheStoreAfterItsFirstFailure() throws Exception {
+        UUID c = content();
+        UUID bundle = bundle(c, "VALIDATED");
+        for (int i = 0; i < 4; i++) {
+            place(newBuild(c, bundle), "RUNNING", false);
+        }
+        int[] reads = {0};
+        ForwardingObjectStore failing = new ForwardingObjectStore(objects.store) {
+            @Override
+            public Optional<StoredObject> head(String bucket, String key) {
+                reads[0]++;
+                throw new ObjectStoreException("injected: the store is down");
+            }
+        };
+        BuildService service = new BuildService(jdbc, app.getBean(BuildAdmission.class),
+            app.getBean(BuildCoordinator.class), new BuildLogWriter(failing, LOGS));
+        Map<String, Object> page = service.list(c, List.of(), null, 50, p -> p);
+        List<?> items = (List<?>) page.get("items");
+        assertEquals(4, items.size());
+        for (Object item : items) {
+            assertEquals("storage_unavailable", ((Map<?, ?>) ((Map<?, ?>) item).get("log")).get("state"));
+        }
+        assertEquals(1, reads[0], "after the first failure the store was asked again");
+        // A new request asks again.
+        service.status(c, UUID.fromString((String) ((Map<?, ?>) items.get(0)).get("id")), p -> p);
+        assertEquals(2, reads[0]);
+    }
+
+    /**
+     * Past retention a cached final record is not trusted: retention may have deleted it, and
+     * the status then says expired, as replay does (9baa932 N1).
+     */
+    @Test
+    public void aCachedFinalRecordIsNotTrustedPastRetention() throws Exception {
+        UUID[] cb = at("FAILED", false);
+        logs.finalise(cb[0], cb[1], 1, "FAILED:BUILD_FAILED", false);
+        boolean[] deleted = {false};
+        ForwardingObjectStore store = new ForwardingObjectStore(objects.store) {
+            @Override
+            public Optional<StoredObject> head(String bucket, String key) {
+                return deleted[0] && key.endsWith("/final.json") ? Optional.empty() : super.head(bucket, key);
+            }
+        };
+        BuildService service = new BuildService(jdbc, app.getBean(BuildAdmission.class),
+            app.getBean(BuildCoordinator.class), new BuildLogWriter(store, LOGS));
+        assertEquals("final", ((Map<?, ?>) service.status(cb[0], cb[1], p -> p).get("log")).get("state"));
+        deleted[0] = true;
+        assertEquals("final", ((Map<?, ?>) service.status(cb[0], cb[1], p -> p).get("log")).get("state"),
+            "within retention the record, once read, is the record");
+        jdbc.update("UPDATE skald.build SET finished_at = now() - interval '91 days' WHERE id = ?", cb[1]);
+        assertEquals("expired", ((Map<?, ?>) service.status(cb[0], cb[1], p -> p).get("log")).get("state"));
+    }
+
+    /**
+     * A refusal names the state the cancel was decided on, though the attempt moves on before
+     * the reply is written (9baa932-F1): the publication finishing right after the decision.
+     */
+    @Test
+    public void aCancelRefusalNamesTheStateItWasDecidedOn() throws Exception {
+        UUID[] cb = at("PUBLISHING", false);
+        BuildCoordinator coordinator = app.getBean(BuildCoordinator.class);
+        BuildService service = new BuildService(jdbc, app.getBean(BuildAdmission.class), (c, b, actor) -> {
+            BuildCoordinator.CancelDecision d = coordinator.decideCancel(c, b, actor);
+            jdbc.update("UPDATE skald.build SET state = 'SUCCEEDED', finished_at = now(), lease_owner = NULL,"
+                + " lease_expires_at = NULL WHERE id = ?", b);
+            return d;
+        }, logs);
+        TransportException refused = org.junit.jupiter.api.Assertions.assertThrows(TransportException.class,
+            () -> service.cancel(cb[0], cb[1], "adminuser", p -> p));
+        assertEquals(TransportError.CANCEL_REFUSED_PUBLISHING, refused.code());
+        assertEquals("PUBLISHING", refused.extra().get("state"));
+        assertTrue(refused.getMessage().startsWith("build " + cb[1] + " is PUBLISHING:"), refused.getMessage());
+        assertEquals("SUCCEEDED", state(cb[1]));
+    }
+
     // ------------------------------------------------------------------ build.list
 
     @Test

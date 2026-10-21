@@ -351,14 +351,26 @@ public final class BuildCoordinator {
 
     // ------------------------------------------------------------------ cancel and reap
 
+    /**
+     * What a cancel decided, and the state it was decided on: the one read under the row
+     * lock. A refusal names this state, not a later read's, which the driver may already have
+     * moved on (9baa932-F1). Null state for NOT_FOUND.
+     */
+    public record CancelDecision(CancelOutcome outcome, String state) { }
+
     /** A user's cancel request, scoped to the content item the build belongs to. */
     public CancelOutcome cancel(UUID contentId, UUID buildId, String actor) {
+        return decideCancel(contentId, buildId, actor).outcome();
+    }
+
+    /** As {@link #cancel}, with the state the outcome was decided on. */
+    public CancelDecision decideCancel(UUID contentId, UUID buildId, String actor) {
         return tx.execute(status -> {
             List<Map<String, Object>> rows = jdbc.queryForList("SELECT state,"
                     + " cancel_requested_at IS NOT NULL AS requested FROM skald.build WHERE id = ?"
                     + " AND content_id = ? FOR UPDATE", buildId, contentId);
             if (rows.isEmpty()) {
-                return CancelOutcome.NOT_FOUND;
+                return new CancelDecision(CancelOutcome.NOT_FOUND, null);
             }
             String state = (String) rows.get(0).get("state");
             boolean requested = (Boolean) rows.get(0).get("requested");
@@ -379,7 +391,7 @@ public final class BuildCoordinator {
                 default -> CancelOutcome.ALREADY_FINISHED;
             };
             audit(actor, "build.cancel." + outcome.name().toLowerCase(java.util.Locale.ROOT), buildId, Map.of());
-            return outcome;
+            return new CancelDecision(outcome, state);
         });
     }
 

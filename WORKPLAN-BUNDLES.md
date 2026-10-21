@@ -3234,6 +3234,9 @@ below are marked passed by this planning document.
       that a status poll during a storage outage still reports the build's state instead of
       a 503. A `final.json` once read is cached in memory (bounded): it is create-only, and
       without the cache a list page would cost a storage round trip per item every time.
+      Past retention the store is asked again, so a deleted record reads `expired`; and
+      the first failed storage read of a request ends that request's reads, so a page
+      during an outage does not wait out the SDK's retries once per item.
       build.list refuses an unknown query parameter (400), the GET counterpart of strict
       bodies, so a misspelt `?status=` does not quietly mean "no filter". Refusals carry the
       state they were decided on: `bundleState` on BUNDLE_NOT_VALIDATED, `retryOfState` on
