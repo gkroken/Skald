@@ -3321,8 +3321,10 @@ below are marked passed by this planning document.
 
       *(a) The runtime spec contract.* `spec/runtime-spec-v1.json` defines the only
       spec_json a built version carries: `{"schema": "skald.runtime/v1", "port": 3838,
-      "user": "<uid>:<gid>", "language": "r"|"python", "base": "<catalog id>",
-      "image_digest": "sha256:<64 hex>"}`. Every value is the server's own record, derived
+      "user": "<uid>:<gid>", "language": "r"|"python", "base": "<catalog id>"}`. The image
+      is stated once, in `content_version.image`, which for a built version must be
+      digest-pinned (`<repo>@sha256:<64 hex>`); spec_json does not repeat it, so the two
+      cannot disagree (29053ce-F1). Every value is the server's own record, derived
       at success from the build row's provenance and the base catalog, never from the
       uploaded manifest. Facts of the image (port, user) live in spec_json; policy
       (memory and CPU limits) does not, so an operator can change it without rebuilding:
@@ -3330,10 +3332,18 @@ below are marked passed by this planning document.
       `1`) are applied when the ProxySpec is built. ContentSpecRepository consumes it:
       `dockerUser` = user, the port mapping = port, memory and CPU limits from config,
       labels naming content, version and build. **The spec fingerprint includes spec_json and
-      the limits**, so a changed record is a new ProxySpec. **Legacy `{}`** (a version an
-      admin made from an image, spine #1) keeps today's behaviour exactly: image, port 3838,
-      no user override and no limits. The runtime limits are a property of built versions,
-      whose image Skald made and knows. Any other schema, or a v1 document that fails the
+      the limits**, so a changed record is a new ProxySpec. **Legacy is decided by where a
+      version came from, not by its document** (29053ce-F2): a version with no build
+      (`build_id IS NULL`, an admin's direct image, spine #1) keeps `{}` and today's
+      behaviour exactly: image, port 3838, no user override and no limits. That is
+      deliberate. Those images are admin-supplied, not bundles, and "unchanged runtime
+      semantics" is what T9 promises them. The security invariant's resource limits cover
+      bundle-built content, which is untrusted code. A version WITH a build must carry a
+      valid v1 document and a digest-pinned image, or it is unresolvable, so a `{}` there (a
+      null passed to succeed, a bug, a migration) can never run unbounded. V6 adds the same
+      rule as a CHECK, `build_id IS NULL OR spec_json->>'schema' = 'skald.runtime/v1'`. It is
+      additive, and no row breaks it today, because no build has reached SUCCEEDED. For a
+      version without a build, any other schema, or a v1 document that fails the
       schema, makes that version unresolvable: logged once, fail closed, never guessed at.
       Tests: fingerprint, legacy, refused documents, every field reaching the ContainerSpec.
 
@@ -3350,12 +3360,16 @@ below are marked passed by this planning document.
       signed-in user. It checks that the page loads and that the Shiny WebSocket carries a
       round trip. `docker inspect` on the app container gives the user (`Config.User` =
       the base's uid:gid), the memory and CPU limits, no binds or volumes, and the
-      platform's network. Identity: the app sees the authenticated user, and an
-      `X-SP-UserId` sent by the client does not reach it (the Python fixture echoes its
-      request headers).
+      platform's network. Identity: the app sees the authenticated user and
+      groups. Every identity header the engine injects (`X-SP-UserId`, `X-SP-UserGroups`
+      and any other `X-SP-*`), sent forged by the client, does not reach the app. Only the
+      authenticated values do. The Python fixture echoes its request headers.
 
       *(d) Faults.* Each one separately:
-      - the version transaction fails (DB unavailable at succeed);
+      - the version transaction fails (DB unavailable at succeed): succeed is retried with
+        backoff while the lease holds (safe, as it is fenced and happens exactly once);
+        if the database stays away past the lease, the attempt ends INTERRUPTED. Never
+        FAILED, which needs the database to record it, and never a version;
       - the worker is killed between the complete log and succeed;
       - succeed is replayed (exactly one version);
       - a cancel requested during RUNNING lands after PUBLISHING (too_late, SUCCEEDED, one
@@ -3370,7 +3384,8 @@ below are marked passed by this planning document.
       upstream engine change, the plan says ask first), and per-repository registry push
       scope plus its gateway attack row (a registry token choice, likely a new dependency).
       Until then, app containers have the memory limit and the engine's default swap
-      (as much again).
+      (as much again). **T9 does not close while the memory-swap item is open**, unless the
+      user defers it explicitly. The frozen text says it is owed here.
 
 - [ ] **T10. Live acceptance, rollback, GC and final independent regression review.**
       Depends all above. **Signed provenance (user, 2026-10-10):** the SLSA attestation T7
