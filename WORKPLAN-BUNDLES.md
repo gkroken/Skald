@@ -2911,7 +2911,7 @@ below are marked passed by this planning document.
       Docker hosts with a capacity each and a Kubernetes runtime (the later multi-host
       track), microVM isolation (needs KVM; this host has none).
 
-- [ ] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
+- [x] **T8. Admin upload, status and live logs.** Depends T4–T7. Add the narrow admin
       transport, streaming/replay and plain-text view; exercise the complete T2 corpus
       through HTTP. Real OIDC Alice allow/Bob deny/signed-out deny for every endpoint,
       cross-content IDs and every log cursor/object lookup; hostile-origin form/fetch
@@ -3268,6 +3268,21 @@ below are marked passed by this planning document.
       INTERRUPTED within its one-day window. A `finishing` stream therefore ends once a
       worker-enabled instance has swept; an attempt lost while no such instance ran for a
       whole day stays `finishing`, and its stream closes at the connection limit each time.
+      **T8 closed 2026-10-21** (a 1fda166..e42b832, b 2a2186f..31cb2e9, c 9baa932..a27bbf1,
+      d fbe1487..4606275, e 8dc88f1..37566ad, f f859b52..b8703c7, each reviewed PASS). On
+      the real dev stack: `bash dev/smoke.sh` covers every T8 endpoint, with the deny cases
+      first; `dev/corpus-http.py` runs T2's 91 fixtures through HTTP, 91/91;
+      `dev/fault-probe.py` breaks MinIO (stopped and paused) under upload and validation and
+      kills the instance mid-validation, 14/14. That probing found three faults, each fixed
+      in its own commit: a hung log store silencing status and streams (now a 5 s budget per
+      read), an upload refusal that left a still-sending client waiting (now Connection:
+      close), and an upload to a vanished store hanging for the kernel's TCP retransmission
+      time (now a 60 s progress watchdog). Full suite at b8703c7: 1703 tests, 0 failures,
+      0 errors, 8 skipped. **Carried:** (1) log retention is not implemented yet (T10), so
+      `expired` and LOG_EXPIRED are decided by age alone until a collector deletes logs;
+      (2) the per-user stream map keeps one small counter per distinct user (bounded by the
+      user count); (3) refusals made before the controller (Spring Security) do not close
+      the connection, which only costs a caller who is not signed in.
       build.list refuses an unknown query parameter (400), the GET counterpart of strict
       bodies, so a misspelt `?status=` does not quietly mean "no filter". Refusals carry the
       state they were decided on: `bundleState` on BUNDLE_NOT_VALIDATED, `retryOfState` on

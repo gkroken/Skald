@@ -258,7 +258,18 @@ try:
     print("== validation, instance killed ==")
     cid = content(); bid = bundle(cid)
     check("the upload completes", put(cid, bid, slow)[0], 200)
-    time.sleep(1)
+    # The kill must land on a validator at work, or the case proves nothing about takeover
+    # (b8703c7 N1): wait until the row shows a live claim.
+    owner = None
+    for _ in range(100):
+        owner = subprocess.run(["docker", "exec", "skald-dev-postgres-1", "psql", "-U", "skald", "-d", "skald",
+                                "-tAc", "SELECT validation_owner FROM skald.bundle WHERE id = '%s'"
+                                " AND validation_lease_expires_at > now()" % bid],
+                               capture_output=True, text=True).stdout.strip()
+        if owner:
+            break
+        time.sleep(0.1)
+    check("a validator holds the bundle when the instance is killed", bool(owner), True)
     docker("kill", SKALD)
     docker("start", SKALD)
     wait_up()
