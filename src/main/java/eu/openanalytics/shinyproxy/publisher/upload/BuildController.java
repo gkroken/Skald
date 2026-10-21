@@ -64,11 +64,15 @@ public class BuildController extends TransportController {
     static final org.springframework.http.MediaType NDJSON =
             org.springframework.http.MediaType.parseMediaType("application/x-ndjson");
 
+    private static final Set<String> STREAM_PARAMETERS = Set.of("after");
+
     private final BuildService service;
+    private final LogStream stream;
     private final UserService userService;
 
-    public BuildController(BuildService service, @Lazy UserService userService) {
+    public BuildController(BuildService service, LogStream stream, @Lazy UserService userService) {
         this.service = service;
+        this.stream = stream;
         this.userService = userService;
     }
 
@@ -167,6 +171,29 @@ public class BuildController extends TransportController {
                     java.nio.charset.StandardCharsets.UTF_8));
         }
         return ResponseEntity.ok().headers(headers).body(body);
+    }
+
+    /**
+     * build.logs.stream: Server-Sent Events, resumed from Last-Event-ID or {@code ?after=}.
+     * Last-Event-ID wins when both are present: a browser's EventSource reconnects with the
+     * URL it was opened with, so its {@code after} is the stale one.
+     */
+    @GetMapping("/{buildId}/logs/stream")
+    public org.springframework.web.servlet.mvc.method.annotation.SseEmitter logStream(
+            @PathVariable UUID contentId, @PathVariable UUID buildId, HttpServletRequest request,
+            jakarta.servlet.http.HttpServletResponse response) {
+        onlyParameters(request, STREAM_PARAMETERS);
+        String after = request.getHeader("Last-Event-ID");
+        if (after == null || after.isEmpty()) {
+            after = single(request, "after");
+        }
+        org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter =
+                stream.open(contentId, buildId, actor(), after);
+        response.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+        response.setHeader(HttpHeaders.CACHE_CONTROL, "no-cache");
+        // A proxy that buffers responses would hold every event until the stream closes.
+        response.setHeader("X-Accel-Buffering", "no");
+        return emitter;
     }
 
     /**

@@ -96,6 +96,14 @@ release changes it.
 | `queue-capacity` | integer, min 1 | `10` | deployment | Builds that may wait (QUEUED) across every content item. May be raised, never removed. |
 | `per-publisher-active` | integer, min 1 | `3` | deployment | Queued, running and publishing builds one publisher may hold at once. |
 
+## skald.builds.log-stream
+
+| Key | Type | Default | Scope | Description |
+|---|---|---|---|---|
+| `per-instance` | integer, min 1 | `64` | instance | Build log streams (Server-Sent Events) this instance serves at once. Past it an open is refused with 429 STREAM_LIMIT; replay still works. |
+| `per-user` | integer, min 1 | `8` | instance | Build log streams one user may hold open on this instance. At most per-instance. |
+| `connection` | duration, whole seconds | `30m` | deployment | How long one log stream connection lasts. The server then closes it without an end event and the client resumes from its last cursor. |
+
 ## skald.builds.coordinator
 
 | Key | Type | Default | Scope | Description |

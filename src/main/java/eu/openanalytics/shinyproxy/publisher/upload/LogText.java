@@ -37,7 +37,7 @@ import java.util.List;
  * every code point that changes how a terminal or a reader sees the rest -- Cc but tab (ESC
  * starts a terminal sequence), Cf, Zl, Zp, the default-ignorables, and a lone surrogate --
  * is written as {@code \x{HEX}} (shapes.untrusted_text). So is a backslash, and the final
- * {@code ]} of a line whose own text ends in {@code " [cut]"}: then neither an escape nor the
+ * {@code ]} of a line whose own text ends in {@code " [cut]"}, whitespace after it or not: then neither an escape nor the
  * cut mark can be printed by a build, and the view is unambiguous.
  */
 final class LogText {
@@ -59,11 +59,7 @@ final class LogText {
                         .append(r.get("gap").path("bytes").asLong()).append(" bytes) dropped here; head and tail kept -----\n");
             } else {
                 String n = Long.toString(r.get("n").asLong());
-                String text = neutralise(r.get("t").asText());
-                if (text.endsWith(" [cut]")) {
-                    // The build's own text, not the mark: one escape keeps the two apart (fbe1487 N1).
-                    text = text.substring(0, text.length() - 1) + "\\x{5D}";
-                }
+                String text = unmarked(neutralise(r.get("t").asText()));
                 out.append(" ".repeat(width - n.length())).append(n).append(" | ").append(text);
                 if (r.path("cut").asBoolean(false)) {
                     out.append(" [cut]");
@@ -78,6 +74,25 @@ final class LogText {
                     .append(e.path("truncated").asBoolean() ? ", truncated" : "").append(" -----\n");
         }
         return out.toString();
+    }
+
+    /**
+     * The build's own text never ends like the cut mark: a " [cut]" followed by nothing, or by
+     * only whitespace that does not show (4606275 N1), has its "]" written \x{5D} (fbe1487 N1).
+     */
+    static String unmarked(String text) {
+        int end = text.length();
+        while (end > 0) {
+            int cp = text.codePointBefore(end);
+            if (!Character.isWhitespace(cp) && !Character.isSpaceChar(cp)) {
+                break;
+            }
+            end -= Character.charCount(cp);
+        }
+        if (end < 6 || !text.startsWith(" [cut]", end - 6)) {
+            return text;
+        }
+        return text.substring(0, end - 1) + "\\x{5D}" + text.substring(end);
     }
 
     /** Each code point that is not plain text, as {@code \x{HEX}}. */

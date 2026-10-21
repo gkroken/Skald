@@ -61,6 +61,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -122,6 +123,9 @@ public class BuildControllerTest {
         // Each case places its own attempts; the limits are admission's, tested in BuildAdmissionTest.
         p.put("skald.builds.admission.per-publisher-active", "1000");
         p.put("skald.builds.admission.queue-capacity", "1000");
+        // Small stream bounds, so the limit and the connection's end are reached in a test.
+        p.put("skald.builds.log-stream.per-user", "3");
+        p.put("skald.builds.log-stream.connection", "15s");
         // The store's credentials as mounted files (configtree), as BundleUploadControllerTest.
         Path secrets = Files.createTempDirectory("skald-test-secrets");
         Files.writeString(secrets.resolve("skald.storage.access-key"), TestObjectStore.ACCESS_KEY);
@@ -278,7 +282,7 @@ public class BuildControllerTest {
         UUID bundle = bundle(c, "VALIDATED");
         UUID b = newBuild(c, bundle);
         for (Request r : List.of(create(c, createBody(bundle, "other")), get(url(c, "")), status(c, b), cancel(c, b),
-                get(url(c, "/" + b + "/logs")))) {
+                get(url(c, "/" + b + "/logs")), get(url(c, "/" + b + "/logs/stream")))) {
             assertEquals(403, call(plain, r).status(), r.method() + " " + r.url());
         }
         assertEquals(1, builds());
@@ -293,7 +297,7 @@ public class BuildControllerTest {
         UUID bundle = bundle(c, "VALIDATED");
         UUID b = newBuild(c, bundle);
         for (Request r : List.of(create(c, createBody(bundle, "other")), get(url(c, "")), status(c, b), cancel(c, b),
-                get(url(c, "/" + b + "/logs")))) {
+                get(url(c, "/" + b + "/logs")), get(url(c, "/" + b + "/logs/stream")))) {
             Reply reply = call(null, r);
             assertEquals(302, reply.status(), r.method() + " " + r.url());
             assertTrue(String.valueOf(reply.raw().header("Location")).contains("/login"), r.method() + " " + r.url());
@@ -315,6 +319,7 @@ public class BuildControllerTest {
         assertEquals("BUILD_NOT_FOUND", code(call(admin, status(mine, UUID.randomUUID()))));
         assertEquals("BUILD_NOT_FOUND", code(call(admin, cancel(mine, b))));
         assertEquals("BUILD_NOT_FOUND", code(call(admin, get(url(mine, "/" + b + "/logs")))));
+        assertEquals("BUILD_NOT_FOUND", code(call(admin, get(url(mine, "/" + b + "/logs/stream")))));
         assertEquals("CONTENT_NOT_FOUND", code(call(admin, get(url(UUID.randomUUID(), "/" + b + "/logs")))));
         assertEquals("BUNDLE_NOT_FOUND", code(call(admin, create(mine, createBody(theirBundle, "k")))));
         assertEquals("BUILD_NOT_FOUND", code(call(admin, create(mine,
@@ -947,7 +952,8 @@ public class BuildControllerTest {
             line(15, "after the gap"),
             line(16, "printed \\x{1B} and \\ alone"),
             line(17, "ends like the mark [cut]"),
-            Map.of("n", 18, "t", "and so does this cut one [cut]", "cut", true)));
+            Map.of("n", 18, "t", "and so does this cut one [cut]", "cut", true),
+            line(19, "and this, before a tab [cut]\t")));
         logs.publishIndex(cb[0], cb[1], 1);
         Reply r = call(admin, logs(cb[0], cb[1], "", null));
         assertEquals(200, r.status());
@@ -962,7 +968,8 @@ public class BuildControllerTest {
             // What the build printed can never read as an escape or as the cut mark (fbe1487 N1).
             + "16 | printed \\x{5C}x{1B} and \\x{5C} alone\n"
             + "17 | ends like the mark [cut\\x{5D}\n"
-            + "18 | and so does this cut one [cut\\x{5D} [cut]\n", r.text());
+            + "18 | and so does this cut one [cut\\x{5D} [cut]\n"
+            + "19 | and this, before a tab [cut\\x{5D}\t\n", r.text());
         // The same records as ndjson are ASCII on the wire.
         Reply nd = call(admin, logs(cb[0], cb[1], "", "application/x-ndjson"));
         assertFalse(nd.text().chars().anyMatch(ch -> ch > 0x7e || (ch < 0x20 && ch != '\n')), nd.text());
@@ -1049,5 +1056,332 @@ public class BuildControllerTest {
         TransportException missing = org.junit.jupiter.api.Assertions.assertThrows(TransportException.class,
             () -> service.replay(cb[0], cb[1], null, -1));
         assertEquals(TransportError.STORAGE_UNAVAILABLE, missing.code(), "an advertised chunk that is not there");
+    }
+    // ------------------------------------------------------------------ build.logs.stream (T8 (e))
+
+    /** One Server-Sent Event: its name ("message" by default), id, data, or a comment. */
+    private record Event(String name, String id, String data, String comment, Long retry) { }
+
+    /** Reads events from an open stream; null at the end of the stream. */
+    private static final class Events implements AutoCloseable {
+        final Response response;
+        final okio.BufferedSource source;
+
+        Events(Response response) {
+            this.response = response;
+            this.source = response.body().source();
+        }
+
+        Event next() throws IOException {
+            String name = "message";
+            String id = null;
+            String comment = null;
+            Long retry = null;
+            StringBuilder data = null;
+            boolean any = false;
+            while (true) {
+                String l = source.readUtf8Line();
+                if (l == null) {
+                    return any ? new Event(name, id, data == null ? null : data.toString(), comment, retry) : null;
+                }
+                if (l.isEmpty()) {
+                    if (any) {
+                        return new Event(name, id, data == null ? null : data.toString(), comment, retry);
+                    }
+                    continue;
+                }
+                any = true;
+                if (l.startsWith(":")) {
+                    comment = l.substring(1).trim();
+                } else if (l.startsWith("event:")) {
+                    name = l.substring(6).trim();
+                } else if (l.startsWith("id:")) {
+                    id = l.substring(3).trim();
+                } else if (l.startsWith("retry:")) {
+                    retry = Long.parseLong(l.substring(6).trim());
+                } else if (l.startsWith("data:")) {
+                    data = data == null ? new StringBuilder() : data.append('\n');
+                    data.append(l.substring(5).startsWith(" ") ? l.substring(6) : l.substring(5));
+                }
+            }
+        }
+
+        /** The next event that is not a comment-only one. */
+        Event nextEvent() throws IOException {
+            Event e;
+            do {
+                e = next();
+            } while (e != null && e.data() == null && e.comment() != null);
+            return e;
+        }
+
+        @Override
+        public void close() {
+            response.close();
+        }
+    }
+
+    private static Request stream(UUID c, UUID b, String query, String lastEventId) {
+        Request.Builder r = new Request.Builder().url(url(c, "/" + b + "/logs/stream" + query)).get()
+            .header("Accept", "text/event-stream");
+        if (lastEventId != null) {
+            r.header("Last-Event-ID", lastEventId);
+        }
+        return r.build();
+    }
+
+    private static Events open(Request r) throws IOException {
+        Response response = admin.newCall(r).execute();
+        if (response.code() != 200) {
+            // Only on failure: peeking a live stream's body would wait for 4 KiB or its end.
+            String body = response.peekBody(4096).string();
+            response.close();
+            throw new AssertionError("stream refused: " + response.code() + " " + body);
+        }
+        return new Events(response);
+    }
+
+    private static void awaitOpenStreams(int expected) throws InterruptedException {
+        LogStream streams = app.getBean(LogStream.class);
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(40);
+        while (streams.openStreams() != expected && System.nanoTime() < until) {
+            Thread.sleep(200);
+        }
+        assertEquals(expected, streams.openStreams());
+    }
+
+    @Test
+    public void aStreamSendsTheLogAsItGrowsThenEndsAndCloses() throws Exception {
+        UUID[] cb = liveLog();
+        try (Events events = open(stream(cb[0], cb[1], "", null))) {
+            assertEquals("text/event-stream", events.response.header("Content-Type").replaceAll(";.*", ""));
+            assertEquals("default-src 'none'; sandbox", events.response.header("Content-Security-Policy"));
+            assertEquals("no-cache", events.response.header("Cache-Control"));
+            Event first = events.next();
+            assertEquals(Long.valueOf(LogStream.RETRY_MS), first.retry());
+            Event state = events.nextEvent();
+            assertEquals("state", state.name());
+            assertEquals("{\"buildState\":\"RUNNING\",\"logState\":\"live\"}", state.data());
+            List<String> ids = new ArrayList<>();
+            List<String> names = new ArrayList<>();
+            for (int i = 0; i < 6; i++) {
+                Event e = events.nextEvent();
+                ids.add(e.id());
+                names.add(e.name());
+                assertEquals(e.id(), JSON.readTree(e.data()).path("cursor").asText(), "the id is the record's cursor");
+            }
+            assertEquals(List.of("1.1", "1.2", "1.3", "2.1", "2.2", "2.3"), ids);
+            assertEquals(List.of("line", "line", "line", "line", "gap", "line"), names);
+            // The build writes on: the stream picks it up from the index, with no reconnect.
+            logs.appendChunk(cb[0], cb[1], 3, records(line(11, "eleven")));
+            logs.publishIndex(cb[0], cb[1], 1);
+            Event grown = events.nextEvent();
+            assertEquals("3.1", grown.id());
+            assertEquals("{\"cursor\":\"3.1\",\"n\":11,\"t\":\"eleven\"}", grown.data());
+            // Chunk 3 closed the hole, so chunk 4 is advertised now and follows.
+            assertEquals("4.1", events.nextEvent().id());
+            // It settles: a state change, then end, then the server closes.
+            place(cb[1], "FAILED", false);
+            logs.finalise(cb[0], cb[1], 1, "FAILED:BUILD_FAILED", false);
+            Event settled = events.nextEvent();
+            assertEquals("state", settled.name());
+            assertEquals("FAILED", JSON.readTree(settled.data()).path("buildState").asText());
+            Event end = events.nextEvent();
+            assertEquals("end", end.name());
+            assertEquals("{\"end\":{\"outcome\":\"FAILED:BUILD_FAILED\",\"complete\":true,\"truncated\":false,"
+                + "\"buildState\":\"FAILED\"}}", end.data(), "chunk 3 closed the hole: complete");
+            assertEquals(null, events.next(), "the server closes after end");
+        }
+        awaitOpenStreams(0);
+    }
+
+    @Test
+    public void aStreamResumesFromLastEventIdBeforeAfterAndARecconnectAfterEndGetsEndAtOnce() throws Exception {
+        UUID[] cb = liveLog();
+        try (Events events = open(stream(cb[0], cb[1], "?after=1.1", "2.2"))) {
+            events.nextEvent();
+            Event e = events.nextEvent();
+            assertEquals("2.3", e.id(), "Last-Event-ID wins over a stale after");
+        }
+        try (Events events = open(stream(cb[0], cb[1], "?after=2.1", null))) {
+            events.nextEvent();
+            assertEquals("2.2", events.nextEvent().id());
+        }
+        place(cb[1], "SUCCEEDED", false);
+        logs.finalise(cb[0], cb[1], 1, "BUILT", false);
+        long started = System.nanoTime();
+        try (Events events = open(stream(cb[0], cb[1], "", "2.3"))) {
+            assertEquals("state", events.nextEvent().name());
+            assertEquals("end", events.nextEvent().name());
+            assertEquals(null, events.next());
+        }
+        assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(5), "end again at once");
+        awaitOpenStreams(0);
+    }
+
+    @Test
+    public void aStreamIsRefusedBeforeItStartsWhenItCannotBeServed() throws Exception {
+        UUID[] cb = liveLog();
+        for (String bad : new String[] {"1", "1.0%0A", "x"}) {
+            Reply r = call(admin, stream(cb[0], cb[1], "?after=" + bad, null));
+            assertEquals(400, r.status(), bad);
+            assertEquals("CURSOR_INVALID", code(r), bad);
+        }
+        assertEquals("CURSOR_INVALID", code(call(admin, stream(cb[0], cb[1], "", "1.0.0"))), "a bad Last-Event-ID");
+        assertEquals("BAD_REQUEST", code(call(admin, stream(cb[0], cb[1], "?limit=5", null))));
+        UUID[] old = at("SUCCEEDED", false);
+        jdbc.update("UPDATE skald.build SET finished_at = now() - interval '91 days' WHERE id = ?", old[1]);
+        Reply gone = call(admin, stream(old[0], old[1], "", null));
+        assertEquals(410, gone.status());
+        assertEquals("LOG_EXPIRED", code(gone));
+        awaitOpenStreams(0);
+    }
+
+    @Test
+    public void aUsersStreamsAreBoundedAndASlotFreesWhenItsClientLeaves() throws Exception {
+        UUID[] cb = liveLog();
+        Events one = open(stream(cb[0], cb[1], "", null));
+        Events two = open(stream(cb[0], cb[1], "", null));
+        Events three = open(stream(cb[0], cb[1], "", null));
+        one.nextEvent();
+        two.nextEvent();
+        three.nextEvent();
+        Reply third = call(admin, stream(cb[0], cb[1], "", null));
+        assertEquals(429, third.status());
+        assertEquals("STREAM_LIMIT", code(third));
+        assertTrue(third.data().path("retryable").asBoolean());
+        one.close();
+        // The departure is seen at the stream's next write; a new record makes one now.
+        logs.appendChunk(cb[0], cb[1], 3, records(line(11, "eleven")));
+        logs.publishIndex(cb[0], cb[1], 1);
+        awaitOpenStreams(2);
+        try (Events again = open(stream(cb[0], cb[1], "", null))) {
+            assertEquals("state", again.nextEvent().name());
+        }
+        two.close();
+        three.close();
+        logs.appendChunk(cb[0], cb[1], 5, records(line(12, "twelve")));
+        logs.publishIndex(cb[0], cb[1], 1);
+        awaitOpenStreams(0);
+    }
+
+    @Test
+    public void aStreamClosesWithoutEndAtTheConnectionLimit() throws Exception {
+        UUID[] cb = liveLog();
+        long started = System.nanoTime();
+        try (Events events = open(stream(cb[0], cb[1], "", null))) {
+            Event e;
+            Event last = null;
+            while ((e = events.next()) != null) {
+                last = e;
+            }
+            assertTrue(last != null && !"end".equals(last.name()), "closed without end: " + last);
+        }
+        long seconds = TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - started);
+        assertTrue(seconds >= 14 && seconds < 40, seconds + " s");
+        awaitOpenStreams(0);
+    }
+
+    /** Captures what a stream sends, in order, rendered as the wire would carry it. */
+    private static final class Recorder extends org.springframework.web.servlet.mvc.method.annotation.SseEmitter {
+        final List<String> sent = java.util.Collections.synchronizedList(new ArrayList<>());
+        final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+
+        Recorder() {
+            super(60_000L);
+        }
+
+        @Override
+        public void send(SseEventBuilder event) {
+            StringBuilder out = new StringBuilder();
+            event.build().forEach(d -> out.append(d.getData()));
+            sent.add(out.toString());
+        }
+
+        @Override
+        public void complete() {
+            done.countDown();
+        }
+
+        @Override
+        public void completeWithError(Throwable ex) {
+            done.countDown();
+        }
+    }
+
+    @Test
+    public void aStoreOutageIsAStateEventAndTheStreamCarriesOnWithKeepalives() throws Exception {
+        UUID[] cb = liveLog();
+        boolean[] down = {true};
+        ForwardingObjectStore store = new ForwardingObjectStore(objects.store) {
+            @Override
+            public Optional<StoredObject> head(String bucket, String key) {
+                if (down[0]) {
+                    throw new ObjectStoreException("injected: the store is down");
+                }
+                return super.head(bucket, key);
+            }
+        };
+        BuildService service = new BuildService(jdbc, app.getBean(BuildAdmission.class),
+            app.getBean(BuildCoordinator.class), new BuildLogWriter(store, LOGS));
+        Recorder recorder = new Recorder();
+        LogStream streams = new LogStream(service, new StreamSettings(4, 4, Duration.ofSeconds(6)),
+            Duration.ofMillis(400), Duration.ofMillis(100), Duration.ofMillis(300)) {
+            @Override
+            org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter(long timeoutMillis) {
+                return recorder;
+            }
+        };
+        down[0] = false;
+        streams.open(cb[0], cb[1], "u", null);
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (recorder.sent.stream().noneMatch(x -> x.contains("2.3")) && System.nanoTime() < until) {
+            Thread.sleep(50);
+        }
+        down[0] = true;
+        Thread.sleep(1500);
+        down[0] = false;
+        logs.appendChunk(cb[0], cb[1], 3, records(line(11, "eleven")));
+        logs.publishIndex(cb[0], cb[1], 1);
+        assertTrue(recorder.done.await(15, TimeUnit.SECONDS), "closed at the connection limit");
+        String all = String.join("", recorder.sent);
+        int outage = all.indexOf("storage_unavailable");
+        assertTrue(outage > all.indexOf("id:2.3"), all);
+        assertTrue(all.indexOf("id:3.1") > outage, "the stream carried on after the outage: " + all);
+        assertTrue(all.lastIndexOf("\"logState\":\"live\"") > outage, "and said so: " + all);
+        assertEquals(1, all.split("storage_unavailable", -1).length - 1, "one state event per change: " + all);
+        assertTrue(all.contains(":keepalive"), "a quiet stream sends keepalives: " + all);
+        assertFalse(all.contains("event:end"), all);
+        assertEquals(0, streams.openStreams());
+    }
+
+    @Test
+    public void theInstanceBoundCountsEveryUser() throws Exception {
+        UUID[] cb = liveLog();
+        List<Recorder> recorders = new ArrayList<>();
+        LogStream streams = new LogStream(app.getBean(BuildService.class), new StreamSettings(2, 2, Duration.ofSeconds(3)),
+            Duration.ofSeconds(15), Duration.ofMillis(100), Duration.ofMillis(300)) {
+            @Override
+            org.springframework.web.servlet.mvc.method.annotation.SseEmitter emitter(long timeoutMillis) {
+                Recorder r = new Recorder();
+                recorders.add(r);
+                return r;
+            }
+        };
+        streams.open(cb[0], cb[1], "ann", null);
+        streams.open(cb[0], cb[1], "ben", null);
+        TransportException e = org.junit.jupiter.api.Assertions.assertThrows(TransportException.class,
+            () -> streams.open(cb[0], cb[1], "cat", null));
+        assertEquals(TransportError.STREAM_LIMIT, e.code());
+        assertEquals(2, streams.openStreams(), "a refused open holds no slot");
+        for (Recorder r : recorders) {
+            assertTrue(r.done.await(10, TimeUnit.SECONDS));
+        }
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (streams.openStreams() != 0 && System.nanoTime() < until) {
+            Thread.sleep(50);
+        }
+        assertEquals(0, streams.openStreams());
+        streams.open(cb[0], cb[1], "cat", null);
     }
 }

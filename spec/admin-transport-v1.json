@@ -154,7 +154,7 @@
     },
     "untrusted_text": {
       "json": "Responses are written with every non-ASCII character escaped, so the bytes on the wire are ASCII: a bidi override or a C1 control arrives as \\uXXXX, never raw.",
-      "text": "The text view replaces Cc (except tab), Cf, Zl, Zp and default-ignorable code points (publisher.names.InvisibleCharacters) with \\x{HEX}. So that the view is unambiguous, a backslash is written \\x{5C}, and a line whose own text ends in ' [cut]' has that final ']' written \\x{5D}: neither an escape nor the cut mark can be printed by a build.",
+      "text": "The text view replaces Cc (except tab), Cf, Zl, Zp and default-ignorable code points (publisher.names.InvisibleCharacters) with \\x{HEX}. So that the view is unambiguous, a backslash is written \\x{5C}, and a line whose own text ends in ' [cut]', alone or followed only by whitespace, has that ']' written \\x{5D}: neither an escape nor the cut mark can be printed by a build.",
       "log_response_headers": {
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox"
@@ -234,7 +234,10 @@
       },
       "build.logs.stream": {
         "resume": ["Last-Event-ID", "after"],
-        "errors": ["INVALID_ID", "CONTENT_NOT_FOUND", "BUILD_NOT_FOUND", "CURSOR_INVALID", "LOG_EXPIRED", "STREAM_LIMIT"]
+        "resume_rule": "Last-Event-ID wins when both are given: an EventSource reconnects with the URL it was opened with, so its after is the stale one",
+        "query_rule": "only after, at most once; anything else is 400 BAD_REQUEST",
+        "response_headers": ["Content-Security-Policy", "Cache-Control: no-cache", "X-Accel-Buffering: no"],
+        "errors": ["BAD_REQUEST", "INVALID_ID", "CONTENT_NOT_FOUND", "BUILD_NOT_FOUND", "CURSOR_INVALID", "LOG_EXPIRED", "STREAM_LIMIT"]
       },
       "build.cancel": {
         "request": {},
@@ -270,7 +273,7 @@
       "after_end": "the server closes; a reconnect gets end again at once",
       "model": "pull: each subscriber reads committed chunks from storage when its previous write has gone out. Nothing the build writes waits for a reader.",
       "supersedes": "the build.logs.stream note's 'bounded subscriber queue': there is no queue at all, which is the stronger form of the same bound. The frozen note is left unedited.",
-      "limits": {"per_instance": 64, "per_user": 8, "connection_minutes": 30},
+      "limits": {"per_instance": 64, "per_user": 8, "connection_minutes": 30, "keys": "skald.builds.log-stream.per-instance, per-user, connection (spec/configuration-v1.json)"},
       "storage_outage": "a state event with logState storage_unavailable, then retries with backoff until the connection limit"
     },
     "cancel_replies": [

@@ -89,6 +89,17 @@ public class ConfigurationValidatorTest {
     }
 
     @Test
+    public void theLogStreamSectionsOwnRuleIsListed() {
+        // Valid values each; only StreamSettings sees that a user's share exceeds the instance's.
+        List<String> p = validate("skald.builds.log-stream.per-user", "10", "skald.builds.log-stream.per-instance", "4")
+                .problems();
+        assertEquals(1, p.size(), String.valueOf(p));
+        assertTrue(p.get(0).contains("must not exceed per-instance"), p.get(0));
+        assertEquals(List.of(), validate("skald.builds.log-stream.per-user", "4", "skald.builds.log-stream.connection",
+                "10m").problems());
+    }
+
+    @Test
     public void aSectionTheCheckRefusedIsListedOnce() {
         // The check and the sections word a bound differently ("0 is outside 1.." against
         // "must be positive"), so a section the check refused is not parsed again; the

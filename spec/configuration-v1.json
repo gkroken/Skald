@@ -35,6 +35,12 @@
     {"key": "skald.builds.admission.per-publisher-active", "type": "integer", "default": 3, "min": 1, "parser": "settings", "scope": "deployment",
      "description": "Queued, running and publishing builds one publisher may hold at once."},
 
+    {"key": "skald.builds.log-stream.per-instance", "type": "integer", "default": 64, "min": 1, "parser": "settings", "scope": "instance",
+     "description": "Build log streams (Server-Sent Events) this instance serves at once. Past it an open is refused with 429 STREAM_LIMIT; replay still works."},
+    {"key": "skald.builds.log-stream.per-user", "type": "integer", "default": 8, "min": 1, "parser": "settings", "scope": "instance",
+     "description": "Build log streams one user may hold open on this instance. At most per-instance."},
+    {"key": "skald.builds.log-stream.connection", "type": "duration", "default": "30m", "parser": "settings-seconds", "scope": "deployment",
+     "description": "How long one log stream connection lasts. The server then closes it without an end event and the client resumes from its last cursor."},
     {"key": "skald.builds.coordinator.lease", "type": "duration", "default": "300s", "parser": "settings-seconds", "scope": "deployment",
      "description": "How long a build's claim lasts without renewal before the reaper interrupts it. Long enough to outlast a stalled host: a holder survives a stall of lease minus renew-every."},
     {"key": "skald.builds.coordinator.renew-every", "type": "duration", "default": "30s", "parser": "settings-seconds", "scope": "deployment",

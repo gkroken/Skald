@@ -79,6 +79,35 @@
                 }
               }
             },
+            "log-stream" : {
+              "type" : "object",
+              "additionalProperties" : false,
+              "properties" : {
+                "per-instance" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "default" : 64,
+                  "description" : "Build log streams (Server-Sent Events) this instance serves at once. Past it an open is refused with 429 STREAM_LIMIT; replay still works."
+                },
+                "per-user" : {
+                  "type" : "integer",
+                  "minimum" : 1,
+                  "default" : 8,
+                  "description" : "Build log streams one user may hold open on this instance. At most per-instance."
+                },
+                "connection" : {
+                  "anyOf" : [ {
+                    "type" : "integer",
+                    "minimum" : 0
+                  }, {
+                    "type" : "string",
+                    "pattern" : "^([0-9]+(ns|us|ms|s|m|h|d)?|P[0-9TDHMS.]+)$"
+                  } ],
+                  "default" : "30m",
+                  "description" : "How long one log stream connection lasts. The server then closes it without an end event and the client resumes from its last cursor."
+                }
+              }
+            },
             "coordinator" : {
               "type" : "object",
               "additionalProperties" : false,

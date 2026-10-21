@@ -3249,6 +3249,18 @@ below are marked passed by this planning document.
       each type, and a tie goes to the type named outright; anything unreadable, or no
       Accept at all, gets text/plain. The text end line also says `incomplete` and
       `truncated` when they apply (shapes.log_records.text_end).
+      *(e) as built* (build.logs.stream): one virtual thread per stream pulls pages through
+      the same reads as replay, so the two views cannot disagree on what is advertised.
+      Everything that can refuse an open (cursor, build, expired log, the two bounds) is
+      decided before the response is committed, so a refusal is the envelope, not a broken
+      stream. Last-Event-ID wins over `?after`: a browser's EventSource reconnects with the
+      URL it was opened with, so its `after` is the stale one. The first `state` event is
+      sent at once, then one per change, `storage_unavailable` included. The bounds are
+      `skald.builds.log-stream.{per-instance, per-user, connection}`, and per-user may not
+      exceed per-instance. A client that leaves is noticed at the stream's next write, so
+      its slot is freed within a keepalive (15 s) at most. The response also carries
+      `Cache-Control: no-cache` and `X-Accel-Buffering: no`, so a buffering proxy does not
+      hold events back.
       build.list refuses an unknown query parameter (400), the GET counterpart of strict
       bodies, so a misspelt `?status=` does not quietly mean "no filter". Refusals carry the
       state they were decided on: `bundleState` on BUNDLE_NOT_VALIDATED, `retryOfState` on

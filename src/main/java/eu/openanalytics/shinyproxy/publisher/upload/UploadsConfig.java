@@ -96,6 +96,11 @@ public class UploadsConfig {
             return new BuildService(jdbc, admission, coordinator, new BuildLogWriter(store, logBucket));
         }
 
+        @Bean
+        public LogStream logStream(BuildService builds, StreamSettings settings) {
+            return new LogStream(builds, settings);
+        }
+
         @Bean(initMethod = "start", destroyMethod = "stop")
         public BundleValidator bundleValidator(ValidationQueue queue, BundleValidation validation,
                                                ValidationSettings settings) {

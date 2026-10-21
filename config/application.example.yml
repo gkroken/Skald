@@ -43,6 +43,18 @@ skald:
       # 1; deployment)
       per-publisher-active: 3
 
+    log-stream:
+      # Build log streams (Server-Sent Events) this instance serves at once. Past it an open
+      # is refused with 429 STREAM_LIMIT; replay still works. (integer, min 1; instance)
+      per-instance: 64
+      # Build log streams one user may hold open on this instance. At most per-instance.
+      # (integer, min 1; instance)
+      per-user: 8
+      # How long one log stream connection lasts. The server then closes it without an end
+      # event and the client resumes from its last cursor. (duration, whole seconds;
+      # deployment)
+      connection: 30m
+
     coordinator:
       # How long a build's claim lasts without renewal before the reaper interrupts it. Long
       # enough to outlast a stalled host: a holder survives a stall of lease minus
