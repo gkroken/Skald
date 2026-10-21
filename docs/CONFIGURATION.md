@@ -77,6 +77,13 @@ release changes it.
 | `secret-key` | string | unset | deployment | **Secret.** The store's secret key. Required with endpoint. |
 | `path-style` | boolean | `true` | deployment | Path-style bucket addressing. On by default, unlike the SDK: a self-hosted store behind one hostname has no wildcard DNS. Turn off for AWS S3. |
 
+## skald.runtime
+
+| Key | Type | Default | Scope | Description |
+|---|---|---|---|---|
+| `memory-limit` | string | `2g` | deployment | The memory limit of a published app's container, for versions Skald built (a whole number with b, k, m or g; at least 6m). An admin's direct-image versions are not limited by it. Applied at each container start, so changing it needs no rebuild. |
+| `cpu-limit` | string | `1` | deployment | The CPU limit of a published app's container, for versions Skald built (a positive number of CPUs, e.g. 1 or 0.5). Applied at each container start. |
+
 ## skald.dispatcher
 
 | Key | Type | Default | Scope | Description |

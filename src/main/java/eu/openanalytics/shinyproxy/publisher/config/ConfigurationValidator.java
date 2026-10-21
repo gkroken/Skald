@@ -67,6 +67,11 @@ public final class ConfigurationValidator {
             section(problems, "skald.builds.binaries", builds::binaryForgeSettings);
             section(problems, "skald.builds.binaries", builds::binarySourceSettings);
         }
+        eu.openanalytics.shinyproxy.publisher.registry.RuntimeConfig runtime =
+                bind(binder, "skald", new eu.openanalytics.shinyproxy.publisher.registry.RuntimeConfig(), problems);
+        if (runtime != null) {
+            section(problems, "skald.runtime", runtime::runtimeSettings);
+        }
         LogStreamConfig streams = bind(binder, "skald.builds", new LogStreamConfig(), problems);
         if (streams != null) {
             section(problems, "skald.builds.log-stream", streams::streamSettings);

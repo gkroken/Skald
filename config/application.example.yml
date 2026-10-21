@@ -24,6 +24,16 @@ skald:
     # behind one hostname has no wildcard DNS. Turn off for AWS S3. (boolean; deployment)
     path-style: true
 
+  runtime:
+    # The memory limit of a published app's container, for versions Skald built (a whole
+    # number with b, k, m or g; at least 6m). An admin's direct-image versions are not
+    # limited by it. Applied at each container start, so changing it needs no rebuild.
+    # (string; deployment)
+    memory-limit: 2g
+    # The CPU limit of a published app's container, for versions Skald built (a positive
+    # number of CPUs, e.g. 1 or 0.5). Applied at each container start. (string; deployment)
+    cpu-limit: "1"
+
   dispatcher:
     # Refuse to start when the dispatcher override that runtime-added content needs could
     # not be installed. false starts anyway, and content published at run time will not

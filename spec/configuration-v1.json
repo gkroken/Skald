@@ -24,6 +24,10 @@
     {"key": "skald.storage.path-style", "type": "boolean", "default": true, "parser": "value", "scope": "deployment",
      "description": "Path-style bucket addressing. On by default, unlike the SDK: a self-hosted store behind one hostname has no wildcard DNS. Turn off for AWS S3."},
 
+    {"key": "skald.runtime.memory-limit", "type": "string", "default": "2g", "parser": "settings", "scope": "deployment",
+     "description": "The memory limit of a published app's container, for versions Skald built (a whole number with b, k, m or g; at least 6m). An admin's direct-image versions are not limited by it. Applied at each container start, so changing it needs no rebuild."},
+    {"key": "skald.runtime.cpu-limit", "type": "string", "default": "1", "parser": "settings", "scope": "deployment",
+     "description": "The CPU limit of a published app's container, for versions Skald built (a positive number of CPUs, e.g. 1 or 0.5). Applied at each container start."},
     {"key": "skald.dispatcher.require-override", "type": "boolean", "default": true, "parser": "value", "scope": "instance",
      "description": "Refuse to start when the dispatcher override that runtime-added content needs could not be installed. false starts anyway, and content published at run time will not open."},
 

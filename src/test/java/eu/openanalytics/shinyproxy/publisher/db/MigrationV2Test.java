@@ -272,16 +272,18 @@ public class MigrationV2Test {
                 + " VALUES (?, 'alice', 'x', ?)", c, FINGERPRINT), "a build without a bundle");
     }
 
+    // A built version carries its runtime document's schema since V6 (T9 (a)); these rows
+    // test V2's constraints, so they carry the one string V6 asks for and nothing more.
     @Test
     public void exactlyOneVersionPerBuild() {
         JdbcTemplate jdbc = database(null);
         UUID c = content(jdbc);
         UUID built = build(jdbc, c, bundle(jdbc, c), "s", "SUCCEEDED");
-        jdbc.update("INSERT INTO skald.content_version (content_id, version, image, created_by, build_id)"
-            + " VALUES (?, 1, 'img', 'alice', ?)", c, built);
+        jdbc.update("INSERT INTO skald.content_version (content_id, version, image, created_by, build_id, spec_json)"
+            + " VALUES (?, 1, 'img', 'alice', ?, '{\"schema\": \"skald.runtime/v1\"}'::jsonb)", c, built);
         assertThrows(DataIntegrityViolationException.class, () -> jdbc.update(
-            "INSERT INTO skald.content_version (content_id, version, image, created_by, build_id)"
-                + " VALUES (?, 2, 'img', 'alice', ?)", c, built));
+            "INSERT INTO skald.content_version (content_id, version, image, created_by, build_id, spec_json)"
+                + " VALUES (?, 2, 'img', 'alice', ?, '{\"schema\": \"skald.runtime/v1\"}'::jsonb)", c, built));
         // Direct-image versions stay valid without one.
         jdbc.update("INSERT INTO skald.content_version (content_id, version, image, created_by)"
             + " VALUES (?, 3, 'img', 'alice')", c);
@@ -314,16 +316,16 @@ public class MigrationV2Test {
             "UPDATE skald.build SET state = 'CANCELLED', superseded_by = ? WHERE id = ?",
             buildB, buildA));
         refusedBy("content_version_build_same_content", () -> jdbc.update(
-            "INSERT INTO skald.content_version (content_id, version, image, created_by, build_id)"
-                + " VALUES (?, 1, 'img', 'alice', ?)", a, buildB));
+            "INSERT INTO skald.content_version (content_id, version, image, created_by, build_id, spec_json)"
+                + " VALUES (?, 1, 'img', 'alice', ?, '{\"schema\": \"skald.runtime/v1\"}'::jsonb)", a, buildB));
 
         // The controls: the same references within one content item are accepted.
         UUID retry = build(jdbc, a, bundleA, "ka2", "FAILED");
         jdbc.update("UPDATE skald.build SET retry_of = ? WHERE id = ?", buildA, retry);
         jdbc.update("UPDATE skald.build SET state = 'CANCELLED', superseded_by = ? WHERE id = ?",
             retry, buildA);
-        jdbc.update("INSERT INTO skald.content_version (content_id, version, image, created_by, build_id)"
-            + " VALUES (?, 1, 'img', 'alice', ?)", b, buildB);
+        jdbc.update("INSERT INTO skald.content_version (content_id, version, image, created_by, build_id, spec_json)"
+            + " VALUES (?, 1, 'img', 'alice', ?, '{\"schema\": \"skald.runtime/v1\"}'::jsonb)", b, buildB);
         // And deleting the retried attempt clears only the reference, never content_id.
         jdbc.update("UPDATE skald.build SET superseded_by = NULL WHERE id = ?", buildA);
         jdbc.update("DELETE FROM skald.build WHERE id = ?", buildA);

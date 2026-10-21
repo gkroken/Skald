@@ -89,6 +89,15 @@ public class ConfigurationValidatorTest {
     }
 
     @Test
+    public void theRuntimeSectionIsChecked() {
+        List<String> p = validate("skald.runtime.memory-limit", "5m").problems();
+        assertEquals(1, p.size(), String.valueOf(p));
+        assertTrue(p.get(0).contains("below Docker's minimum"), p.get(0));
+        assertEquals(1, validate("skald.runtime.cpu-limit", "0").problems().size());
+        assertEquals(List.of(), validate("skald.runtime.memory-limit", "4g", "skald.runtime.cpu-limit", "2").problems());
+    }
+
+    @Test
     public void theLogStreamSectionsOwnRuleIsListed() {
         // Valid values each; only StreamSettings sees that a user's share exceeds the instance's.
         List<String> p = validate("skald.builds.log-stream.per-user", "10", "skald.builds.log-stream.per-instance", "4")

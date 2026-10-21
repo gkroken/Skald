@@ -93,6 +93,11 @@ public class ConfigurationSpecTest {
         assertEquals(new TreeSet<>(ValidationSettings.KEYS), names("skald.bundle.validation.", n -> true));
         assertEquals(ValidationSettings.DEFAULTS, ValidationSettings.fromOverrides(
                 defaults("skald.bundle.validation.", n -> true)));
+        assertEquals(new TreeSet<>(eu.openanalytics.shinyproxy.publisher.registry.RuntimeSettings.KEYS),
+                names("skald.runtime.", n -> true));
+        assertEquals(eu.openanalytics.shinyproxy.publisher.registry.RuntimeSettings.DEFAULTS,
+                eu.openanalytics.shinyproxy.publisher.registry.RuntimeSettings.fromOverrides(
+                        defaults("skald.runtime.", n -> true)));
         assertEquals(new TreeSet<>(eu.openanalytics.shinyproxy.publisher.upload.StreamSettings.KEYS),
                 names("skald.builds.log-stream.", n -> true));
         assertEquals(eu.openanalytics.shinyproxy.publisher.upload.StreamSettings.DEFAULTS,

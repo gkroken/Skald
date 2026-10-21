@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:skald:runtime:v1",
+  "title": "Skald runtime spec, version 1",
+  "description": "content_version.spec_json of a version Skald built (WORKPLAN-BUNDLES.md T9 (a)). Every value is the server's own record, derived at success from the build's provenance and the base catalog, never from the uploaded manifest. Facts of the image only: the image itself is stated once, in content_version.image (digest-pinned), and policy -- memory and CPU limits -- is the deployment's skald.runtime.* configuration, applied when the version is run. A version without a build (an admin's direct image) carries {} instead and is not judged by this schema. Released and immutable: a changed meaning is a new version, not an edit here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "port", "user", "language", "base"],
+  "properties": {
+    "schema": {"const": "skald.runtime/v1"},
+    "port": {
+      "description": "The port the app listens on inside its container. Above 1023: the app runs as a non-root user, which cannot bind below.",
+      "type": "integer", "minimum": 1024, "maximum": 65535
+    },
+    "user": {
+      "description": "uid:gid the container runs as: the base image's non-root user from the catalog. Never 0, and numeric only, so no name lookup inside the image decides it.",
+      "type": "string", "pattern": "^[1-9][0-9]{0,8}:[1-9][0-9]{0,8}$"
+    },
+    "language": {"enum": ["r", "python"]},
+    "base": {
+      "description": "The catalog id of the base the image was built from (images/catalog.json).",
+      "type": "string", "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+    }
+  }
+}

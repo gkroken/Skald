@@ -43,6 +43,9 @@ import org.springframework.stereotype.Repository;
 import java.sql.Array;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -81,6 +84,7 @@ public class ContentSpecRepository {
     private static final Pattern SPEC_ID = Pattern.compile("^c([0-9a-f]{32})--v([1-9][0-9]{0,8})$");
 
     private static final int DEFAULT_PORT = 3838;
+    private static final Logger log = LoggerFactory.getLogger(ContentSpecRepository.class);
 
     /**
      * Aggregates {@code content_acl} into two arrays alongside the content row, so that
@@ -105,7 +109,7 @@ public class ContentSpecRepository {
         """;
 
     private static final String SELECT_COLUMNS =
-        "SELECT c.id, c.title, c.owner, c.type, c.visibility, v.version, v.image, v.spec_json, " +
+        "SELECT c.id, c.title, c.owner, c.type, c.visibility, v.version, v.image, v.spec_json::text AS spec_json, v.build_id, " +
             "acl.acl_users, acl.acl_groups, (v.id = c.active_version_id) AS is_active ";
 
     private static final String SELECT_ACTIVE = SELECT_COLUMNS + """
@@ -146,15 +150,21 @@ public class ContentSpecRepository {
     }
 
     private final ObjectProvider<ProxyService> proxyService;
+    private final RuntimeSettings runtime;
+    /** Versions refused once, by spec id and fingerprint, so a bad row is logged once and not per request. */
+    private final Map<String, String> refused = new ConcurrentHashMap<>();
 
-    public ContentSpecRepository(JdbcTemplate jdbc, ObjectProvider<ProxyService> proxyService) {
+    public ContentSpecRepository(JdbcTemplate jdbc, ObjectProvider<ProxyService> proxyService,
+                                 RuntimeSettings runtime) {
         this.jdbc = jdbc;
         this.proxyService = proxyService;
+        this.runtime = runtime;
     }
 
     /** The active version of every content item, as ProxySpecs. */
     public List<ProxySpec> findActiveSpecs() {
-        return jdbc.query(SELECT_ACTIVE, specRowMapper());
+        // A refused version (see toProxySpec) is absent, never a spec run without its document.
+        return jdbc.query(SELECT_ACTIVE, specRowMapper()).stream().filter(java.util.Objects::nonNull).toList();
     }
 
     /**
@@ -187,6 +197,7 @@ public class ContentSpecRepository {
         if (found.isEmpty()) {
             return null;
         }
+        // A refused version (toProxySpec) is a null spec, and null is what either branch returns.
         ResolvedSpec resolved = found.get(0);
         if (resolved.active()) {
             return resolved.spec();
@@ -235,21 +246,59 @@ public class ContentSpecRepository {
         // The ACL is part of the fingerprint: granting or revoking a principal must produce a
         // NEW ProxySpec instance, or the memoised one below would keep serving the old
         // AccessControl and a revocation would never reach the evaluator at all.
+        String image = rs.getString("image");
+        Object buildId = rs.getObject("build_id");
+        String specJson = rs.getString("spec_json");
+        // The runtime document and the limits are part of the fingerprint too (T9 (a)): a
+        // changed record or a changed policy is a new ProxySpec, never the memoised old one.
         String fingerprint = String.join("\u0000",
             contentId.toString(), title, rs.getString("owner"), rs.getString("type"),
-            rs.getString("visibility"), String.valueOf(version), rs.getString("image"),
-            String.join(",", aclUsers), String.join(",", aclGroups));
+            rs.getString("visibility"), String.valueOf(version), image,
+            String.join(",", aclUsers), String.join(",", aclGroups),
+            String.valueOf(buildId), String.valueOf(specJson), runtime.memoryLimit(), runtime.cpuLimit());
 
         CachedSpec cached = specCache.get(specId);
         if (cached != null && cached.fingerprint().equals(fingerprint)) {
             return cached.spec();
         }
 
-        ContainerSpec containerSpec = ContainerSpec.builder()
-            .image(new SpelField.String(rs.getString("image")))
+        // Legacy is decided by where a version came from, not by its document (29053ce-F2): a
+        // version without a build is an admin's direct image and runs exactly as before. A
+        // built version runs only with a valid v1 runtime document and a digest-pinned image;
+        // anything else is refused, so untrusted code never runs without its user and limits.
+        RuntimeSpec built = null;
+        if (buildId != null) {
+            try {
+                built = RuntimeSpec.parse(specJson);
+                if (!RuntimeSpec.digestPinned(image)) {
+                    throw new RuntimeSpec.Refused("its image '" + image + "' is not pinned by digest");
+                }
+            } catch (RuntimeSpec.Refused e) {
+                if (!fingerprint.equals(refused.put(specId, fingerprint))) {
+                    log.error("Version {} was built (build {}) but cannot be run: {}. It is not served;"
+                        + " a built version runs only with a valid skald.runtime/v1 document.", specId, buildId,
+                        e.getMessage());
+                }
+                return null;
+            }
+        }
+
+        ContainerSpec.ContainerSpecBuilder container = ContainerSpec.builder()
+            .image(new SpelField.String(image))
             .portMapping(Collections.singletonList(
-                PortMapping.builder().name("default").port(DEFAULT_PORT).build()))
-            .build();
+                PortMapping.builder().name("default").port(built == null ? DEFAULT_PORT : built.port()).build()));
+        if (built != null) {
+            container
+                // Numeric uid:gid from the catalog: no name lookup inside the image decides it.
+                .dockerUser(new SpelField.String(built.user()))
+                .memoryLimit(new SpelField.String(runtime.memoryLimit()))
+                .cpuLimit(new SpelField.String(runtime.cpuLimit()))
+                .labels(new SpelField.StringMap(Map.of(
+                    "eu.skald.content", contentId.toString(),
+                    "eu.skald.version", String.valueOf(version),
+                    "eu.skald.build", buildId.toString())));
+        }
+        ContainerSpec containerSpec = container.build();
 
         ProxySpec spec = ProxySpec.builder()
             .id(specId)

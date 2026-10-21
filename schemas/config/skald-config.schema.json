@@ -40,6 +40,22 @@
             }
           }
         },
+        "runtime" : {
+          "type" : "object",
+          "additionalProperties" : false,
+          "properties" : {
+            "memory-limit" : {
+              "type" : "string",
+              "default" : "2g",
+              "description" : "The memory limit of a published app's container, for versions Skald built (a whole number with b, k, m or g; at least 6m). An admin's direct-image versions are not limited by it. Applied at each container start, so changing it needs no rebuild."
+            },
+            "cpu-limit" : {
+              "type" : "string",
+              "default" : "1",
+              "description" : "The CPU limit of a published app's container, for versions Skald built (a positive number of CPUs, e.g. 1 or 0.5). Applied at each container start."
+            }
+          }
+        },
         "dispatcher" : {
           "type" : "object",
           "additionalProperties" : false,

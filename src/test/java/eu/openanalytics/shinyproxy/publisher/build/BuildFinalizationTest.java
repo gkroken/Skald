@@ -60,6 +60,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 public class BuildFinalizationTest {
 
+    /** A built version's runtime document (T9 (a)): V6 refuses a built version without one. */
+    private static final String RUNTIME =
+        new eu.openanalytics.shinyproxy.publisher.registry.RuntimeSpec(3838, "999:999", "r", "r-shiny-4.6.1-amd64-r3")
+            .toJson();
+
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
         TestPostgres.create();
@@ -135,7 +140,7 @@ public class BuildFinalizationTest {
         BuildCoordinator coordinator = new BuildCoordinator(jdbc, MANY);
         Lease lease = publishing(coordinator, c);
 
-        VersionAllocator.Allocated v = coordinator.succeed(lease, "{\"runtime\": \"r-4.4\"}");
+        VersionAllocator.Allocated v = coordinator.succeed(lease, RUNTIME);
         assertEquals(2, v.version());
         assertEquals("SUCCEEDED", state(lease.buildId()));
         Map<String, Object> row = jdbc.queryForMap("SELECT build_id, image, spec_json::text AS spec,"
@@ -143,7 +148,8 @@ public class BuildFinalizationTest {
         assertEquals(lease.buildId(), row.get("build_id"));
         assertEquals(DIGEST, row.get("image"));
         assertEquals("alice", row.get("created_by"), "the version records who requested the build");
-        assertTrue(String.valueOf(row.get("spec")).contains("r-4.4"));
+        assertEquals(RUNTIME, eu.openanalytics.shinyproxy.publisher.registry.RuntimeSpec.parse(
+            String.valueOf(row.get("spec"))).toJson(), "the version stores the runtime document it was given");
         assertNull(jdbc.queryForObject("SELECT active_version_id FROM skald.content WHERE id = ?",
             UUID.class, c), "a success activated a version");
     }
@@ -153,8 +159,8 @@ public class BuildFinalizationTest {
         UUID c = content();
         BuildCoordinator coordinator = new BuildCoordinator(jdbc, MANY);
         Lease lease = publishing(coordinator, c);
-        coordinator.succeed(lease, null);
-        assertThrows(Fenced.class, () -> coordinator.succeed(lease, null));
+        coordinator.succeed(lease, RUNTIME);
+        assertThrows(Fenced.class, () -> coordinator.succeed(lease, RUNTIME));
         assertEquals(1, versions(c));
     }
 
@@ -166,7 +172,7 @@ public class BuildFinalizationTest {
             new BuildAdmission.Inputs(validatedBundle(c), Map.of()));
         Lease lease = coordinator.claim("n").orElseThrow().lease();
         coordinator.toPublishing(lease, DIGEST, PROVENANCE);
-        assertThrows(Fenced.class, () -> coordinator.succeed(lease, null));
+        assertThrows(Fenced.class, () -> coordinator.succeed(lease, RUNTIME));
         assertEquals("PUBLISHING", state(lease.buildId()));
         assertEquals(0, versions(c));
     }
@@ -179,18 +185,18 @@ public class BuildFinalizationTest {
         jdbc.update("UPDATE skald.build SET lease_expires_at = now() - interval '1 second' WHERE id = ?",
             reaped.buildId());
         coordinator.reap();
-        assertThrows(Fenced.class, () -> coordinator.succeed(reaped, null), "success after reaping");
+        assertThrows(Fenced.class, () -> coordinator.succeed(reaped, RUNTIME), "success after reaping");
         assertEquals("INTERRUPTED", state(reaped.buildId()));
 
         Lease late = publishing(coordinator, c);
         jdbc.update("UPDATE skald.build SET deadline_at = now() - interval '1 second' WHERE id = ?",
             late.buildId());
-        assertThrows(Fenced.class, () -> coordinator.succeed(late, null),
+        assertThrows(Fenced.class, () -> coordinator.succeed(late, RUNTIME),
             "a success after the deadline; it must be TIMED_OUT, never a late SUCCEEDED");
 
         Lease wrong = publishing(coordinator, c);
         assertThrows(Fenced.class, () -> coordinator.succeed(
-            new Lease(wrong.buildId(), wrong.generation() + 1, wrong.owner()), null));
+            new Lease(wrong.buildId(), wrong.generation() + 1, wrong.owner()), RUNTIME));
         assertEquals(0, versions(c), "a failed or fenced attempt produced a version");
     }
 
@@ -208,7 +214,7 @@ public class BuildFinalizationTest {
         jdbc.execute("CREATE TRIGGER crash_on_success BEFORE INSERT ON skald.audit_event"
             + " FOR EACH ROW EXECUTE FUNCTION skald.crash_on_success()");
         try {
-            assertThrows(RuntimeException.class, () -> coordinator.succeed(lease, null));
+            assertThrows(RuntimeException.class, () -> coordinator.succeed(lease, RUNTIME));
         } finally {
             jdbc.execute("DROP TRIGGER crash_on_success ON skald.audit_event");
             jdbc.execute("DROP FUNCTION skald.crash_on_success()");
@@ -216,7 +222,7 @@ public class BuildFinalizationTest {
         assertEquals(0, versions(c), "a half-version survived the crash");
         assertEquals("PUBLISHING", state(lease.buildId()));
         // And it can still finish exactly once afterwards.
-        assertEquals(1, coordinator.succeed(lease, null).version());
+        assertEquals(1, coordinator.succeed(lease, RUNTIME).version());
     }
 
     @Test
@@ -225,7 +231,7 @@ public class BuildFinalizationTest {
         BuildCoordinator coordinator = new BuildCoordinator(jdbc, MANY);
         Lease lease = publishing(coordinator, c);
         jdbc.update("DELETE FROM skald.content WHERE id = ?", c);
-        assertThrows(Fenced.class, () -> coordinator.succeed(lease, null));
+        assertThrows(Fenced.class, () -> coordinator.succeed(lease, RUNTIME));
         assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM skald.content_version", Integer.class));
     }
 
@@ -236,8 +242,8 @@ public class BuildFinalizationTest {
         Lease first = publishing(coordinator, c);
         Thread.sleep(5);
         Lease second = publishing(coordinator, c);
-        assertEquals(1, coordinator.succeed(second, null).version());
-        assertEquals(2, coordinator.succeed(first, null).version());
+        assertEquals(1, coordinator.succeed(second, RUNTIME).version());
+        assertEquals(2, coordinator.succeed(first, RUNTIME).version());
     }
 
     @Test
@@ -251,7 +257,7 @@ public class BuildFinalizationTest {
         TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(jdbc.getDataSource()));
         List<Callable<Integer>> jobs = new ArrayList<>();
         for (Lease lease : leases) {
-            jobs.add(() -> coordinator.succeed(lease, null).version());
+            jobs.add(() -> coordinator.succeed(lease, RUNTIME).version());
         }
         for (int i = 0; i < 8; i++) {
             jobs.add(() -> tx.execute(s -> new VersionAllocator(jdbc)

@@ -55,6 +55,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 public class ContentDeletionTest {
 
+    /** A built version's runtime document (T9 (a)): V6 refuses a built version without one. */
+    private static final String RUNTIME =
+        new eu.openanalytics.shinyproxy.publisher.registry.RuntimeSpec(3838, "999:999", "r", "r-shiny-4.6.1-amd64-r3")
+            .toJson();
+
     @SuppressWarnings("resource")
     private static final PostgreSQLContainer<?> POSTGRES =
         TestPostgres.create();
@@ -179,7 +184,7 @@ public class ContentDeletionTest {
             "a fenced transition still recorded its image");
         coordinator.toPublishing(lease, DIGEST, PROVENANCE);
         coordinator.markLogComplete(lease, 1);
-        UUID version = coordinator.succeed(lease, null).id();
+        UUID version = coordinator.succeed(lease, RUNTIME).id();
         Map<String, Object> record = jdbc.queryForMap("SELECT pinned, subject_version_id FROM skald.artifact"
             + " WHERE subject_build_id = ?", lease.buildId());
         assertEquals(Boolean.TRUE, record.get("pinned"));
@@ -203,7 +208,7 @@ public class ContentDeletionTest {
         Lease two = coordinator.claim("n2").orElseThrow().lease();
         coordinator.toPublishing(two, DIGEST, PROVENANCE);
         coordinator.markLogComplete(two, 1);
-        UUID version = coordinator.succeed(two, null).id();
+        UUID version = coordinator.succeed(two, RUNTIME).id();
 
         Map<String, Object> won = jdbc.queryForMap("SELECT ref, digest, pinned, subject_version_id"
             + " FROM skald.artifact WHERE subject_build_id = ?", second);
@@ -229,7 +234,7 @@ public class ContentDeletionTest {
         coordinator.toPublishing(lease, DIGEST, PROVENANCE);
         coordinator.markLogComplete(lease, 1);
         jdbc.update("DELETE FROM skald.artifact WHERE subject_build_id = ?", build);
-        assertThrows(IllegalStateException.class, () -> coordinator.succeed(lease, null));
+        assertThrows(IllegalStateException.class, () -> coordinator.succeed(lease, RUNTIME));
         assertEquals("PUBLISHING", jdbc.queryForObject("SELECT state FROM skald.build WHERE id = ?",
             String.class, build));
         assertEquals(0, jdbc.queryForObject("SELECT count(*) FROM skald.content_version", Integer.class));
