@@ -391,7 +391,7 @@ def main(argv):
         for b in built:
             if "cache" in b:
                 c = b["cache"]
-                record("%s/%s" % (b["case"], b["app"]), b.get("state") == "PUBLISHING",
+                record("%s/%s" % (b["case"], b["app"]), b.get("state") == "SUCCEEDED",
                        "restore %s, key %s..., %ss, imported %s" % (
                            c.get("restore"), (c.get("key") or "")[:12], str(b.get("seconds"))[:6],
                            ",".join(r.rsplit("/", 1)[-1][:22] for r in c.get("imported") or []) or "none"))
@@ -400,7 +400,7 @@ def main(argv):
             print("== concurrent builds (T7c) ==")
             for b in concurrent:
                 ph = b.get("phases") or {}
-                record("concurrent/%s" % b["build_id"][:8], b.get("state") == "PUBLISHING",
+                record("concurrent/%s" % b["build_id"][:8], b.get("state") == "SUCCEEDED",
                        "parallel %s: %.1fs from admission, attempt %.1fs, launch.setup %.1fs" % (
                            b.get("parallel"), float(b.get("since_admission") or -1), float(ph.get("total", -1)),
                            float(ph.get("launch.setup", -1))))
@@ -416,7 +416,7 @@ def main(argv):
                            b.get("teardown_seconds", -1)))
         print("== cold pull and run ==")
         for b in built:
-            if b.get("state") == "PUBLISHING" and b.get("log_complete") and b.get("output_image"):
+            if b.get("state") == "SUCCEEDED" and b.get("log_complete") and b.get("output_image"):
                 check_image(b, env)
         host_clean()
     finally:

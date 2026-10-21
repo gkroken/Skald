@@ -218,6 +218,9 @@ public class T7PassProbeTest {
     static final App R = new App("r-shiny", "r", "4.6.1", ".", "renv", "renv.lock", "app.R", "renv::restore(");
     static final App PY = new App("python-shiny", "python", "3.13.16", "app.py", "pip-hashed", "requirements.lock",
             "app.py", "\"pip\",\"install\"");
+    /** T9's identity fixture: Python Shiny plus GET /headers, the request headers as JSON. */
+    static final App PY_HEADERS = new App("python-headers", "python", "3.13.16", "app.py", "pip-hashed",
+            "requirements.lock", "app.py", "\"pip\",\"install\"");
 
     static String sha256(byte[] b) throws Exception {
         return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(b));
@@ -1048,6 +1051,230 @@ public class T7PassProbeTest {
                 ObjectNode n = result(ctx, "restart-next", PY, next);
                 assertEquals("SUCCEEDED", next.get("state"), n.toString());
             });
+        }
+    }
+    // ------------------------------------------------------------------ T9 (c): a built version, run
+
+    private static final int RUN_PORT = 7597;
+
+    /**
+     * T9 (c): the R app and the Python identity app are built by the wired worker into staged
+     * versions, activated, and opened through the real proxy at /c/<path>/, signed in. Each
+     * must serve its page and carry a Shiny WebSocket round trip; its container must run as the
+     * base's uid:gid with the deployment's limits, no mounts, unprivileged, labelled with its
+     * content, version and build; and the Python app must see the authenticated identity and
+     * none of the identity headers the client forged.
+     *
+     * <p>One step is the probe's, not the product's: a version's image names the registry as
+     * the worker reaches it, which this host's daemon cannot resolve, so the version is pointed
+     * at the same digest through the registry's published port (pulled with the probe's
+     * credentials). The digest pin -- the only part the runtime spec relies on -- is unchanged.
+     */
+    @Test
+    @DisabledIfSystemProperty(named = "skald.t7probe.restart-phase", matches = ".+")
+    public void aBuiltVersionRunsThroughTheRealProxy() throws Exception {
+        Map<String, Map<String, Object>> built = new LinkedHashMap<>();
+        application().run(ctx -> {
+            assertTrue(ctx.getStartupFailure() == null, String.valueOf(ctx.getStartupFailure()));
+            JdbcTemplate jdbc = ctx.getBean(JdbcTemplate.class);
+            for (App app : List.of(R, PY_HEADERS)) {
+                UUID[] ids = store(ctx, app, payload(app));
+                Map<String, Object> row = build(ctx, "t9-run-" + app.fixture(), ids[0], ids[1], Duration.ofMinutes(40));
+                ObjectNode r = result(ctx, "t9-run", app, row);
+                assertEquals("SUCCEEDED", row.get("state"), r.toString());
+                Map<String, Object> v = jdbc.queryForMap("SELECT id, version, image, spec_json::text AS spec"
+                        + " FROM skald.content_version WHERE build_id = ?", row.get("id"));
+                Map<String, Object> entry = new LinkedHashMap<>(v);
+                entry.put("content", ids[0]);
+                entry.put("build", row.get("id"));
+                built.put(app.fixture(), entry);
+            }
+        });
+
+        JdbcTemplate jdbc = new JdbcTemplate(new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                jdbcUrl(), jdbcUser(), jdbcPassword()));
+        String registry = "localhost:" + System.getProperty("skald.t7probe.registry-port");
+        try (DockerClient docker = new JerseyDockerClientBuilder().fromEnv().build()) {
+            Map<String, String> paths = new LinkedHashMap<>();
+            for (Map.Entry<String, Map<String, Object>> e : built.entrySet()) {
+                Map<String, Object> v = e.getValue();
+                String image = (String) v.get("image");
+                String local = registry + "/" + image.split("/", 2)[1];
+                docker.pull(local, org.mandas.docker.client.messages.RegistryAuth.builder()
+                        .username(System.getProperty("skald.t7probe.username"))
+                        .password(System.getenv("SKALD_T7PROBE_PASSWORD")).serverAddress(registry).build());
+                String path = "t9/" + e.getKey() + "-" + UUID.randomUUID().toString().substring(0, 8);
+                jdbc.update("UPDATE skald.content_version SET image = ? WHERE id = ?", local, v.get("id"));
+                jdbc.update("UPDATE skald.content SET owner = 'adminuser', active_version_id = ? WHERE id = ?",
+                        v.get("id"), v.get("content"));
+                jdbc.update("INSERT INTO skald.content_path (path, path_key, content_id) VALUES (?, ?, ?)",
+                        path, path, v.get("content"));
+                paths.put(e.getKey(), path);
+            }
+
+            org.springframework.context.ConfigurableApplicationContext run = runApplication();
+            try {
+                eu.openanalytics.containerproxy.test.helpers.ShinyProxyClient alice =
+                        new eu.openanalytics.containerproxy.test.helpers.ShinyProxyClient("adminuser", RUN_PORT);
+                String base = alice.getBaseUrl();
+                for (Map.Entry<String, Map<String, Object>> e : built.entrySet()) {
+                    String fixture = e.getKey();
+                    Map<String, Object> v = e.getValue();
+                    String url = base + "/c/" + paths.get(fixture) + "/";
+                    ObjectNode r = RESULTS.addObject().put("case", "t9-run-check").put("app", fixture);
+
+                    // The page: the first request starts the container.
+                    String page = waitForPage(alice, url, Duration.ofMinutes(3));
+                    r.put("served", page.toLowerCase(java.util.Locale.ROOT).contains("shiny"));
+                    assertTrue(page.toLowerCase(java.util.Locale.ROOT).contains("shiny"), fixture + ": " + page);
+
+                    // A Shiny WebSocket round trip: init sent, an answer back.
+                    String answer = websocketRoundTrip(url.replaceFirst("^http", "ws") + "websocket/", Duration.ofSeconds(60));
+                    r.put("websocket", answer.substring(0, Math.min(80, answer.length())));
+                    assertTrue(answer.contains("{"), fixture + " websocket: " + answer);
+
+                    // The container: user, limits, no mounts, unprivileged, labelled.
+                    var containers = docker.listContainers(DockerClient.ListContainersParam.withLabel(
+                            "eu.skald.content", v.get("content").toString()));
+                    assertEquals(1, containers.size(), fixture + ": " + containers);
+                    var info = docker.inspectContainer(containers.get(0).id());
+                    String user = jsonOf((String) v.get("spec")).path("user").asText();
+                    r.put("user", info.config().user()).put("memory", info.hostConfig().memory())
+                            .put("cpu_quota", info.hostConfig().cpuQuota()).put("cpu_period", info.hostConfig().cpuPeriod());
+                    assertEquals(user, info.config().user(), fixture);
+                    assertEquals("10001:10001", user, "the catalog's non-root user");
+                    assertEquals(512L * 1024 * 1024, info.hostConfig().memory(), fixture);
+                    assertEquals(Long.valueOf(50_000), info.hostConfig().cpuQuota(), fixture);
+                    assertEquals(Long.valueOf(100_000), info.hostConfig().cpuPeriod(), fixture);
+                    assertTrue(info.mounts() == null || info.mounts().isEmpty(), fixture + " mounts: " + info.mounts());
+                    assertTrue(info.hostConfig().binds() == null || info.hostConfig().binds().isEmpty(),
+                            fixture + " binds: " + info.hostConfig().binds());
+                    assertTrue(!Boolean.TRUE.equals(info.hostConfig().privileged()), fixture + " is privileged");
+                    assertEquals(String.valueOf(v.get("version")), info.config().labels().get("eu.skald.version"));
+                    assertEquals(v.get("build").toString(), info.config().labels().get("eu.skald.build"));
+
+                    if (fixture.equals(PY_HEADERS.fixture())) {
+                        // Identity: what the app sees is the authenticated user, never a forgery.
+                        okhttp3.Request forged = new okhttp3.Request.Builder().url(url + "headers")
+                                .header("X-SP-UserId", "mallory").header("X-SP-UserGroups", "evil")
+                                .header("X-SP-Something", "forged")
+                                .header("Cookie", "SESSION=stolen; JSESSIONID=stolen2; app=kept").get().build();
+                        String seen;
+                        try (okhttp3.Response resp = alice.newCall(forged).execute()) {
+                            seen = resp.body().string();
+                            assertEquals(200, resp.code(), seen);
+                        }
+                        JsonNode headers = JSON.readTree(seen);
+                        r.set("headers", headers);
+                        assertEquals("adminuser", headers.path("x-sp-userid").asText(), seen);
+                        // The engine writes groups upper-case.
+                        assertTrue(headers.path("x-sp-usergroups").asText().equalsIgnoreCase("admins"), seen);
+                        assertTrue(!seen.contains("mallory") && !seen.contains("evil") && !seen.contains("forged"),
+                                "a forged identity header reached the app: " + seen);
+                        // Nor the viewer's credentials: the Basic header this client signs in with,
+                        // and the platform's session cookies. The app's own cookie stays.
+                        assertTrue(headers.path("authorization").isMissingNode(), "the viewer's credentials reached the app: " + seen);
+                        assertTrue(!seen.contains("stolen"), "the platform's session cookie reached the app: " + seen);
+                        assertTrue(headers.path("cookie").asText().contains("app=kept"), seen);
+                    }
+                }
+            } finally {
+                run.close();
+                for (Map<String, Object> v : built.values()) {
+                    for (var c : docker.listContainers(DockerClient.ListContainersParam.allContainers(),
+                            DockerClient.ListContainersParam.withLabel("eu.skald.content", v.get("content").toString()))) {
+                        docker.removeContainer(c.id(), DockerClient.RemoveContainerParam.forceKill());
+                    }
+                }
+            }
+        }
+    }
+
+    private static JsonNode jsonOf(String text) throws Exception {
+        return JSON.readTree(text);
+    }
+
+    /** The whole application, as a deployment runs it, on the probe's database and store. */
+    private static org.springframework.context.ConfigurableApplicationContext runApplication() throws Exception {
+        org.springframework.boot.SpringApplication application =
+                new org.springframework.boot.SpringApplication(eu.openanalytics.containerproxy.ContainerProxyApplication.class);
+        java.util.Properties p = eu.openanalytics.containerproxy.ContainerProxyApplication.getDefaultProperties();
+        p.put("spring.config.location", "src/test/resources/application-test-admin.yml");
+        p.put("server.port", RUN_PORT);
+        p.put("management.server.port", RUN_PORT % 1000 + 9000);
+        p.put("spring.datasource.url", jdbcUrl());
+        p.put("spring.datasource.username", jdbcUser());
+        p.put("spring.datasource.password", jdbcPassword());
+        p.put("spring.flyway.schemas", "skald");
+        p.put("spring.flyway.default-schema", "skald");
+        p.put("skald.storage.endpoint", objects.endpoint());
+        p.put("skald.runtime.memory-limit", "512m");
+        p.put("skald.runtime.cpu-limit", "0.5");
+        // The store's credentials as mounted files, as the startup check requires.
+        Path secrets = Files.createTempDirectory("skald-t9-secrets");
+        Files.writeString(secrets.resolve("skald.storage.access-key"), TestObjectStore.ACCESS_KEY);
+        Files.writeString(secrets.resolve("skald.storage.secret-key"), TestObjectStore.SECRET_KEY);
+        org.springframework.core.env.StandardEnvironment environment = new org.springframework.core.env.StandardEnvironment();
+        environment.getPropertySources().addFirst(new org.springframework.boot.env.ConfigTreePropertySource("t9-secrets", secrets));
+        application.setEnvironment(environment);
+        application.setDefaultProperties(p);
+        return application.run();
+    }
+
+    private static String waitForPage(eu.openanalytics.containerproxy.test.helpers.ShinyProxyClient who, String url,
+                                      Duration bound) throws Exception {
+        long until = System.nanoTime() + bound.toNanos();
+        String last = "";
+        while (System.nanoTime() < until) {
+            try (okhttp3.Response r = who.newCall(new okhttp3.Request.Builder().url(url).get().build()).execute()) {
+                last = r.code() + " " + (r.body() == null ? "" : r.body().string());
+                if (r.code() == 200 && last.toLowerCase(java.util.Locale.ROOT).contains("shiny")) {
+                    return last;
+                }
+            } catch (java.io.IOException e) {
+                last = e.toString();
+            }
+            Thread.sleep(2000);
+        }
+        return last;
+    }
+
+    /** Opens the app's WebSocket as Shiny's client does, sends init, and returns the first answer after it. */
+    private static String websocketRoundTrip(String url, Duration bound) throws Exception {
+        java.util.concurrent.BlockingQueue<String> messages = new java.util.concurrent.LinkedBlockingQueue<>();
+        okhttp3.OkHttpClient client = new okhttp3.OkHttpClient.Builder().readTimeout(bound).build();
+        String auth = okhttp3.Credentials.basic("adminuser", "adminuser");
+        java.util.concurrent.CountDownLatch open = new java.util.concurrent.CountDownLatch(1);
+        okhttp3.WebSocket ws = client.newWebSocket(new okhttp3.Request.Builder().url(url).header("Authorization", auth).build(),
+                new okhttp3.WebSocketListener() {
+                    @Override
+                    public void onOpen(okhttp3.WebSocket socket, okhttp3.Response response) {
+                        open.countDown();
+                    }
+
+                    @Override
+                    public void onMessage(okhttp3.WebSocket socket, String text) {
+                        messages.add(text);
+                    }
+
+                    @Override
+                    public void onFailure(okhttp3.WebSocket socket, Throwable t, okhttp3.Response response) {
+                        messages.add("FAILED: " + t + (response == null ? "" : " " + response.code()));
+                        open.countDown();
+                    }
+                });
+        try {
+            assertTrue(open.await(bound.toSeconds(), java.util.concurrent.TimeUnit.SECONDS), "the websocket never opened");
+            String before = messages.poll();
+            if (before != null && before.startsWith("FAILED")) {
+                return before;
+            }
+            ws.send("{\"method\":\"init\",\"data\":{}}");
+            String answer = messages.poll(bound.toSeconds(), java.util.concurrent.TimeUnit.SECONDS);
+            return answer == null ? (before == null ? "no answer" : before) : answer;
+        } finally {
+            ws.close(1000, "done");
+            client.dispatcher().executorService().shutdown();
         }
     }
 }
