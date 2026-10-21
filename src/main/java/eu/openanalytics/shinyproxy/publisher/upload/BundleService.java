@@ -102,6 +102,25 @@ public class BundleService {
         return limits.maxCompressedBytes();
     }
 
+    /**
+     * How long the store may go without taking more of an upload while it has the client's
+     * bytes to take. A store that is partitioned away (its host gone, nothing answering with a
+     * reset) blocks the client's socket write for the kernel's retransmission time, about 15
+     * minutes, and Java gives a socket write no timeout; the SDK's per-call timeouts would also
+     * cut off a slow but healthy client. Waiting on the client is not a stall: only time the
+     * store spends not asking for bytes counts (found probing a stopped MinIO, T8 (f)).
+     */
+    static final Duration STORE_STALL = Duration.ofSeconds(60);
+    private volatile Duration storeStall = STORE_STALL;
+    private static final java.util.concurrent.ExecutorService WRITES =
+            java.util.concurrent.Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("skald-upload-", 0).factory());
+
+    /** Test seam: a shorter stall bound. */
+    BundleService withStoreStall(Duration stall) {
+        this.storeStall = stall;
+        return this;
+    }
+
     /** A new bundle, UPLOADING, for an existing content item. */
     public Map<String, Object> create(UUID contentId, String actor) {
         List<UUID> made = jdbc.queryForList("INSERT INTO skald.bundle (content_id, created_by, upload_deadline)"
@@ -155,11 +174,11 @@ public class BundleService {
                                       InputStream body) {
         requireUploading(contentId, bundleId);
         String key = ObjectKeys.bundleObject(contentId, bundleId, ObjectKeys.BUNDLE_ARCHIVE);
-        ClientReads client = new ClientReads(body);
+        ClientReads client = new ClientReads(body, contentLength);
         CountingDigestStream counted = new CountingDigestStream(client);
         Optional<StoredObject> written;
         try {
-            written = writer.writeArchive(contentId, bundleId, counted, contentLength);
+            written = writeWatched(contentId, bundleId, client, counted, contentLength);
         } catch (ObjectStoreException e) {
             if (client.failed() || counted.ended() && counted.count() < contentLength) {
                 throw incomplete(counted.count(), contentLength);
@@ -200,6 +219,43 @@ public class BundleService {
         audit(actor, "bundle.upload", bundleId, Map.of("bytes", String.valueOf(contentLength), "sha256", sha256));
         wake.run();
         return status(contentId, bundleId);
+    }
+
+    /**
+     * The store's put, on its own thread, watched from this one. When the store has gone
+     * {@link #storeStall} without asking for bytes it still has to take, the upload is given
+     * up as the store's failure: the client is answered (and its connection closed), and the
+     * stuck write is left to fail on its own -- it can only fail, because the client's stream
+     * is closed to it from here on. The bundle stays UPLOADING, so the same PUT can be sent
+     * again; a write that somehow landed meanwhile is what the replay stages already handle.
+     */
+    private Optional<StoredObject> writeWatched(UUID contentId, UUID bundleId, ClientReads client,
+                                                CountingDigestStream counted, long contentLength) {
+        java.util.concurrent.Future<Optional<StoredObject>> put =
+                WRITES.submit(() -> writer.writeArchive(contentId, bundleId, counted, contentLength));
+        while (true) {
+            try {
+                return put.get(Math.max(10, Math.min(1000, storeStall.toMillis() / 4)),
+                        java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException waiting) {
+                if (client.storeStalledFor() >= storeStall.toNanos()) {
+                    client.abandon();
+                    put.cancel(true);
+                    throw new ObjectStoreException("the store took none of the upload for "
+                            + storeStall.toSeconds() + " s while bytes were waiting");
+                }
+            } catch (java.util.concurrent.ExecutionException e) {
+                if (e.getCause() instanceof RuntimeException r) {
+                    throw r;
+                }
+                throw new ObjectStoreException("the store's put failed", e.getCause());
+            } catch (InterruptedException e) {
+                client.abandon();
+                put.cancel(true);
+                Thread.currentThread().interrupt();
+                throw new ObjectStoreException("interrupted while the store took the upload", e);
+            }
+        }
     }
 
     /** Stage (ii): the archive is already stored; it must be these bytes. */
@@ -293,32 +349,68 @@ public class BundleService {
     /** Remembers whether reading the client's body failed: a disconnect, not the store. */
     private static final class ClientReads extends java.io.FilterInputStream {
         private volatile boolean failed;
+        // The watchdog's view: inside a client read, waiting on the client, is never the
+        // store's stall; between reads, with the client's stream not at its end, the store
+        // holds the bytes it was given and has not asked for more.
+        private volatile boolean reading;
+        private volatile boolean ended;
+        private volatile boolean abandoned;
+        private volatile long since = System.nanoTime();
+        private final long declared;
+        private long total;
 
-        ClientReads(InputStream in) {
+        /**
+         * @param declared the body's Content-Length: once it is all read the store holds the
+         *                 whole upload, and waiting on its reply is a read, under the client's
+         *                 own read timeout, not a stall of the write
+         */
+        ClientReads(InputStream in, long declared) {
             super(in);
+            this.declared = declared;
         }
 
         boolean failed() {
             return failed;
         }
 
+        /** How long the store has gone without asking for bytes while some remain; 0 otherwise. */
+        long storeStalledFor() {
+            return reading || ended ? 0 : System.nanoTime() - since;
+        }
+
+        /** From now on every read fails: the request is answered and its stream is not ours. */
+        void abandon() {
+            abandoned = true;
+        }
+
         @Override
         public int read() throws IOException {
-            try {
-                return in.read();
-            } catch (IOException e) {
-                failed = true;
-                throw e;
-            }
+            byte[] one = new byte[1];
+            int n = read(one, 0, 1);
+            return n == -1 ? -1 : one[0] & 0xff;
         }
 
         @Override
         public int read(byte[] b, int off, int len) throws IOException {
+            if (abandoned) {
+                throw new IOException("the upload was given up as the store's failure");
+            }
+            reading = true;
             try {
-                return in.read(b, off, len);
+                int n = in.read(b, off, len);
+                if (n == -1) {
+                    ended = true;
+                } else {
+                    total += n;
+                    ended = total >= declared;
+                }
+                return n;
             } catch (IOException e) {
                 failed = true;
                 throw e;
+            } finally {
+                since = System.nanoTime();
+                reading = false;
             }
         }
     }

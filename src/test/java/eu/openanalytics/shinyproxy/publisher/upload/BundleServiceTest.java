@@ -384,4 +384,120 @@ public class BundleServiceTest {
     private static String archiveSha(byte[] a) {
         return TarArchives.sha256(a);
     }
+    // ------------------------------------------------------------------ a store that stops taking the upload (T8 (f))
+
+    /**
+     * A store partitioned away blocks its socket write for the kernel's retransmission time,
+     * about 15 min (found probing a stopped MinIO). The store here takes 100 bytes and then stops
+     * asking for more; the upload must be its failure within the stall bound, the bundle still
+     * UPLOADING, and the same PUT must succeed once the store takes uploads again.
+     */
+    @Test
+    public void aStoreThatStopsTakingTheUploadIsItsFailureWithinTheStallBound() throws Exception {
+        Faults store = new Faults();
+        java.util.concurrent.CountDownLatch released = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicReference<String> later = new java.util.concurrent.atomic.AtomicReference<>();
+        java.util.concurrent.CountDownLatch tried = new java.util.concurrent.CountDownLatch(1);
+        store.put = content -> {
+            try {
+                // Part of the body only: the archive is a few hundred bytes.
+                content.readNBytes(100);
+                released.await(60, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (IOException | InterruptedException e) {
+                // given up: the watchdog interrupts it
+            }
+            // The stuck write coming back to life must not read the answered request's body.
+            try {
+                later.set("read " + content.read(new byte[16], 0, 16));
+            } catch (IOException e) {
+                later.set("refused: " + e.getMessage());
+            }
+            tried.countDown();
+            throw new ObjectStoreException("injected: the stuck write failed at last");
+        };
+        BundleService s = service(store).withStoreStall(java.time.Duration.ofMillis(500));
+        UUID c = content();
+        UUID b = bundle(s, c);
+        byte[] a = archive("stall");
+        long t0 = System.nanoTime();
+        assertEquals(TransportError.STORAGE_UNAVAILABLE, refusal(() -> put(s, c, b, a)));
+        long ms = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+        assertTrue(ms < 5000, "answered after " + ms + " ms");
+        assertEquals("UPLOADING", state(b));
+        released.countDown();
+        assertTrue(tried.await(10, java.util.concurrent.TimeUnit.SECONDS));
+        assertEquals("refused: the upload was given up as the store's failure", later.get());
+        store.put = null;
+        assertEquals("VALIDATING", put(s, c, b, a).get("state"));
+    }
+
+    /** Waiting on a slow client is not the store's stall: only time the store spends not asking counts. */
+    @Test
+    public void aSlowClientIsNotTakenForAStalledStore() throws Exception {
+        BundleService s = service(new Faults()).withStoreStall(java.time.Duration.ofMillis(300));
+        UUID c = content();
+        UUID b = bundle(s, c);
+        byte[] a = archive("slow");
+        InputStream slow = new InputStream() {
+            int at;
+
+            @Override
+            public int read() throws IOException {
+                byte[] one = new byte[1];
+                return read(one, 0, 1) == -1 ? -1 : one[0] & 0xff;
+            }
+
+            @Override
+            public int read(byte[] buf, int off, int len) throws IOException {
+                if (at >= a.length) {
+                    return -1;
+                }
+                if (at == a.length / 2) {
+                    try {
+                        Thread.sleep(1500);
+                    } catch (InterruptedException e) {
+                        throw new IOException(e);
+                    }
+                }
+                int n = Math.min(len, Math.max(1, (at < a.length / 2 ? a.length / 2 : a.length) - at));
+                System.arraycopy(a, at, buf, off, n);
+                at += n;
+                return n;
+            }
+        };
+        assertEquals("VALIDATING", s.upload(c, b, "alice", a.length, slow).get("state"));
+    }
+    /**
+     * A store that has read the whole body and is slow to reply is not stalled: the bytes are
+     * all with it, and the wait is a read under the client's own timeout.
+     */
+    @Test
+    public void aStoreSlowToCommitTheWholeBodyIsNotTakenForAStall() throws Exception {
+        Faults store = new Faults();
+        BundleService s = service(store).withStoreStall(java.time.Duration.ofMillis(300));
+        UUID c = content();
+        UUID b = bundle(s, c);
+        byte[] a = archive("commit");
+        store.put = content -> {
+            try {
+                // As the SDK does: exactly the declared length, never asking past it (readNBytes
+                // would read on to the end of the stream, which no SDK needs to).
+                byte[] all = new byte[a.length];
+                int got = 0;
+                while (got < all.length) {
+                    int n = content.read(all, got, all.length - got);
+                    if (n <= 0) {
+                        throw new IOException("short body");
+                    }
+                    got += n;
+                }
+                Thread.sleep(1500);
+                return objects.store.putStreamingIfAbsent(BUCKET, ObjectKeys.bundleObject(c, b, ObjectKeys.BUNDLE_ARCHIVE),
+                    new ByteArrayInputStream(all), all.length, "application/gzip");
+            } catch (IOException | InterruptedException e) {
+                throw new ObjectStoreException("unexpected: " + e);
+            }
+        };
+        assertEquals("VALIDATING", put(s, c, b, a).get("state"));
+    }
 }

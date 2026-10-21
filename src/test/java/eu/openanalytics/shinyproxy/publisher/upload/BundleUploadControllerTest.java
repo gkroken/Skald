@@ -381,4 +381,43 @@ public class BundleUploadControllerTest {
         assertEquals("adminuser", rows.get(0).get("actor"));
         assertEquals(List.of("bundle.create", "bundle.upload"), rows.stream().map(r -> r.get("action")).limit(2).toList());
     }
+    /**
+     * A refusal with most of the body unsent closes the connection (found probing a stopped
+     * MinIO): otherwise the server neither reads the rest nor closes, and a client that writes
+     * its whole body before reading the reply waits on its own timeout. The socket sends the
+     * headers and 1 KiB of a body declared over the limit, then stops, and must read the
+     * refusal and then the server's close.
+     */
+    @Test
+    public void aRefusedUploadClosesTheConnectionSoAClientStillSendingIsNotLeftWaiting() throws Exception {
+        UUID c = content("shiny");
+        UUID b = newBundle(c);
+        String auth = java.util.Base64.getEncoder().encodeToString("adminuser:adminuser".getBytes(StandardCharsets.UTF_8));
+        try (java.net.Socket socket = new java.net.Socket("localhost", PORT)) {
+            socket.setSoTimeout(10_000);
+            java.io.OutputStream out = socket.getOutputStream();
+            out.write(("PUT /admin/content/" + c + "/bundles/" + b + "/content HTTP/1.1\r\n"
+                + "Host: localhost:" + PORT + "\r\n"
+                + "Authorization: Basic " + auth + "\r\n"
+                + "Content-Type: application/gzip\r\n"
+                + "X-Skald-Upload: 1\r\n"
+                + "Content-Length: " + (MAX_BYTES + 1) + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+            out.write(new byte[1024]);
+            out.flush();
+            ByteArrayOutputStream reply = new ByteArrayOutputStream();
+            java.io.InputStream in = socket.getInputStream();
+            byte[] buffer = new byte[4096];
+            int n;
+            // Read to the end of the stream: a server that keeps the connection open makes this
+            // time out instead.
+            while ((n = in.read(buffer)) != -1) {
+                reply.write(buffer, 0, n);
+            }
+            String text = reply.toString(StandardCharsets.US_ASCII);
+            assertTrue(text.startsWith("HTTP/1.1 413"), text);
+            assertTrue(text.toLowerCase(java.util.Locale.ROOT).contains("\r\nconnection: close\r\n"), text);
+            assertTrue(text.contains("BUNDLE_TOO_LARGE"), text);
+        }
+        assertEquals("UPLOADING", jdbc.queryForObject("SELECT state FROM skald.bundle WHERE id = ?", String.class, b));
+    }
 }

@@ -93,7 +93,23 @@ public class BundleUploadController extends TransportController {
 
     @PutMapping("/{bundleId}/content")
     public ResponseEntity<byte[]> upload(@PathVariable UUID contentId, @PathVariable UUID bundleId,
-                                         HttpServletRequest request) throws IOException {
+                                         HttpServletRequest request,
+                                         jakarta.servlet.http.HttpServletResponse response) throws IOException {
+        try {
+            return receive(contentId, bundleId, request);
+        } catch (TransportException e) {
+            // A refusal may come with most of the body still unsent (a store that failed half way,
+            // a size refused before a byte was read). Without this the server neither reads the
+            // rest nor closes, and a client that writes the whole body before reading the reply
+            // waits on its own timeout (found probing a stopped MinIO, f859b52 (f)). Closed, its
+            // next write fails at once and the reply is there to read.
+            response.setHeader(HttpHeaders.CONNECTION, "close");
+            throw e;
+        }
+    }
+
+    private ResponseEntity<byte[]> receive(UUID contentId, UUID bundleId, HttpServletRequest request)
+            throws IOException {
         if (request.getHeader(UPLOAD_HEADER) == null) {
             throw new TransportException(TransportError.UPLOAD_HEADER_MISSING,
                     "an upload carries the " + UPLOAD_HEADER + " header, which no cross-site form can set");
