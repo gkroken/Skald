@@ -3237,6 +3237,18 @@ below are marked passed by this planning document.
       Past retention the store is asked again, so a deleted record reads `expired`; and
       the first failed storage read of a request ends that request's reads, so a page
       during an outage does not wait out the SDK's retries once per item.
+      *(d) as built* (build.logs.replay): the cursor's record index counts from 1 within
+      its chunk, and `s.0` is the position before chunk s's first record, so a chunk
+      boundary has two names and both stay valid (shapes.cursor.record_index). A page is
+      read whole from storage and then written, since a log is bounded by its head and
+      tail budgets (2 MiB by default): a storage failure is then a 503 before any byte goes
+      out, never a truncated 200. An advertised chunk that is not in the store is
+      STORAGE_UNAVAILABLE, not a silent skip. `limit` may also be given to the text view,
+      up to the same 10000; without it the text view is unlimited. The query takes only
+      `after` and `limit`. Accept is ranked by quality, the most specific range deciding
+      each type, and a tie goes to the type named outright; anything unreadable, or no
+      Accept at all, gets text/plain. The text end line also says `incomplete` and
+      `truncated` when they apply (shapes.log_records.text_end).
       build.list refuses an unknown query parameter (400), the GET counterpart of strict
       bodies, so a misspelt `?status=` does not quietly mean "no filter". Refusals carry the
       state they were decided on: `bundleState` on BUNDLE_NOT_VALIDATED, `retryOfState` on

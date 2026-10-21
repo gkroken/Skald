@@ -245,6 +245,7 @@
       "pattern": "^(0|[1-9][0-9]{0,11})\\.(0|[1-9][0-9]{0,8})$",
       "matched": "whole: java.util.regex matches(), never find(); $ alone matches before a final newline (dd46cac-F2)",
       "start": "0.0",
+      "record_index": "counted from 1 within its chunk; s.0 is the position before chunk s's first record, so a chunk boundary has two names (s.N and s+1.0), both valid",
       "opaque": "Documented so a person can read one; a client never builds one.",
       "served_up_to": "what the log advertises: final.json once it exists, else index.json; never past a hole",
       "ahead_of_index": "not an error: replay returns nothing, the stream waits"
@@ -255,6 +256,7 @@
       "end":    {"end": {"outcome": "final.json outcome", "complete": "boolean", "truncated": "boolean", "buildState": "the build's state"}},
       "stored_marker_renamed": "HeadTailLog stores the marker as {\"cut\":{...}}; it is served as gap so the two meanings of cut do not share a key",
       "text_line": "<n right-aligned> | <text>, ' [cut]' appended to a shortened line",
+      "text_end": "----- skald: log final: <outcome>, complete|incomplete[, truncated] -----",
       "text_platform_lines": "----- skald: ... ----- (no ' | ', so build output cannot pass for one)"
     },
     "stream": {

@@ -239,6 +239,24 @@ public class BuildLogWriter {
         }
     }
 
+    /**
+     * One chunk's bytes, or empty if it is not stored. A chunk is bounded by the writer's
+     * chunk size, so it is read whole.
+     *
+     * @throws ObjectStoreException if the store cannot be read
+     */
+    public Optional<byte[]> readChunk(UUID contentId, UUID buildId, long sequence) {
+        String key = ObjectKeys.logChunk(contentId, buildId, sequence);
+        if (store.head(bucket, key).isEmpty()) {
+            return Optional.empty();
+        }
+        try (InputStream in = store.open(bucket, key)) {
+            return Optional.of(in.readAllBytes());
+        } catch (IOException e) {
+            throw new ObjectStoreException("could not read " + bucket + "/" + key, e);
+        }
+    }
+
     public Optional<LogFinal> readFinal(UUID contentId, UUID buildId) {
         return read(ObjectKeys.logObject(contentId, buildId, ObjectKeys.LOG_FINAL),
                 LogFinal.class);

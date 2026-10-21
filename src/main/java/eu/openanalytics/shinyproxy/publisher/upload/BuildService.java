@@ -214,6 +214,144 @@ public class BuildService {
         }
     }
 
+    // ------------------------------------------------------------------ build.logs.replay
+
+    /** Records a page may hold when the caller names no limit: ndjson's default and the max. */
+    static final int REPLAY_DEFAULT = 1000;
+    static final int REPLAY_MAX = 10_000;
+    private static final java.util.regex.Pattern CURSOR =
+            java.util.regex.Pattern.compile("(0|[1-9][0-9]{0,11})\\.(0|[1-9][0-9]{0,8})");
+
+    /**
+     * A position after one record: chunk {@code sequence}, record {@code record} of it,
+     * counted from 1. {@code s.0} is before chunk s's first record, and 0.0 the start.
+     */
+    record Cursor(long sequence, long record) {
+        static final Cursor START = new Cursor(0, 0);
+
+        /** shapes.cursor: the whole string, matches() and never find() (dd46cac-F2). */
+        static Cursor parse(String text) {
+            if (text == null) {
+                return START;
+            }
+            java.util.regex.Matcher m = CURSOR.matcher(text);
+            if (!m.matches()) {
+                throw new TransportException(TransportError.CURSOR_INVALID, "'" + printable(text)
+                        + "' is not a cursor; use one a previous reply gave, or none to start");
+            }
+            return new Cursor(Long.parseLong(m.group(1)), Long.parseLong(m.group(2)));
+        }
+
+        @Override
+        public String toString() {
+            return sequence + "." + record;
+        }
+    }
+
+    /**
+     * One page of a build's log: its records as served (shapes.log_records), the end record
+     * when this page reached the end of a final log, and the cursor to continue from when
+     * more is advertised than the page held.
+     */
+    public record Replay(String logState, String buildState, List<com.fasterxml.jackson.databind.node.ObjectNode> records,
+                         com.fasterxml.jackson.databind.node.ObjectNode end, String next) { }
+
+    /**
+     * Reads the log after {@code after}, at most {@code limit} records (negative: no limit).
+     * Only what the log advertises is served -- final.json once it exists, else index.json --
+     * so a cursor handed out is valid again later. A cursor ahead of that returns nothing.
+     */
+    public Replay replay(UUID contentId, UUID buildId, String after, int limit) {
+        Cursor from = Cursor.parse(after);
+        List<Map<String, Object>> rows = jdbc.queryForList("SELECT state, started_at, finished_at FROM skald.build"
+                + " WHERE id = ? AND content_id = ?", buildId, contentId);
+        if (rows.isEmpty()) {
+            throw notFound(contentId, buildId);
+        }
+        String buildState = (String) rows.get(0).get("state");
+        String logState = (String) log(contentId, buildId, buildState, rows.get(0).get("started_at"),
+                rows.get(0).get("finished_at"), new StoreReads()).get("state");
+        switch (logState) {
+            case "storage_unavailable" -> throw new TransportException(TransportError.STORAGE_UNAVAILABLE,
+                    "the log store could not be read; try again shortly");
+            case "expired" -> throw new TransportException(TransportError.LOG_EXPIRED,
+                    "build " + buildId + "'s log was removed by retention (" + LOG_RETENTION.toDays() + " days)");
+            case "none", "pending" -> {
+                return new Replay(logState, buildState, List.of(), null, null);
+            }
+            default -> { }
+        }
+        List<com.fasterxml.jackson.databind.node.ObjectNode> out = new ArrayList<>();
+        try {
+            LogFinal fin = finalOf(contentId, buildId, false).orElse(null);
+            long advertised = fin != null ? fin.lastSequence()
+                    : logs.readIndex(contentId, buildId).map(i -> i.lastSequence()).orElse(0L);
+            long sequence = Math.max(1, from.sequence());
+            long skip = from.sequence() == 0 ? 0 : from.record();
+            for (; sequence <= advertised; sequence++, skip = 0) {
+                byte[] chunk = logs.readChunk(contentId, buildId, sequence).orElseThrow(() ->
+                        new ObjectStoreException("an advertised chunk is not in the store"));
+                List<String> lines = chunkLines(chunk);
+                for (int i = (int) Math.min(skip, lines.size()); i < lines.size(); i++) {
+                    if (limit >= 0 && out.size() == limit) {
+                        return new Replay(logState, buildState, out, null,
+                                String.valueOf(out.get(out.size() - 1).get("cursor").asText()));
+                    }
+                    out.add(record(new Cursor(sequence, i + 1L), lines.get(i)));
+                }
+            }
+            com.fasterxml.jackson.databind.node.ObjectNode end = null;
+            if (fin != null) {
+                end = TransportJson.JSON.createObjectNode();
+                end.putObject("end").put("outcome", fin.outcome()).put("complete", fin.complete())
+                        .put("truncated", fin.truncated()).put("buildState", buildState);
+            }
+            return new Replay(logState, buildState, out, end, null);
+        } catch (ObjectStoreException e) {
+            log.warn("build {}: the log store could not be read: {}", buildId, e.getMessage());
+            throw new TransportException(TransportError.STORAGE_UNAVAILABLE,
+                    "the log store could not be read; try again shortly from the same cursor");
+        }
+    }
+
+    private static List<String> chunkLines(byte[] chunk) {
+        List<String> lines = new ArrayList<>();
+        for (String line : new String(chunk, java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+            if (!line.isEmpty()) {
+                lines.add(line);
+            }
+        }
+        return lines;
+    }
+
+    /**
+     * A stored record as served: the line with its cursor, or the head/tail marker, stored as
+     * {@code {"cut":{...}}}, renamed {@code gap} so the two meanings of cut do not share a key.
+     */
+    private static com.fasterxml.jackson.databind.node.ObjectNode record(Cursor at, String stored) {
+        com.fasterxml.jackson.databind.JsonNode node;
+        try {
+            node = TransportJson.JSON.readTree(stored);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("a stored log record did not parse", e);
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode out = TransportJson.JSON.createObjectNode();
+        out.put("cursor", at.toString());
+        if (node.path("t").isTextual() && node.path("n").canConvertToLong()) {
+            out.put("n", node.get("n").asLong());
+            out.put("t", node.get("t").asText());
+            if (node.path("cut").asBoolean(false)) {
+                out.put("cut", true);
+            }
+        } else if (node.path("cut").isObject()) {
+            out.putObject("gap").put("lines", node.get("cut").path("lines").asLong())
+                    .put("bytes", node.get("cut").path("bytes").asLong());
+        } else {
+            throw new IllegalStateException("a stored log record is neither a line nor the marker");
+        }
+        return out;
+    }
+
     // ------------------------------------------------------------------ the shape
 
     /** Storage reads within one request: after the first failure, no more are made. */

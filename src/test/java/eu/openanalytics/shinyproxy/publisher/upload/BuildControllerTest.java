@@ -277,7 +277,8 @@ public class BuildControllerTest {
         UUID c = content();
         UUID bundle = bundle(c, "VALIDATED");
         UUID b = newBuild(c, bundle);
-        for (Request r : List.of(create(c, createBody(bundle, "other")), get(url(c, "")), status(c, b), cancel(c, b))) {
+        for (Request r : List.of(create(c, createBody(bundle, "other")), get(url(c, "")), status(c, b), cancel(c, b),
+                get(url(c, "/" + b + "/logs")))) {
             assertEquals(403, call(plain, r).status(), r.method() + " " + r.url());
         }
         assertEquals(1, builds());
@@ -291,7 +292,8 @@ public class BuildControllerTest {
         UUID c = content();
         UUID bundle = bundle(c, "VALIDATED");
         UUID b = newBuild(c, bundle);
-        for (Request r : List.of(create(c, createBody(bundle, "other")), get(url(c, "")), status(c, b), cancel(c, b))) {
+        for (Request r : List.of(create(c, createBody(bundle, "other")), get(url(c, "")), status(c, b), cancel(c, b),
+                get(url(c, "/" + b + "/logs")))) {
             Reply reply = call(null, r);
             assertEquals(302, reply.status(), r.method() + " " + r.url());
             assertTrue(String.valueOf(reply.raw().header("Location")).contains("/login"), r.method() + " " + r.url());
@@ -312,6 +314,8 @@ public class BuildControllerTest {
         assertEquals("BUILD_NOT_FOUND", code(s));
         assertEquals("BUILD_NOT_FOUND", code(call(admin, status(mine, UUID.randomUUID()))));
         assertEquals("BUILD_NOT_FOUND", code(call(admin, cancel(mine, b))));
+        assertEquals("BUILD_NOT_FOUND", code(call(admin, get(url(mine, "/" + b + "/logs")))));
+        assertEquals("CONTENT_NOT_FOUND", code(call(admin, get(url(UUID.randomUUID(), "/" + b + "/logs")))));
         assertEquals("BUNDLE_NOT_FOUND", code(call(admin, create(mine, createBody(theirBundle, "k")))));
         assertEquals("BUILD_NOT_FOUND", code(call(admin, create(mine,
             "{\"retryOf\":\"" + b + "\",\"idempotencyKey\":\"k2\"}"))));
@@ -787,5 +791,256 @@ public class BuildControllerTest {
         assertEquals(new TreeSet<>(Set.of("build.cancel.cancelled")), new TreeSet<>(jdbc.queryForList(
             "SELECT action FROM skald.audit_event WHERE subject_id = ? AND actor = 'adminuser' AND action LIKE"
                 + " 'build.cancel.%'", String.class, queued.toString())));
+    }
+    // ------------------------------------------------------------------ build.logs.replay (T8 (d))
+
+    private static byte[] records(Object... records) throws IOException {
+        StringBuilder out = new StringBuilder();
+        for (Object r : records) {
+            // A String is a stored record as raw JSON text, for what only an escape can carry.
+            out.append(r instanceof String text ? text : JSON.writeValueAsString(r)).append('\n');
+        }
+        return out.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static Map<String, Object> line(long n, String text) {
+        return Map.of("n", n, "t", text);
+    }
+
+    private static Request logs(UUID c, UUID b, String query, String accept) {
+        Request.Builder r = new Request.Builder().url(url(c, "/" + b + "/logs" + query)).get();
+        if (accept != null) {
+            r.header("Accept", accept);
+        }
+        return r.build();
+    }
+
+    private static List<String> cursors(Reply r) {
+        List<String> out = new ArrayList<>();
+        for (String l : r.text().split("\n")) {
+            if (!l.isEmpty()) {
+                out.add(l.startsWith("{\"end\"") ? "end" : l.replaceAll("^\\{\"cursor\":\"([0-9.]+)\".*$", "$1"));
+            }
+        }
+        return out;
+    }
+
+    /** A RUNNING attempt with chunks 1 and 2 advertised, and chunk 4 stored past a hole. */
+    private static UUID[] liveLog() throws IOException {
+        UUID[] cb = at("RUNNING", false);
+        logs.appendChunk(cb[0], cb[1], 1, records(line(1, "one"), line(2, "two"), line(3, "three")));
+        logs.appendChunk(cb[0], cb[1], 2, records(Map.of("n", 4, "t", "four, shortened", "cut", true),
+            Map.of("cut", Map.of("lines", 5, "bytes", 120)), line(10, "ten")));
+        logs.appendChunk(cb[0], cb[1], 4, records(line(99, "past the hole")));
+        logs.publishIndex(cb[0], cb[1], 1);
+        return cb;
+    }
+
+    @Test
+    public void anAttemptWithNoLogYetIsAnEmptyPage() throws Exception {
+        UUID c = content();
+        UUID queued = newBuild(c, bundle(c, "VALIDATED"));
+        Reply r = call(admin, logs(c, queued, "", "application/x-ndjson"));
+        assertEquals(200, r.status());
+        assertEquals("", r.text());
+        assertEquals("pending", r.raw().header("X-Skald-Log-State"));
+        assertEquals("QUEUED", r.raw().header("X-Skald-Build-State"));
+        assertEquals(null, r.raw().header("X-Skald-Next-Cursor"));
+        UUID[] never = at("QUEUED", false);
+        call(admin, cancel(never[0], never[1]));
+        Reply none = call(admin, logs(never[0], never[1], "", null));
+        assertEquals(200, none.status());
+        assertEquals("none", none.raw().header("X-Skald-Log-State"));
+    }
+
+    @Test
+    public void ndjsonServesWhatTheIndexAdvertisesWithCursorsAndNeverPastAHole() throws Exception {
+        UUID[] cb = liveLog();
+        Reply r = call(admin, logs(cb[0], cb[1], "", "application/x-ndjson"));
+        assertEquals(200, r.status());
+        assertEquals("application/x-ndjson", r.raw().header("Content-Type"));
+        assertEquals("live", r.raw().header("X-Skald-Log-State"));
+        assertEquals("RUNNING", r.raw().header("X-Skald-Build-State"));
+        assertEquals(List.of(
+            "{\"cursor\":\"1.1\",\"n\":1,\"t\":\"one\"}",
+            "{\"cursor\":\"1.2\",\"n\":2,\"t\":\"two\"}",
+            "{\"cursor\":\"1.3\",\"n\":3,\"t\":\"three\"}",
+            "{\"cursor\":\"2.1\",\"n\":4,\"t\":\"four, shortened\",\"cut\":true}",
+            "{\"cursor\":\"2.2\",\"gap\":{\"lines\":5,\"bytes\":120}}",
+            "{\"cursor\":\"2.3\",\"n\":10,\"t\":\"ten\"}"), List.of(r.text().split("\n")));
+        assertEquals("nosniff", r.raw().header("X-Content-Type-Options"));
+        assertEquals("default-src 'none'; sandbox", r.raw().header("Content-Security-Policy"));
+        assertEquals(null, r.raw().header("X-Skald-Next-Cursor"), "nothing more is advertised");
+    }
+
+    @Test
+    public void pagesResumeFromTheCursorTheyHandOut() throws Exception {
+        UUID[] cb = liveLog();
+        List<String> seen = new ArrayList<>();
+        String after = null;
+        int pages = 0;
+        do {
+            Reply r = call(admin, logs(cb[0], cb[1], "?limit=2" + (after == null ? "" : "&after=" + after),
+                "application/x-ndjson"));
+            assertEquals(200, r.status(), r.text());
+            seen.addAll(cursors(r));
+            after = r.raw().header("X-Skald-Next-Cursor");
+            pages++;
+        } while (after != null && pages < 10);
+        assertEquals(List.of("1.1", "1.2", "1.3", "2.1", "2.2", "2.3"), seen);
+        assertEquals(3, pages, "a page that ends where the log does names no next cursor");
+        // Every cursor handed out is valid later, and a chunk boundary has two names.
+        assertEquals(List.of("2.1", "2.2", "2.3"), cursors(call(admin, logs(cb[0], cb[1], "?after=1.3",
+            "application/x-ndjson"))));
+        assertEquals(List.of("2.1", "2.2", "2.3"), cursors(call(admin, logs(cb[0], cb[1], "?after=2.0",
+            "application/x-ndjson"))));
+        assertEquals(List.of("1.1", "1.2", "1.3", "2.1", "2.2", "2.3"), cursors(call(admin, logs(cb[0], cb[1],
+            "?after=0.0", "application/x-ndjson"))));
+        // Ahead of the index: not an error, nothing yet.
+        Reply ahead = call(admin, logs(cb[0], cb[1], "?after=3.0", "application/x-ndjson"));
+        assertEquals(200, ahead.status());
+        assertEquals("", ahead.text());
+        assertEquals("", call(admin, logs(cb[0], cb[1], "?after=2.7", "application/x-ndjson")).text());
+    }
+
+    @Test
+    public void aMalformedCursorIsRefused() throws Exception {
+        UUID[] cb = liveLog();
+        for (String bad : new String[] {"1", "01.0", "1.01", "-1.0", "1.0.0", "1.1x", "x1.1", "1.0%0A", "%0A1.0",
+                "1.%20", "1234567890123.0", "1.1234567890", ""}) {
+            Reply r = call(admin, logs(cb[0], cb[1], "?after=" + bad, "application/x-ndjson"));
+            assertEquals(400, r.status(), bad);
+            assertEquals("CURSOR_INVALID", code(r), bad);
+        }
+        assertEquals(200, call(admin, logs(cb[0], cb[1], "?after=123456789012.123456789", null)).status());
+    }
+
+    @Test
+    public void aFinalLogEndsWithItsEndRecordOnEveryRead() throws Exception {
+        UUID[] cb = liveLog();
+        place(cb[1], "FAILED", false);
+        logs.finalise(cb[0], cb[1], 1, "FAILED:BUILD_FAILED", true);
+        Reply r = call(admin, logs(cb[0], cb[1], "", "application/x-ndjson"));
+        assertEquals("final", r.raw().header("X-Skald-Log-State"));
+        assertEquals("FAILED", r.raw().header("X-Skald-Build-State"));
+        String[] lines = r.text().split("\n");
+        assertEquals(7, lines.length);
+        assertEquals("{\"end\":{\"outcome\":\"FAILED:BUILD_FAILED\",\"complete\":false,\"truncated\":true,"
+            + "\"buildState\":\"FAILED\"}}", lines[6], "chunk 4 past the hole was never read: incomplete");
+        assertEquals(List.of("end"), cursors(call(admin, logs(cb[0], cb[1], "?after=2.3", "application/x-ndjson"))),
+            "a reader at the end gets the end record again");
+        Reply cutShort = call(admin, logs(cb[0], cb[1], "?limit=3", "application/x-ndjson"));
+        assertFalse(cutShort.text().contains("\"end\""), "a page that stops early does not end the log");
+        assertEquals("1.3", cutShort.raw().header("X-Skald-Next-Cursor"));
+        Reply text = call(admin, logs(cb[0], cb[1], "", null));
+        assertTrue(text.text().endsWith("----- skald: log final: FAILED:BUILD_FAILED, incomplete, truncated -----\n"),
+            text.text());
+    }
+
+    @Test
+    public void theTextViewIsTheCurlViewAndNeutralisesWhatTheBuildPrinted() throws Exception {
+        UUID[] cb = at("RUNNING", false);
+        logs.appendChunk(cb[0], cb[1], 1, records(line(9, "plain"),
+            line(10, "esc \u001b[31mred\u001b[0m bidi \u202e c1 \u0085 zwj a\u200db tab\there caf\u00e9"),
+            "{\"n\":11,\"t\":\"lone \\ud800 surrogate\",\"cut\":true}",
+            Map.of("cut", Map.of("lines", 3, "bytes", 40)),
+            line(15, "after the gap")));
+        logs.publishIndex(cb[0], cb[1], 1);
+        Reply r = call(admin, logs(cb[0], cb[1], "", null));
+        assertEquals(200, r.status());
+        assertEquals("text/plain;charset=UTF-8", r.raw().header("Content-Type").replace(" ", ""));
+        assertEquals("nosniff", r.raw().header("X-Content-Type-Options"));
+        assertEquals("default-src 'none'; sandbox", r.raw().header("Content-Security-Policy"));
+        assertEquals(" 9 | plain\n"
+            + "10 | esc \\x{1B}[31mred\\x{1B}[0m bidi \\x{202E} c1 \\x{85} zwj a\\x{200D}b tab\there caf\u00e9\n"
+            + "11 | lone \\x{D800} surrogate [cut]\n"
+            + "----- skald: 3 lines (40 bytes) dropped here; head and tail kept -----\n"
+            + "15 | after the gap\n", r.text());
+        // The same records as ndjson are ASCII on the wire.
+        Reply nd = call(admin, logs(cb[0], cb[1], "", "application/x-ndjson"));
+        assertFalse(nd.text().chars().anyMatch(ch -> ch > 0x7e || (ch < 0x20 && ch != '\n')), nd.text());
+        assertTrue(nd.text().contains("\\u202E") || nd.text().contains("\\u202e"), nd.text());
+    }
+
+    @Test
+    public void acceptPicksTheViewAndPlainCurlGetsText() throws Exception {
+        assertFalse(BuildController.prefersNdjson(null));
+        assertFalse(BuildController.prefersNdjson(""));
+        assertFalse(BuildController.prefersNdjson("*/*"));
+        assertFalse(BuildController.prefersNdjson("text/plain"));
+        assertFalse(BuildController.prefersNdjson("application/json"));
+        assertFalse(BuildController.prefersNdjson("not a media type;;"));
+        assertFalse(BuildController.prefersNdjson("application/x-ndjson;q=0.1, text/plain"));
+        assertFalse(BuildController.prefersNdjson("application/x-ndjson;q=0"));
+        assertTrue(BuildController.prefersNdjson("application/x-ndjson"));
+        assertTrue(BuildController.prefersNdjson("text/plain;q=0.5, application/x-ndjson"));
+        assertTrue(BuildController.prefersNdjson("application/x-ndjson, */*"));
+        assertTrue(BuildController.prefersNdjson("application/*, text/*;q=0.9"));
+        // The most specific range decides a type's quality, wherever it is listed.
+        assertTrue(BuildController.prefersNdjson("*/*;q=0.1, application/x-ndjson"));
+        assertFalse(BuildController.prefersNdjson("*/*;q=0.1, application/x-ndjson;q=0.05"));
+        UUID[] cb = liveLog();
+        assertTrue(call(admin, logs(cb[0], cb[1], "", "*/*")).raw().header("Content-Type").startsWith("text/plain"));
+        assertTrue(call(admin, logs(cb[0], cb[1], "", null)).raw().header("Content-Type").startsWith("text/plain"));
+    }
+
+    @Test
+    public void replayLimitsAndParametersAreChecked() throws Exception {
+        UUID[] cb = at("RUNNING", false);
+        Object[] many = new Object[1001];
+        for (int i = 0; i < many.length; i++) {
+            many[i] = line(i + 1, "l" + i);
+        }
+        logs.appendChunk(cb[0], cb[1], 1, records(many));
+        logs.publishIndex(cb[0], cb[1], 1);
+        Reply nd = call(admin, logs(cb[0], cb[1], "", "application/x-ndjson"));
+        assertEquals(1000, nd.text().split("\n").length, "ndjson's default page");
+        assertEquals("1.1000", nd.raw().header("X-Skald-Next-Cursor"));
+        assertEquals(1001, call(admin, logs(cb[0], cb[1], "", null)).text().split("\n").length, "text: no default limit");
+        assertEquals(1001, call(admin, logs(cb[0], cb[1], "?limit=10000", "application/x-ndjson")).text()
+            .split("\n").length);
+        for (String q : new String[] {"?limit=0", "?limit=10001", "?limit=abc", "?limit=-1", "?limit=1&limit=2",
+                "?after=1.1&after=1.2", "?cursor=1.1", "?state=FAILED"}) {
+            Reply r = call(admin, logs(cb[0], cb[1], q, "application/x-ndjson"));
+            assertEquals(400, r.status(), q);
+            assertEquals("BAD_REQUEST", code(r), q);
+        }
+    }
+
+    @Test
+    public void anExpiredOrUnreadableLogIsRefusedWithItsOwnCode() throws Exception {
+        UUID[] old = at("SUCCEEDED", false);
+        jdbc.update("UPDATE skald.build SET finished_at = now() - interval '91 days' WHERE id = ?", old[1]);
+        Reply gone = call(admin, logs(old[0], old[1], "", null));
+        assertEquals(410, gone.status());
+        assertEquals("LOG_EXPIRED", code(gone));
+
+        UUID[] cb = liveLog();
+        boolean[] down = {false};
+        boolean[] chunkGone = {false};
+        ForwardingObjectStore store = new ForwardingObjectStore(objects.store) {
+            @Override
+            public Optional<StoredObject> head(String bucket, String key) {
+                if (down[0]) {
+                    throw new ObjectStoreException("injected: the store is down");
+                }
+                if (chunkGone[0] && key.contains("/chunks/")) {
+                    return Optional.empty();
+                }
+                return super.head(bucket, key);
+            }
+        };
+        BuildService service = new BuildService(jdbc, app.getBean(BuildAdmission.class),
+            app.getBean(BuildCoordinator.class), new BuildLogWriter(store, LOGS));
+        assertEquals(6, service.replay(cb[0], cb[1], null, -1).records().size());
+        down[0] = true;
+        TransportException e = org.junit.jupiter.api.Assertions.assertThrows(TransportException.class,
+            () -> service.replay(cb[0], cb[1], null, -1));
+        assertEquals(TransportError.STORAGE_UNAVAILABLE, e.code());
+        down[0] = false;
+        chunkGone[0] = true;
+        TransportException missing = org.junit.jupiter.api.Assertions.assertThrows(TransportException.class,
+            () -> service.replay(cb[0], cb[1], null, -1));
+        assertEquals(TransportError.STORAGE_UNAVAILABLE, missing.code(), "an advertised chunk that is not there");
     }
 }

@@ -74,6 +74,15 @@ public final class InvisibleCharacters {
         return -1;
     }
 
+    /**
+     * Whether {@code cp} is in the refused set itself, without the ContextJ exception: for
+     * text shown to a person where no name is being judged, such as a build log's text view,
+     * which writes every such code point as an escape (T8 shapes.untrusted_text).
+     */
+    public static boolean refused(int cp) {
+        return in(UnicodeTables.REFUSED, cp);
+    }
+
     /** RFC 5892 Appendix A.1 (ZWNJ) and A.2 (ZWJ). */
     private static boolean allowedByContextJ(int[] points, int at) {
         if (at > 0 && in(UnicodeTables.VIRAMA, points[at - 1])) {
