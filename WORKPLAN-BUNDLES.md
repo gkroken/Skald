@@ -3316,6 +3316,61 @@ below are marked passed by this planning document.
       content item's cache or image is only that RUN steps carry no registry credential.
       With the per-repository scope above, add an attack row: a RUN fetching
       `/v2/skald/cache/<other>/manifests/<key>` through the gateway gets 401.
+      **T9 plan (2026-10-21, unattended under the user's T8 rule: decide for end users,
+      research best practice, sign-off items wait).** One reviewed commit per step.
+
+      *(a) The runtime spec contract.* `spec/runtime-spec-v1.json` defines the only
+      spec_json a built version carries: `{"schema": "skald.runtime/v1", "port": 3838,
+      "user": "<uid>:<gid>", "language": "r"|"python", "base": "<catalog id>",
+      "image_digest": "sha256:<64 hex>"}`. Every value is the server's own record, derived
+      at success from the build row's provenance and the base catalog, never from the
+      uploaded manifest. Facts of the image (port, user) live in spec_json; policy
+      (memory and CPU limits) does not, so an operator can change it without rebuilding:
+      `skald.runtime.memory-limit` (default `2g`) and `skald.runtime.cpu-limit` (default
+      `1`) are applied when the ProxySpec is built. ContentSpecRepository consumes it:
+      `dockerUser` = user, the port mapping = port, memory and CPU limits from config,
+      labels naming content, version and build. **The spec fingerprint includes spec_json and
+      the limits**, so a changed record is a new ProxySpec. **Legacy `{}`** (a version an
+      admin made from an image, spine #1) keeps today's behaviour exactly: image, port 3838,
+      no user override and no limits. The runtime limits are a property of built versions,
+      whose image Skald made and knows. Any other schema, or a v1 document that fails the
+      schema, makes that version unresolvable: logged once, fail closed, never guessed at.
+      Tests: fingerprint, legacy, refused documents, every field reaching the ContainerSpec.
+
+      *(b) Success.* BuildRunner, after the log is complete, generates spec_json and calls
+      BuildCoordinator.succeed(): PUBLISHING -> SUCCEEDED and one new version, in one
+      transaction, NOT activated. Activation stays the explicit admin operation spine #1
+      has. build.status shows `image` once SUCCEEDED (already) and the version it became.
+      A PUBLISHING attempt whose worker died still ends INTERRUPTED with no version (no
+      takeover of a half-finished publication): failed or interrupted work never becomes a
+      version, let alone an active one.
+
+      *(c) Real runs.* A live probe like T7's builds the R and the Python fixture apps on the
+      real worker. It activates each version and opens it through `/c/<path>/` as a
+      signed-in user. It checks that the page loads and that the Shiny WebSocket carries a
+      round trip. `docker inspect` on the app container gives the user (`Config.User` =
+      the base's uid:gid), the memory and CPU limits, no binds or volumes, and the
+      platform's network. Identity: the app sees the authenticated user, and an
+      `X-SP-UserId` sent by the client does not reach it (the Python fixture echoes its
+      request headers).
+
+      *(d) Faults.* Each one separately:
+      - the version transaction fails (DB unavailable at succeed);
+      - the worker is killed between the complete log and succeed;
+      - succeed is replayed (exactly one version);
+      - a cancel requested during RUNNING lands after PUBLISHING (too_late, SUCCEEDED, one
+        version);
+      - a push or log failure (FAILED, no version);
+      - the response to activation is lost (re-activation is idempotent).
+
+      *(e) The old path.* The direct-image tests (spine #1, VersionResolvabilityTest) pass
+      unchanged, with no second override.
+
+      *Waiting for the user, not built:* the memory-swap limit on app containers (an
+      upstream engine change, the plan says ask first), and per-repository registry push
+      scope plus its gateway attack row (a registry token choice, likely a new dependency).
+      Until then, app containers have the memory limit and the engine's default swap
+      (as much again).
 
 - [ ] **T10. Live acceptance, rollback, GC and final independent regression review.**
       Depends all above. **Signed provenance (user, 2026-10-10):** the SLSA attestation T7
