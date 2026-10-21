@@ -29,11 +29,19 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     group_add:
       - "${DOCKER_GID:-999}"
+    # The object store's credentials, from the environment: Skald's startup check refuses a
+    # storage secret written in plain text into application.yml. These are minio's own dev
+    # credentials below; T8's bundle and build endpoints exist only with storage configured.
+    environment:
+      S3_ACCESS_KEY: skald
+      S3_SECRET_KEY: skaldskald
     depends_on:
       keycloak:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   keycloak:

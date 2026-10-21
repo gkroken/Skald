@@ -294,6 +294,85 @@ check "the retired version is no longer listed"    "$(lists_spec "$ALICE" "$SPEC
 check "the retired version cannot be opened"       "$(opens_spec "$ALICE" "$SPEC")"  403
 check "the active version can be opened"           "$(opens_spec "$ALICE" "$SPEC2")" 200
 
+echo "== T8: bundles and builds over the admin transport =="
+# Every T8 endpoint: bob (not an admin) is denied and a signed-out caller is sent to log in,
+# before alice's allowed call -- deny cases first. Then what a cross-site page could send
+# beside a real authorised upload: a form type and an untyped body are refused, and a
+# cross-origin preflight is not granted. Its own content item, deleted at the end.
+T8=$(curl -s -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' \
+  -d "{\"path\":\"smoke/t8-$RUN_ID\",\"title\":\"Smoke T8\",\"owner\":\"alice\",\"type\":\"shiny\"}" \
+  "$BASE/admin/content" | jfld id)
+check "alice creates a content item for T8" "$([ -n "$T8" ] && echo yes || echo no)" yes
+C="$BASE/admin/content/$T8"
+anon() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+jpost() { curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' "$@"; }
+check "bob may not create a bundle"                 "$(jpost -b "$BOB" -c "$BOB" -d '{}' "$C/bundles")" 403
+check "a signed-out caller is sent to log in (bundle create)" "$(jpost -d '{}' "$C/bundles")" 302
+check "a form-encoded bundle create is refused"     "$(jstatus -b "$ALICE" -c "$ALICE" -X POST -d 'a=b' "$C/bundles")" 415
+check "an untyped bundle create is refused"         "$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type:' --data-binary '{}' "$C/bundles")" 415
+preflight=$(curl -s -D - -o /dev/null -X OPTIONS -H 'Origin: http://evil.example' \
+  -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type' \
+  -b "$ALICE" "$C/bundles" | grep -ci '^access-control-allow-origin' || true)
+check "a cross-origin preflight is not granted"     "$preflight" 0
+BID=$(curl -s -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' -d '{}' "$C/bundles" | jfld id)
+check "alice creates a bundle"                      "$([ -n "$BID" ] && echo yes || echo no)" yes
+
+ARCHIVE=$(mktemp --suffix=.tar.gz)
+python3 -I - "$ARCHIVE" <<'PY'
+import pathlib, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(pathlib.Path("dev/fixtures/bundles").resolve()))
+import generate
+f = next(x for x in generate.FIXTURES if x["name"] == "pos-r-root")
+b = generate.Builder()
+f["build"](b)
+b.write(sys.argv[1])
+PY
+put() { curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'Content-Type: application/gzip' \
+  -H 'X-Skald-Upload: 1' --data-binary "@$ARCHIVE" "$@" "$C/bundles/$BID/content"; }
+check "bob may not upload"                          "$(put -b "$BOB" -c "$BOB")" 403
+check "a signed-out caller is sent to log in (upload)" "$(put)" 302
+check "an upload without X-Skald-Upload is refused" \
+  "$(jstatus -b "$ALICE" -c "$ALICE" -X PUT -H 'Content-Type: application/gzip' --data-binary "@$ARCHIVE" "$C/bundles/$BID/content")" 400
+check "alice uploads the bundle"                    "$(put -b "$ALICE" -c "$ALICE")" 200
+state=""
+for _ in $(seq 1 60); do
+  state=$(curl -s -b "$ALICE" -c "$ALICE" "$C/bundles/$BID" | jfld state)
+  [ "$state" = VALIDATED ] || [ "$state" = REJECTED ] && break
+  sleep 1
+done
+check "the bundle is validated"                     "$state" VALIDATED
+check "bob may not read the bundle"                 "$(anon -b "$BOB" -c "$BOB" "$C/bundles/$BID")" 403
+check "a signed-out caller is sent to log in (bundle status)" "$(anon "$C/bundles/$BID")" 302
+rm -f "$ARCHIVE"
+
+body="{\"bundleId\":\"$BID\",\"idempotencyKey\":\"smoke-$RUN_ID\"}"
+check "bob may not create a build"                  "$(jpost -b "$BOB" -c "$BOB" -d "$body" "$C/builds")" 403
+check "a signed-out caller is sent to log in (build create)" "$(jpost -d "$body" "$C/builds")" 302
+check "a form-encoded build create is refused"      "$(jstatus -b "$ALICE" -c "$ALICE" -X POST -d 'a=b' "$C/builds")" 415
+BUILD=$(curl -s -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type: application/json' -d "$body" "$C/builds" | jfld id)
+check "alice creates a build (202, queued)"         "$([ -n "$BUILD" ] && echo yes || echo no)" yes
+for what in "list:$C/builds" "status:$C/builds/$BUILD" "logs:$C/builds/$BUILD/logs"; do
+  name=${what%%:*}; url=${what#*:}
+  check "bob may not read the build $name"          "$(anon -b "$BOB" -c "$BOB" "$url")" 403
+  check "a signed-out caller is sent to log in (build $name)" "$(anon "$url")" 302
+  check "alice reads the build $name"               "$(anon -b "$ALICE" -c "$ALICE" "$url")" 200
+done
+stream() { curl -s -o /dev/null -w '%{http_code}' --max-time 3 -H 'Accept: text/event-stream' "$@" "$C/builds/$BUILD/logs/stream" || true; }
+check "bob may not open the log stream"             "$(anon -b "$BOB" -c "$BOB" "$C/builds/$BUILD/logs/stream")" 403
+# As an EventSource asks (Accept: text/event-stream) the denial is upstream's 403 that cannot
+# be rendered in that type, so 406; what matters is that it is never a stream.
+check "bob's EventSource is refused, never a stream" "$(s=$(stream -b "$BOB" -c "$BOB"); [ "$s" = 403 ] || [ "$s" = 406 ] && echo refused || echo "$s")" refused
+check "a signed-out caller is sent to log in (log stream)" "$(stream)" 302
+check "alice opens the log stream"                  "$(stream -b "$ALICE" -c "$ALICE")" 200
+check "another content item's build is not found"   "$(anon -b "$ALICE" -c "$ALICE" "$BASE/admin/content/00000000-0000-4000-8000-000000000001/builds/$BUILD")" 404
+check "bob may not cancel the build"                "$(jpost -b "$BOB" -c "$BOB" -d '{}' "$C/builds/$BUILD/cancel")" 403
+check "a signed-out caller is sent to log in (cancel)" "$(jpost -d '{}' "$C/builds/$BUILD/cancel")" 302
+check "an untyped cancel is refused"                "$(jstatus -b "$ALICE" -c "$ALICE" -X POST -H 'Content-Type:' --data-binary '{}' "$C/builds/$BUILD/cancel")" 415
+check "the build is still queued after the refusals" "$(curl -s -b "$ALICE" -c "$ALICE" "$C/builds/$BUILD" | jfld state)" QUEUED
+check "alice cancels the build"                     "$(jpost -b "$ALICE" -c "$ALICE" -d '{}' "$C/builds/$BUILD/cancel")" 202
+check "alice deletes the T8 content item"           "$(jstatus -b "$ALICE" -c "$ALICE" -X DELETE "$C")" 200
+
 check "alice deletes the content"                  "$(jstatus -b "$ALICE" -c "$ALICE" -X DELETE "$BASE/admin/content/$CID")" 200
 check "the deleted app is gone from the index"     "$(lists_spec "$ALICE" "$SPEC2")" no
 check "its path is GONE, not free to reuse" \
