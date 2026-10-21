@@ -36,7 +36,9 @@ import java.util.List;
  * {@code " | "}, so nothing a build prints can pass for one. The text is the build's, so
  * every code point that changes how a terminal or a reader sees the rest -- Cc but tab (ESC
  * starts a terminal sequence), Cf, Zl, Zp, the default-ignorables, and a lone surrogate --
- * is written as {@code \x{HEX}} (shapes.untrusted_text).
+ * is written as {@code \x{HEX}} (shapes.untrusted_text). So is a backslash, and the final
+ * {@code ]} of a line whose own text ends in {@code " [cut]"}: then neither an escape nor the
+ * cut mark can be printed by a build, and the view is unambiguous.
  */
 final class LogText {
 
@@ -57,7 +59,12 @@ final class LogText {
                         .append(r.get("gap").path("bytes").asLong()).append(" bytes) dropped here; head and tail kept -----\n");
             } else {
                 String n = Long.toString(r.get("n").asLong());
-                out.append(" ".repeat(width - n.length())).append(n).append(" | ").append(neutralise(r.get("t").asText()));
+                String text = neutralise(r.get("t").asText());
+                if (text.endsWith(" [cut]")) {
+                    // The build's own text, not the mark: one escape keeps the two apart (fbe1487 N1).
+                    text = text.substring(0, text.length() - 1) + "\\x{5D}";
+                }
+                out.append(" ".repeat(width - n.length())).append(n).append(" | ").append(text);
                 if (r.path("cut").asBoolean(false)) {
                     out.append(" [cut]");
                 }
@@ -79,8 +86,9 @@ final class LogText {
         text.codePoints().forEach(cp -> {
             int type = Character.getType(cp);
             // refused() is Cf, Zl, Zp and the default-ignorables (publisher.names).
+            // A backslash too, so that "\x{1B}" printed by the build is not an escape (fbe1487 N1).
             boolean hidden = (type == Character.CONTROL && cp != '\t') || type == Character.SURROGATE
-                    || InvisibleCharacters.refused(cp);
+                    || InvisibleCharacters.refused(cp) || cp == '\\';
             if (hidden) {
                 out.append("\\x{").append(Integer.toHexString(cp).toUpperCase(java.util.Locale.ROOT)).append('}');
             } else {

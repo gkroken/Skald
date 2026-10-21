@@ -154,7 +154,7 @@
     },
     "untrusted_text": {
       "json": "Responses are written with every non-ASCII character escaped, so the bytes on the wire are ASCII: a bidi override or a C1 control arrives as \\uXXXX, never raw.",
-      "text": "The text view replaces Cc (except tab), Cf, Zl, Zp and default-ignorable code points (publisher.names.InvisibleCharacters) with \\x{HEX}.",
+      "text": "The text view replaces Cc (except tab), Cf, Zl, Zp and default-ignorable code points (publisher.names.InvisibleCharacters) with \\x{HEX}. So that the view is unambiguous, a backslash is written \\x{5C}, and a line whose own text ends in ' [cut]' has that final ']' written \\x{5D}: neither an escape nor the cut mark can be printed by a build.",
       "log_response_headers": {
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox"
@@ -221,14 +221,16 @@
       },
       "build.list": {
         "query": {"limit": "default 50, max 200", "state": "repeatable", "before": "a buildId from a previous page's next"},
+        "query_rule": "only the parameters named in query, limit and before at most once; anything else is 400 BAD_REQUEST",
         "response": ["items", "next"],
         "errors": ["BAD_REQUEST", "INVALID_ID", "CONTENT_NOT_FOUND"]
       },
       "build.logs.replay": {
-        "query": {"after": "cursor", "limit": "records; ndjson default 1000, max 10000; text unlimited"},
+        "query": {"after": "cursor", "limit": "records, 1-10000; ndjson default 1000; text: all unless given"},
+        "query_rule": "only the parameters named in query, each at most once; anything else is 400 BAD_REQUEST",
         "default_media_type": "text/plain",
         "response_headers": ["X-Skald-Log-State", "X-Skald-Build-State", "X-Skald-Next-Cursor"],
-        "errors": ["INVALID_ID", "CONTENT_NOT_FOUND", "BUILD_NOT_FOUND", "CURSOR_INVALID", "LOG_EXPIRED", "STORAGE_UNAVAILABLE"]
+        "errors": ["BAD_REQUEST", "INVALID_ID", "CONTENT_NOT_FOUND", "BUILD_NOT_FOUND", "CURSOR_INVALID", "LOG_EXPIRED", "STORAGE_UNAVAILABLE"]
       },
       "build.logs.stream": {
         "resume": ["Last-Event-ID", "after"],

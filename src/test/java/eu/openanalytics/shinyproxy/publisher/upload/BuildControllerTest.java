@@ -944,7 +944,10 @@ public class BuildControllerTest {
             line(10, "esc \u001b[31mred\u001b[0m bidi \u202e c1 \u0085 zwj a\u200db tab\there caf\u00e9"),
             "{\"n\":11,\"t\":\"lone \\ud800 surrogate\",\"cut\":true}",
             Map.of("cut", Map.of("lines", 3, "bytes", 40)),
-            line(15, "after the gap")));
+            line(15, "after the gap"),
+            line(16, "printed \\x{1B} and \\ alone"),
+            line(17, "ends like the mark [cut]"),
+            Map.of("n", 18, "t", "and so does this cut one [cut]", "cut", true)));
         logs.publishIndex(cb[0], cb[1], 1);
         Reply r = call(admin, logs(cb[0], cb[1], "", null));
         assertEquals(200, r.status());
@@ -955,7 +958,11 @@ public class BuildControllerTest {
             + "10 | esc \\x{1B}[31mred\\x{1B}[0m bidi \\x{202E} c1 \\x{85} zwj a\\x{200D}b tab\there caf\u00e9\n"
             + "11 | lone \\x{D800} surrogate [cut]\n"
             + "----- skald: 3 lines (40 bytes) dropped here; head and tail kept -----\n"
-            + "15 | after the gap\n", r.text());
+            + "15 | after the gap\n"
+            // What the build printed can never read as an escape or as the cut mark (fbe1487 N1).
+            + "16 | printed \\x{5C}x{1B} and \\x{5C} alone\n"
+            + "17 | ends like the mark [cut\\x{5D}\n"
+            + "18 | and so does this cut one [cut\\x{5D} [cut]\n", r.text());
         // The same records as ndjson are ASCII on the wire.
         Reply nd = call(admin, logs(cb[0], cb[1], "", "application/x-ndjson"));
         assertFalse(nd.text().chars().anyMatch(ch -> ch > 0x7e || (ch < 0x20 && ch != '\n')), nd.text());
