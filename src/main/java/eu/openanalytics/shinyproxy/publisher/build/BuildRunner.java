@@ -140,8 +140,10 @@ public final class BuildRunner {
      * PUBLISHING -> SUCCEEDED and the version, retried while the lease holds when the database
      * is the problem (T9 (d)): succeed() is fenced and exactly once, so another try is safe.
      * Past the lease the attempt is left to the reaper, which makes it INTERRUPTED -- never
-     * FAILED, which would need the database, and never a version. A fence (the attempt is no
-     * longer ours) propagates and is the caller's FENCED.
+     * FAILED, which would need the database, and never a version. Only a failure that may heal
+     * ({@link #mayHeal}) is retried; a database that answers and refuses ends the attempt FAILED
+     * VERSION_TX at once. A fence (the attempt is no longer ours) propagates and is the caller's
+     * FENCED, unless it is our own earlier success.
      */
     private Result succeed(Lease lease, String runtime, java.util.function.BooleanSupplier leaseGone) {
         long pause = 250;
@@ -151,24 +153,77 @@ public final class BuildRunner {
                 return Result.SUCCEEDED;
             } catch (Fenced fenced) {
                 // A retry after a reply that was lost: the first try may have committed, and
-                // then this one is fenced by our own success (exactly once). Ask, don't guess.
-                if (coordinator.succeededUnder(lease)) {
+                // then this one is fenced by our own success (exactly once). Ask, don't guess
+                // -- and ask again if the database is still unwell (2fb308e N1).
+                Boolean ours = askWhileLeased(() -> coordinator.succeededUnder(lease), leaseGone);
+                if (Boolean.TRUE.equals(ours)) {
                     return Result.SUCCEEDED;
                 }
+                if (ours == null) {
+                    return Result.INTERRUPTED;
+                }
                 throw fenced;
-            } catch (org.springframework.dao.DataAccessException
-                     | org.springframework.transaction.TransactionException unavailable) {
+            } catch (RuntimeException e) {
+                if (!mayHeal(e)) {
+                    // The database answered, and the answer was no (a constraint, a grammar
+                    // error after a bad migration): no retry can change it, and the publisher
+                    // should hear it now, not as a timeout 20 minutes later (2fb308e-F1). The
+                    // T6 outcome: PUBLISHING -> FAILED, "the version transaction failed".
+                    try {
+                        coordinator.fail(lease, "VERSION_TX", detail(e.getMessage()));
+                    } catch (Fenced | org.springframework.dao.DataAccessException unrecorded) {
+                        return Result.INTERRUPTED;
+                    }
+                    return Result.FAILED;
+                }
                 if (leaseGone.getAsBoolean()) {
                     return Result.INTERRUPTED;
                 }
-                try {
-                    Thread.sleep(pause);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
+                if (!pause(pause)) {
                     return Result.INTERRUPTED;
                 }
                 pause = Math.min(pause * 2, Math.max(250, settings.renewEvery().toMillis()));
             }
+        }
+    }
+
+    /**
+     * Whether a failure of the version transaction can heal by itself: the database could
+     * not be reached, a connection or a transaction could not be had, or it named the failure
+     * transient or recoverable. Not split on Transient/NonTransient alone:
+     * DataAccessResourceFailureException, the unreachable database, is a NonTransient one.
+     */
+    static boolean mayHeal(Throwable e) {
+        return e instanceof org.springframework.dao.DataAccessResourceFailureException
+                || e instanceof org.springframework.dao.TransientDataAccessException
+                || e instanceof org.springframework.dao.RecoverableDataAccessException
+                || e instanceof org.springframework.transaction.CannotCreateTransactionException
+                || e instanceof org.springframework.transaction.TransactionSystemException;
+    }
+
+    /** {@code question}'s answer, retried while it may heal and the lease holds; null when the lease went first. */
+    private Boolean askWhileLeased(java.util.function.Supplier<Boolean> question,
+                                   java.util.function.BooleanSupplier leaseGone) {
+        long pause = 250;
+        while (true) {
+            try {
+                return question.get();
+            } catch (RuntimeException e) {
+                if (!mayHeal(e) || leaseGone.getAsBoolean() || !pause(pause)) {
+                    return null;
+                }
+                pause = Math.min(pause * 2, Math.max(250, settings.renewEvery().toMillis()));
+            }
+        }
+    }
+
+    private static boolean pause(long millis) {
+        try {
+            Thread.sleep(millis);
+            return true;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
         }
     }
 

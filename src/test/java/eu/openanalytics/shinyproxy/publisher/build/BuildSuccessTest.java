@@ -170,6 +170,74 @@ public class BuildSuccessTest {
         assertEquals(1, versions(build));
     }
 
+    /**
+     * A database that answers and refuses is not unavailable (2fb308e-F1): no retry changes a
+     * constraint's answer, so the attempt is FAILED VERSION_TX at once, not a timeout later.
+     */
+    @Test
+    public void aRefusalAtSuccessFailsTheAttemptAtOnce() {
+        UUID build = queued();
+        BuildCoordinator coordinator = new BuildCoordinator(jdbc, SHORT);
+        AtomicInteger tries = new AtomicInteger();
+        BuildRunner runner = new BuildRunner(coordinator, SHORT, VERIFIED, (lease, runtime) -> {
+            tries.incrementAndGet();
+            throw new org.springframework.dao.DataIntegrityViolationException("injected: a constraint refused it");
+        });
+        long t0 = System.nanoTime();
+        assertEquals(BuildRunner.Result.FAILED, runner.runOnce("n1", BUILT));
+        assertTrue(System.nanoTime() - t0 < Duration.ofSeconds(10).toNanos(), "promptly, not at the deadline");
+        assertEquals(1, tries.get());
+        assertEquals("FAILED", state(build));
+        assertEquals("VERSION_TX", jdbc.queryForObject("SELECT error_code FROM skald.build WHERE id = ?",
+            String.class, build));
+        assertEquals(0, versions(build));
+    }
+
+    /** What may heal, and what may not: the classes the retry is limited to. */
+    @Test
+    public void onlyAFailureThatMayHealIsRetried() {
+        assertTrue(BuildRunner.mayHeal(new DataAccessResourceFailureException("down")));
+        assertTrue(BuildRunner.mayHeal(new org.springframework.jdbc.CannotGetJdbcConnectionException("no connection")));
+        assertTrue(BuildRunner.mayHeal(new org.springframework.dao.TransientDataAccessResourceException("blip")));
+        assertTrue(BuildRunner.mayHeal(new org.springframework.dao.RecoverableDataAccessException("recover")));
+        assertTrue(BuildRunner.mayHeal(new org.springframework.dao.PessimisticLockingFailureException("deadlock")));
+        assertTrue(BuildRunner.mayHeal(new org.springframework.transaction.CannotCreateTransactionException("no tx")));
+        assertTrue(BuildRunner.mayHeal(new org.springframework.transaction.TransactionSystemException("commit failed")));
+        assertEquals(false, BuildRunner.mayHeal(new org.springframework.dao.DataIntegrityViolationException("no")));
+        assertEquals(false, BuildRunner.mayHeal(new org.springframework.jdbc.BadSqlGrammarException("x", "SELECT",
+            new java.sql.SQLException("bad"))));
+        assertEquals(false, BuildRunner.mayHeal(new IllegalStateException("the ledger holds no image")));
+    }
+
+    /** The lost-reply check is asked again while the database is still unwell (2fb308e N1). */
+    @Test
+    public void theLostReplyCheckIsRetriedToo() {
+        UUID build = queued();
+        AtomicInteger checks = new AtomicInteger();
+        // The coordinator's own query for "is this lease's attempt SUCCEEDED" meets the same
+        // unwell database once, as the lost reply did.
+        JdbcTemplate flaky = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override
+            public <T> T queryForObject(String sql, Class<T> type, Object... args) {
+                if (sql.contains("state = 'SUCCEEDED'") && checks.incrementAndGet() == 1) {
+                    throw new DataAccessResourceFailureException("injected: the database is still unwell");
+                }
+                return super.queryForObject(sql, type, args);
+            }
+        };
+        BuildCoordinator coordinator = new BuildCoordinator(flaky, ONE);
+        AtomicInteger tries = new AtomicInteger();
+        BuildRunner runner = new BuildRunner(coordinator, ONE, VERIFIED, (lease, runtime) -> {
+            coordinator.succeed(lease, runtime);
+            if (tries.incrementAndGet() == 1) {
+                throw new DataAccessResourceFailureException("injected: the commit's reply was lost");
+            }
+        });
+        assertEquals(BuildRunner.Result.SUCCEEDED, runner.runOnce("n1", BUILT));
+        assertEquals(2, checks.get(), "asked again after the first check failed");
+        assertEquals(1, versions(build));
+    }
+
     /** Only the lease decides: a cancel requested during RUNNING does not abandon the retries. */
     @Test
     public void aCancelRequestDoesNotAbandonTheRetriesOfASuccess() {
